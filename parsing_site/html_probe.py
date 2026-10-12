@@ -115,6 +115,7 @@ def extract_scene_from_html(html: str, tracking: TrackingConfig) -> dict[str, ob
         map_view,
         pane_x,
         pane_y,
+        displayed_objects=_daily_objects(soup),
     )
     page_statics = _collect_markers(
         soup,
@@ -164,6 +165,7 @@ def _collect_markers(
     map_view: MapView | None,
     pane_x: float,
     pane_y: float,
+    displayed_objects: list[tuple[int, str]] | None = None,
 ) -> list[dict[str, object]]:
     """Собирает подходящие маркеры и переводит их координаты в формат сцены."""
     if not selector.strip():
@@ -181,10 +183,22 @@ def _collect_markers(
             geo = container_to_latlng(x, y, map_view)
             if geo:
                 lat, lng = round(geo[0], 6), round(geo[1], 6)
+        displayed_object = (
+            displayed_objects[index - 1]
+            if displayed_objects and index <= len(displayed_objects)
+            else None
+        )
+        displayed_number = displayed_object[0] if displayed_object else None
+        object_type = displayed_object[1] if displayed_object else ""
         items.append(
             {
-                "index": index,
-                "name": _marker_name(el, index, prefix),
+                "index": displayed_number or index,
+                "name": (
+                    object_type
+                    if displayed_number is not None
+                    else _marker_name(el, index, prefix)
+                ),
+                "object_type": object_type,
                 "color": "",
                 "x": round(x, 2),
                 "y": round(y, 2),
@@ -196,6 +210,54 @@ def _collect_markers(
             }
         )
     return items
+
+
+def _daily_objects(soup: BeautifulSoup) -> list[tuple[int, str]]:
+    """Читает суточные номера и типы сопровождаемых объектов из карточек."""
+    objects: list[tuple[int, str]] = []
+    for element in soup.select('[class*="_operatorNumber_"]'):
+        match = re.fullmatch(r"№?\s*(\d+)", element.get_text(" ", strip=True))
+        if match:
+            number = int(match.group(1))
+            card = _incident_card(element)
+            object_type = _object_type(card.get_text(" ", strip=True) if card else "")
+            if number > 0 and all(item[0] != number for item in objects):
+                objects.append((number, object_type))
+    if objects:
+        return objects
+    for card in soup.select('[class*="_card_"][class*="_isActive_"]'):
+        match = re.search(
+            r"(?:БПЛА|МВШ|ракет\w*|объект\w*)\s*№\s*(\d+)",
+            card.get_text(" ", strip=True),
+            re.IGNORECASE,
+        )
+        if match:
+            number = int(match.group(1))
+            if number > 0 and all(item[0] != number for item in objects):
+                objects.append((number, _object_type(card.get_text(" ", strip=True))))
+    return objects
+
+
+def _incident_card(element: object) -> object | None:
+    """Находит ближайшую карточку инцидента для номера оператора."""
+    parent = getattr(element, "parent", None)
+    while parent is not None:
+        classes = [str(value) for value in (parent.get("class") or [])]
+        if any("_card_" in value for value in classes):
+            return parent
+        parent = getattr(parent, "parent", None)
+    return None
+
+
+def _object_type(text: str) -> str:
+    """Нормализует тип объекта из заголовка карточки сайта."""
+    if re.search(r"БПЛА|aircraft-drone", text, re.IGNORECASE):
+        return "БПЛА"
+    if re.search(r"МВШ", text, re.IGNORECASE):
+        return "МВШ"
+    if re.search(r"ракет|missile|rocket", text, re.IGNORECASE):
+        return "Ракета"
+    return "Объект"
 
 
 def _marker_name(el: object, index: int, prefix: str) -> str:

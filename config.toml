@@ -38,8 +38,10 @@ lock_scale = false
 threshold = 125.0
 warning_ratio = 1.4
 warning_distance = 150.0
+blue_distance = 350.0
 alert_color = "#9b1c1c"
 warning_color = "#d4a017"
+blue_color = "#2878b8"
 
 # Статичные точки вручную.
 # latlng: укажите lat/lng (пороги threshold в километрах).

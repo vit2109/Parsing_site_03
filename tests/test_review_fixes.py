@@ -53,6 +53,23 @@ class ReviewFixesTest(unittest.TestCase):
         self.assertFalse(settings.sound_enabled)
         self.assertFalse(settings.to_dict()["sound_enabled"])
 
+    def test_blue_zone_settings_round_trip_and_keep_zone_order(self) -> None:
+        """Расстояние и цвет синей зоны сохраняются, пороги не пересекаются."""
+        settings = from_dict(
+            {
+                "threshold": 50,
+                "warning_distance": 150,
+                "blue_distance": 275,
+                "blue_color": "#1267ab",
+            }
+        )
+
+        self.assertEqual(settings.blue_distance, 275)
+        self.assertEqual(settings.blue_color, "#1267ab")
+        tracking = settings.to_app_config().tracking
+        self.assertEqual(tracking.blue_limit, 275)
+        self.assertEqual(tracking.blue_color, "#1267ab")
+
 
 def _snapshot() -> TrackingSnapshot:
     """Создаёт минимальный снимок с одной строкой для файловой выгрузки."""

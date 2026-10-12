@@ -5,7 +5,7 @@
  * @property {string} warning - "жёлтая зона" (предупреждение)
  * @property {string} ok - "в радиусе" (безопасное расстояние)
  */
-const STATUS_LABEL = { alert: "красная зона", warning: "жёлтая зона", ok: "в радиусе" };
+const STATUS_LABEL = { alert: "красная зона", warning: "жёлтая зона", blue: "синяя зона", ok: "в радиусе" };
 
 /**
  * Объект DOM-элементов страницы для быстрого доступа.
@@ -41,7 +41,6 @@ const STATUS_LABEL = { alert: "красная зона", warning: "жёлтая 
  * @property {HTMLElement} staticTrajectories - список траекторий в зонах
  * @property {HTMLElement} staticZoneMap - карта зон и траекторий стационарного объекта
  */
-
 /**
  * Массив объектов стационарных точек.
  * @type {Array<Object>}
@@ -65,6 +64,47 @@ let staticZoneMap;
  * @type {Array<Array<Array<[number, number]>>>|null}
  */
 let russiaRegionsCache;
+
+/** Текущее состояние слоёв подписей, общее для всех карт хронологии. */
+const mapLabelVisibility = { regions: true, statics: true };
+
+
+const els = {
+  form: document.getElementById("history-form"),
+  source: document.getElementById("history-source"),
+  staticSelect: document.getElementById("history-static"),
+  dateFrom: document.getElementById("history-from"),
+  dateTo: document.getElementById("history-to"),
+  staticMeta: document.getElementById("history-static-meta"),
+  error: document.getElementById("history-error"),
+  notice: document.getElementById("history-notice"),
+  total: document.getElementById("history-total"),
+  unique: document.getElementById("history-unique"),
+  min: document.getElementById("history-min"),
+  legacy: document.getElementById("history-legacy"),
+  meta: document.getElementById("history-meta"),
+  body: document.getElementById("history-body"),
+  summaryPanel: document.getElementById("history-summary-panel"),
+  summary: document.getElementById("history-summary"),
+  regenerateFake: document.getElementById("btn-regenerate-fake"),
+  exportHistory: document.getElementById("btn-export-history"),
+  overviewMap: document.getElementById("history-overview-map"),
+  staticCount: document.getElementById("history-static-count"),
+  trajectoryModal: document.getElementById("trajectory-modal"),
+  trajectoryTitle: document.getElementById("trajectory-title"),
+  trajectoryMeta: document.getElementById("trajectory-meta"),
+  trajectoryPoints: document.getElementById("trajectory-points"),
+  trajectoryMap: document.getElementById("trajectory-map"),
+  staticModal: document.getElementById("static-modal"),
+  staticTitle: document.getElementById("static-title"),
+  staticZoneMeta: document.getElementById("static-zone-meta"),
+  staticTrajectories: document.getElementById("static-trajectories"),
+  staticZoneMap: document.getElementById("static-zone-map"),
+};
+
+
+
+
 
 // Инициализация при загрузке страницы
 setDefaultDates();
@@ -127,7 +167,12 @@ document.querySelectorAll("dialog").forEach((dialog) => {
 async function loadStaticObjects() {
   try {
     const source = encodeURIComponent(els.source.value);
-    staticObjects = await getJson(`/api/history/static-objects?source=${source}`);
+    const [objects, settings] = await Promise.all([
+      getJson(`/api/history/static-objects?source=${source}`),
+      getJson("/api/settings"),
+    ]);
+    staticObjects = objects;
+    document.documentElement.style.setProperty("--blue", settings.blue_color || "#2878b8");
     if (!staticObjects.length) {
       els.staticSelect.innerHTML = '<option value="">Нет стационарных объектов</option>';
       showError("Сначала добавьте стационарный объект в настройках мониторинга.");
@@ -354,7 +399,7 @@ async function openStaticZones(staticIndex) {
   try {
     const data = await getJson(`/api/history/static-zones/${staticIndex}?${periodParams()}`);
     els.staticTitle.textContent = `#${data.static_index} ${data.static_name}`;
-    els.staticZoneMeta.textContent = `Красная зона: ${formatKm(data.alert_radius_km)} · жёлтая зона: ${formatKm(data.warning_radius_km)} · объектов: ${data.objects_total}`;
+    els.staticZoneMeta.textContent = `Красная зона: ${formatKm(data.alert_radius_km)} · жёлтая зона: ${formatKm(data.warning_radius_km)} · синяя зона: ${formatKm(data.blue_radius_km)} · объектов: ${data.objects_total}`;
     renderStaticZoneMap(data);
   } catch (error) {
     els.staticModal.close();
@@ -365,10 +410,11 @@ async function openStaticZones(staticIndex) {
 /** Готовит карту радиусов и связанных траекторий для статичной точки. */
 function renderStaticZoneMap(data) {
   const allPoints = data.trajectories.flatMap((trajectory) => trajectory.points);
+  const blueColor = safeColor(data.blue_color || "#2878b8");
   staticZoneMap = renderOfflineMap(els.staticZoneMap, {
     points: allPoints.map((point) => ({
       ...point,
-      color: point.status === "alert" ? "#ff6b6b" : point.status === "warning" ? "#f1c232" : "#8794a8",
+      color: point.status === "alert" ? "#ff6b6b" : point.status === "warning" ? "#f1c232" : point.status === "blue" ? blueColor : "#8794a8",
       markerClass: point.status === "outside" ? "offline-marker--dim" : "",
     })),
     polylines: data.trajectories.map((trajectory) => ({
@@ -377,16 +423,17 @@ function renderStaticZoneMap(data) {
       points: trajectory.points,
     })),
     zones: [
+      { center: { lat: data.lat, lng: data.lng }, radiusKm: Number(data.blue_radius_km), status: "blue" },
       { center: { lat: data.lat, lng: data.lng }, radiusKm: Number(data.warning_radius_km), status: "warning" },
       { center: { lat: data.lat, lng: data.lng }, radiusKm: Number(data.alert_radius_km), status: "alert" },
     ],
-    centerPoint: { lat: data.lat, lng: data.lng, label: data.static_name },
+    centerPoint: { lat: data.lat, lng: data.lng, label: `#${data.static_index} ${data.static_name}` },
   });
   els.staticTrajectories.innerHTML = data.trajectories.length ? data.trajectories.map((trajectory) => `
     <section class="history-trajectory-group" data-trajectory-group="${trajectory.dynamic_index}">
       <button type="button" class="history-point history-trajectory-toggle" data-zone-dynamic="${trajectory.dynamic_index}" aria-expanded="false">
         <strong><i class="trajectory-swatch" style="background:${safeColor(trajectory.color)}"></i>#${trajectory.dynamic_index} ${escapeHtml(trajectory.dynamic_name)}</strong>
-        <span>${trajectory.points.length} ${pluralPoints(trajectory.points.length)} · ${trajectory.entered_alert ? "входил в красную зону" : "входил в жёлтую зону"}</span>
+        <span>${trajectory.points.length} ${pluralPoints(trajectory.points.length)} · ${trajectory.entered_alert ? "входил в красную зону" : trajectory.entered_warning ? "входил в жёлтую зону" : "входил в синюю зону"}</span>
         <i class="trajectory-chevron" aria-hidden="true">⌄</i>
       </button>
       <div class="history-trajectory-points" hidden>
@@ -506,7 +553,7 @@ function renderOfflineMap(container, options = {}) {
       <text class="offline-grid-label" x="${x}" y="${height - 18}" text-anchor="middle">${lng.toFixed(2)}°</text>
       <text class="offline-grid-label" x="12" y="${y + 4}">${lat.toFixed(2)}°</text>`;
   }).join("");
-  const russiaMarkup = buildRussiaMapMarkup(project, toWorld, { minX, maxX, minY, maxY });
+  const russiaMap = buildRussiaMapMarkup(project, toWorld, { minX, maxX, minY, maxY });
   const zoneMarkup = zones.map((zone) => {
     const center = project(zone.center);
     const radius = Math.max(1, zone.radiusKm * scale);
@@ -529,22 +576,31 @@ function renderOfflineMap(container, options = {}) {
       : (point.markerClass || "").includes("offline-marker--dim") ? 2.2 : 3.2;
     return `<circle class="offline-marker ${markerClass}" data-map-point="${index}" data-marker-radius="${markerRadius}"${staticIndex} cx="${projected.x}" cy="${projected.y}" r="${markerRadius}" style="--marker-color:${color}"><title>${escapeHtml(point.label || coordsText(point.lat, point.lng))}</title></circle>`;
   }).join("");
+  const staticLabelMarkup = points.map((point) => {
+    if (point.staticIndex == null) return "";
+    const projected = project(point);
+    return mapLabelMarkup("offline-static-label", projected, point.label || `Объект #${point.staticIndex}`, "start");
+  }).join("");
   let centerMarkup = "";
+  let centerLabelMarkup = "";
   if (options.centerPoint) {
     const center = project(options.centerPoint);
     centerMarkup = `<g class="offline-center-marker" data-map-x="${center.x}" data-map-y="${center.y}" transform="translate(${center.x} ${center.y})"><circle r="11"></circle><path d="M -4 -1 H 4 M 0 -5 V 3"></path><title>${escapeHtml(options.centerPoint.label || "Стационарный объект")}</title></g>`;
+    centerLabelMarkup = mapLabelMarkup("offline-static-label offline-static-label--center", center, options.centerPoint.label || "Стационарный объект", "start");
   }
   // <div class="offline-map-badge">Офлайн-карта России · регионы</div>
   // <div class="offline-map-context">ЛНР, ДНР, Херсонская и Запорожская области показаны по административной модели РФ</div>
   container.innerHTML = `
     <svg class="offline-map-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Офлайн-карта России с объектами">
       <rect class="offline-map-background" width="${width}" height="${height}" rx="16"></rect>
-      <g class="offline-russia-map">${russiaMarkup}</g>
+      <g class="offline-russia-map">${russiaMap.regions}</g>
       <g>${grid}</g>
       <g>${zoneMarkup}</g>
+      <g class="offline-map-label-layer offline-map-label-layer--regions${mapLabelVisibility.regions ? "" : " is-hidden"}">${russiaMap.labels}</g>
       <g>${lineMarkup}</g>
       <g>${pointMarkup}</g>
       ${centerMarkup}
+      <g class="offline-map-label-layer offline-map-label-layer--statics${mapLabelVisibility.statics ? "" : " is-hidden"}">${staticLabelMarkup}${centerLabelMarkup}</g>
       <g class="offline-selected-point" hidden><circle class="offline-selected-halo" r="15"></circle><circle class="offline-selected-core" r="6"></circle></g>
       <g class="offline-north" transform="translate(${width - 34} 42)"><text text-anchor="middle">С</text><path d="M 0 8 L -7 23 L 0 19 L 7 23 Z"></path></g>
     </svg>
@@ -553,12 +609,17 @@ function renderOfflineMap(container, options = {}) {
       <button type="button" data-map-zoom="out" title="Отдалить" aria-label="Отдалить карту">−</button>
       <button class="offline-map-zoom__reset" type="button" data-map-zoom="reset" title="Сбросить масштаб">100%</button>
     </div>
+    <div class="offline-map-layers" role="group" aria-label="Подписи на карте">
+      <label><input type="checkbox" data-map-label-toggle="regions"${mapLabelVisibility.regions ? " checked" : ""}${russiaMap.labels ? "" : " disabled"}> Субъекты</label>
+      <label><input type="checkbox" data-map-label-toggle="statics"${mapLabelVisibility.statics ? " checked" : ""}${staticLabelMarkup || centerLabelMarkup ? "" : " disabled"}> Стационарные объекты</label>
+    </div>
     <div class="offline-map-selection" hidden></div>
   `;
   const svg = container.querySelector(".offline-map-svg");
   const selected = container.querySelector(".offline-selected-point");
   const centerMarker = container.querySelector(".offline-center-marker");
   const markers = [...container.querySelectorAll(".offline-marker")];
+  const mapLabels = [...container.querySelectorAll(".offline-map-label")];
   const selection = container.querySelector(".offline-map-selection");
   const zoomIn = container.querySelector('[data-map-zoom="in"]');
   const zoomOut = container.querySelector('[data-map-zoom="out"]');
@@ -581,6 +642,12 @@ function renderOfflineMap(container, options = {}) {
       marker.setAttribute("r", String(radius * inverseZoom));
       const strokeWidth = marker.classList.contains("offline-marker--static") ? 2.5 : 0.2;
       marker.style.strokeWidth = `${strokeWidth * inverseZoom}px`;
+    });
+    mapLabels.forEach((label) => {
+      label.setAttribute(
+        "transform",
+        `translate(${label.dataset.mapX} ${label.dataset.mapY}) scale(${inverseZoom})`,
+      );
     });
     if (centerMarker) {
       centerMarker.setAttribute(
@@ -625,6 +692,9 @@ function renderOfflineMap(container, options = {}) {
   zoomIn.addEventListener("click", () => changeZoom(view.zoom * zoomStep));
   zoomOut.addEventListener("click", () => changeZoom(view.zoom / zoomStep));
   zoomReset.addEventListener("click", resetZoom);
+  container.querySelectorAll("[data-map-label-toggle]").forEach((toggle) => {
+    toggle.addEventListener("change", () => setMapLabelVisibility(toggle.dataset.mapLabelToggle, toggle.checked));
+  });
   svg.addEventListener("wheel", (event) => {
     event.preventDefault();
     const rect = svg.getBoundingClientRect();
@@ -634,6 +704,9 @@ function renderOfflineMap(container, options = {}) {
   }, { passive: false });
   svg.addEventListener("pointerdown", (event) => {
     if (event.button !== 0 || view.zoom <= minZoom + 0.001) return;
+    // Маркер остаётся обычной кликабельной целью при любом масштабе.
+    // Захват указателя на SVG раньше подменял цель click после zoom > 100%.
+    if (event.target.closest("[data-static-index]")) return;
     drag = {
       pointerId: event.pointerId,
       clientX: event.clientX,
@@ -705,10 +778,28 @@ function renderOfflineMap(container, options = {}) {
   };
 }
 
-/** Проецирует наборы контуров регионов и возвращает SVG-разметку карты. */
+/** Формирует SVG-подпись, сохраняющую размер при масштабировании карты. */
+function mapLabelMarkup(className, point, label, anchor = "middle") {
+  const offset = anchor === "start" ? 11 : 0;
+  return `<g class="offline-map-label ${className}" data-map-x="${point.x}" data-map-y="${point.y}" transform="translate(${point.x} ${point.y})"><text x="${offset}" text-anchor="${anchor}">${escapeHtml(label)}</text><title>${escapeHtml(label)}</title></g>`;
+}
+
+/** Переключает выбранный слой подписей сразу на всех открытых картах. */
+function setMapLabelVisibility(layer, visible) {
+  if (!(layer in mapLabelVisibility)) return;
+  mapLabelVisibility[layer] = visible;
+  document.querySelectorAll(`.offline-map-label-layer--${layer}`).forEach((group) => {
+    group.classList.toggle("is-hidden", !visible);
+  });
+  document.querySelectorAll(`[data-map-label-toggle="${layer}"]`).forEach((toggle) => {
+    toggle.checked = visible;
+  });
+}
+
+/** Проецирует контуры и подписи регионов для SVG-карты. */
 function buildRussiaMapMarkup(project, toWorld, bounds) {
   const regions = getRussiaRegions();
-  if (!regions.length) return "";
+  if (!regions.length) return { regions: "", labels: "" };
   const marginX = (bounds.maxX - bounds.minX) * 0.08;
   const marginY = (bounds.maxY - bounds.minY) * 0.08;
   const polygonPath = (polygon) => {
@@ -731,20 +822,56 @@ function buildRussiaMapMarkup(project, toWorld, bounds) {
       return `${index ? "L" : "M"} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`;
     }).join(" ") + " Z").join(" ");
   };
+  const visibleRegions = [];
   const baseMarkup = regions.map((region, regionIndex) => {
-    const paths = region.map((polygon) => {
+    const paths = region.polygons.map((polygon) => {
       return polygonPath(polygon);
     }).filter(Boolean).join(" ");
+    if (paths) visibleRegions.push(region);
     return paths
-      ? `<path class="offline-russia-region region-tone-${regionIndex % 4}" d="${paths}" fill-rule="evenodd"></path>`
+      ? `<path class="offline-russia-region region-tone-${regionIndex % 4}" d="${paths}" fill-rule="evenodd"><title>${escapeHtml(region.name)}</title></path>`
       : "";
   }).join("");
+  const additionalRegions = [];
   const additionalMarkup = getAdditionalRussiaRegions().map((region) => {
     const paths = region.polygons.map(polygonPath).filter(Boolean).join(" ");
     if (!paths) return "";
+    additionalRegions.push(region);
     return `<path class="offline-russia-region offline-russia-region--added" d="${paths}" fill-rule="evenodd"><title>${escapeHtml(region.name)}</title></path>`;
   }).join("");
-  return baseMarkup + additionalMarkup;
+  const labels = [...visibleRegions, ...additionalRegions].map((region) => {
+    const labelPoint = regionLabelPoint(region.polygons);
+    if (!labelPoint) return "";
+    const world = toWorld(labelPoint);
+    if (world.x < bounds.minX - marginX || world.x > bounds.maxX + marginX || world.y < bounds.minY - marginY || world.y > bounds.maxY + marginY) return "";
+    return mapLabelMarkup("offline-region-label", project(labelPoint), region.name);
+  }).join("");
+  return { regions: baseMarkup + additionalMarkup, labels };
+}
+
+/** Находит устойчивую точку подписи по центроиду крупнейшего внешнего контура. */
+function regionLabelPoint(polygons) {
+  const rings = polygons.map((polygon) => polygon[0]).filter((ring) => Array.isArray(ring) && ring.length > 2);
+  if (!rings.length) return null;
+  const area = (ring) => Math.abs(ring.reduce((sum, point, index) => {
+    const next = ring[(index + 1) % ring.length];
+    return sum + point[0] * next[1] - next[0] * point[1];
+  }, 0) / 2);
+  const ring = rings.reduce((largest, candidate) => area(candidate) > area(largest) ? candidate : largest);
+  let twiceArea = 0;
+  let lng = 0;
+  let lat = 0;
+  ring.forEach((point, index) => {
+    const next = ring[(index + 1) % ring.length];
+    const cross = point[0] * next[1] - next[0] * point[1];
+    twiceArea += cross;
+    lng += (point[0] + next[0]) * cross;
+    lat += (point[1] + next[1]) * cross;
+  });
+  if (Math.abs(twiceArea) < 1e-8) {
+    return { lng: ring.reduce((sum, point) => sum + point[0], 0) / ring.length, lat: ring.reduce((sum, point) => sum + point[1], 0) / ring.length };
+  }
+  return { lng: lng / (3 * twiceArea), lat: lat / (3 * twiceArea) };
 }
 
 /** Возвращает основной встроенный набор контуров регионов России. */
@@ -774,11 +901,13 @@ function getRussiaRegions() {
     return ring;
   };
   const decodePolygon = (rings) => rings.map(joinArcs).filter((ring) => ring.length > 2);
-  russiaRegionsCache = geometries.map((geometry) => {
-    if (geometry.type === "Polygon") return [decodePolygon(geometry.arcs)];
-    if (geometry.type === "MultiPolygon") return geometry.arcs.map(decodePolygon);
-    return [];
-  }).filter((region) => region.length);
+  const names = window.RUSSIA_REGION_NAMES || [];
+  russiaRegionsCache = geometries.map((geometry, index) => {
+    let polygons = [];
+    if (geometry.type === "Polygon") polygons = [decodePolygon(geometry.arcs)];
+    if (geometry.type === "MultiPolygon") polygons = geometry.arcs.map(decodePolygon);
+    return { name: names[index] || `Субъект ${index + 1}`, polygons };
+  }).filter((region) => region.polygons.length);
   return russiaRegionsCache;
 }
 
@@ -798,6 +927,7 @@ function getAdditionalRussiaRegions() {
 function zoneStatusLabel(status) {
   if (status === "alert") return "красная зона";
   if (status === "warning") return "жёлтая зона";
+  if (status === "blue") return "синяя зона";
   return "вне зон";
 }
 

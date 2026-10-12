@@ -8,6 +8,7 @@
   --accent: #3d8bfd;
   --alert: #9b1c1c;
   --warning: #d4a017;
+  --blue: #2878b8;
   --ok: #1b2633;
 }
 
@@ -135,6 +136,7 @@ th { color: var(--muted); font-weight: 650; }
 
 tr.alert { background: var(--alert); color: #fff; }
 tr.warning { background: var(--warning); color: #1a1400; }
+tr.blue { background: var(--blue); color: #f3f9ff; }
 tr.ok { background: var(--ok); }
 tr.empty td { color: var(--muted); text-align: center; padding: 28px; }
 
@@ -350,6 +352,7 @@ select {
 .history-object-card small { grid-column: 1 / -1; color: var(--muted); }
 .history-object-card.history-status-alert { background: color-mix(in srgb, var(--alert) 72%, #111923); }
 .history-object-card.history-status-warning { background: color-mix(in srgb, var(--warning) 62%, #111923); color: #fff8dc; }
+.history-object-card.history-status-blue { background: color-mix(in srgb, var(--blue) 62%, #111923); color: #eef8ff; }
 .history-object-card.history-status-ok { background: #143528; border-color: #2c6b4d; }
 .history-table-wrap tr.ok { background: #143528; color: #d8f5e3; }
 .history-legend {
@@ -364,6 +367,7 @@ select {
 .legend-dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
 .legend-dot.alert { background: var(--alert); }
 .legend-dot.warning { background: var(--warning); }
+.legend-dot.blue { background: var(--blue); }
 .legend-dot.ok { background: #247a52; }
 .history-table-wrap { max-height: 62vh; }
 .history-table-wrap thead { position: sticky; top: 0; z-index: 1; background: var(--panel); }
@@ -472,6 +476,7 @@ select {
 }
 .zone-status-alert { background: #ff6b6b; }
 .zone-status-warning { background: #f1c232; }
+.zone-status-blue { background: var(--blue); }
 .offline-map-svg {
   display: block;
   width: 100%;
@@ -500,6 +505,25 @@ select {
 }
 .offline-grid-line { fill: none; stroke: #29384b; stroke-width: 1; }
 .offline-grid-label { fill: #6f8095; font-size: 14px; font-variant-numeric: tabular-nums; }
+.offline-map-label-layer.is-hidden { display: none; }
+.offline-map-label { pointer-events: none; }
+.offline-map-label text {
+  paint-order: stroke;
+  stroke: rgba(12, 21, 32, 0.92);
+  stroke-linejoin: round;
+}
+.offline-region-label text {
+  fill: #b8c7d8;
+  stroke-width: 3.5px;
+  font-size: 10px;
+  font-weight: 650;
+}
+.offline-static-label text {
+  fill: #fff;
+  stroke-width: 4px;
+  font-size: 12px;
+  font-weight: 700;
+}
 .offline-map-badge,
 .offline-map-selection,
 .offline-map-context {
@@ -547,6 +571,25 @@ select {
   font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
+.offline-map-layers {
+  position: absolute;
+  z-index: 3;
+  top: 12px;
+  right: 12px;
+  display: grid;
+  gap: 6px;
+  max-width: calc(100% - 82px);
+  padding: 8px 10px;
+  border: 1px solid #405671;
+  border-radius: 10px;
+  background: rgba(12, 21, 32, 0.94);
+  color: #d5dfeb;
+  font-size: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+.offline-map-layers label { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+.offline-map-layers label:has(input:disabled) { color: #657386; cursor: default; }
+.offline-map-layers input { margin: 0; accent-color: var(--accent); }
 .offline-map-badge { top: 12px; left: 12px; }
 .offline-map-context {
   top: 12px;
@@ -558,6 +601,7 @@ select {
 .offline-map-selection { right: 12px; bottom: 12px; max-width: calc(100% - 24px); color: #fff; }
 .offline-zone { stroke-width: 2.5; }
 .offline-zone--warning { fill: rgba(212, 160, 23, 0.14); stroke: #f1c232; }
+.offline-zone--blue { fill: color-mix(in srgb, var(--blue) 12%, transparent); stroke: var(--blue); }
 .offline-zone--alert { fill: rgba(155, 28, 28, 0.24); stroke: #ff6b6b; }
 .offline-route {
   fill: none;
@@ -596,3 +640,91 @@ select {
   .history-point-list { max-height: 34vh; }
   .history-map { min-height: 330px; }
 }
+
+
+
+/* Группировка строк по статичным объектам */
+.th-toggle,
+.cell-toggle {
+  width: 34px;
+  padding-left: 6px;
+  padding-right: 6px;
+  text-align: center;
+}
+
+.group-toggle {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #1a2230;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.group-toggle:hover {
+  background: #223049;
+  border-color: var(--accent);
+}
+.group-toggle .chevron {
+  display: block;
+  transform: translateY(-1px);
+}
+.group-toggle-placeholder {
+  display: inline-block;
+  width: 24px;
+  height: 24px;
+}
+
+/* Бейдж «+N» в строке группы */
+.group-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  font-size: 11px;
+  font-weight: 700;
+  vertical-align: middle;
+}
+
+/* Строка-заголовок группы — чуть выделена */
+tr.static-group {
+  border-left: 3px solid transparent;
+}
+tr.static-group.alert  { border-left-color: #ff6b6b; }
+tr.static-group.warning { border-left-color: #f1c232; }
+tr.static-group.blue    { border-left-color: var(--blue); }
+tr.static-group.ok      { border-left-color: #247a52; }
+
+tr.static-group td {
+  font-weight: 600;
+}
+
+/* Вложенные строки — приглушены, со сдвигом */
+tr.static-child {
+  font-size: 12.5px;
+}
+tr.static-child > td {
+  background: rgba(0, 0, 0, 0.18);
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+tr.static-child > td:first-child {
+  border-left: 3px solid rgba(255, 255, 255, 0.12);
+}
+tr.static-child.alert > td:first-child   { border-left-color: #ff6b6b; }
+tr.static-child.warning > td:first-child { border-left-color: #f1c232; }
+tr.static-child.blue > td:first-child    { border-left-color: var(--blue); }
+
+tr.static-child .muted-cell {
+  color: var(--muted);
+}
+
+/* В свёрнутом виде вложенные строки скрыты (на случай если рендерятся) */
+tr.static-child[hidden] { display: none; }

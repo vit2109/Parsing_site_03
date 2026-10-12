@@ -28,7 +28,9 @@ from parsing_site.coordinates import (
 )
 from parsing_site.phone_loader import get_phone_for_static
 
-Status = Literal["ok", "warning", "alert"]
+BLUE_ZONE_KM = 350.0
+
+Status = Literal["ok", "blue", "warning", "alert"]
 
 _EXTRACT_SCRIPT = """
 /* Скрипт выполняется в контексте вкладки Chrome (Playwright page.evaluate).
@@ -233,13 +235,53 @@ _EXTRACT_SCRIPT = """
     return `${prefix}${index + 1}`;
   };
 
-  const collect = (selector, prefix) =>
+  // На целевой странице внутренний id инцидента меняется, а видимый номер
+  // сопровождаемого объекта (например 5, 4, 3) является его суточным номером.
+  // Именно он используется как стабильная идентичность в таблице и истории.
+  const objectTypeFrom = (value) => {
+    const text = String(value || "");
+    if (/БПЛА|aircraft-drone/i.test(text)) return "БПЛА";
+    if (/МВШ/i.test(text)) return "МВШ";
+    if (/ракет|missile|rocket/i.test(text)) return "Ракета";
+    return "Объект";
+  };
+
+  const dailyObjects = (() => {
+    const result = [];
+    const add = (value, context = "") => {
+      const match = String(value || "").trim().match(/^№?\\s*(\\d+)$/);
+      if (!match) return;
+      const number = Number(match[1]);
+      if (Number.isInteger(number) && number > 0 && !result.some((item) => item.number === number)) {
+        result.push({ number, type: objectTypeFrom(context) });
+      }
+    };
+    document.querySelectorAll('[class*="_operatorNumber_"]').forEach((el) => {
+      const card = el.closest('[class*="_card_"]');
+      add(el.textContent, card?.textContent || "");
+    });
+    if (result.length) return result;
+    document.querySelectorAll('[class*="_card_"][class*="_isActive_"]').forEach((card) => {
+      const text = card.textContent || "";
+      const matches = [...text.matchAll(/(?:БПЛА|МВШ|ракет\\w*|объект\\w*)\\s*№\\s*(\\d+)/gi)];
+      if (matches.length) add(matches[0][1], text);
+    });
+    return result;
+  })();
+
+  const collect = (selector, prefix, displayedObjects = []) =>
     selector
       ? [...document.querySelectorAll(selector)].map((el, index) => {
           const box = centerOf(el);
+          const displayedObject = displayedObjects[index];
           return {
-            index: index + 1,
-            name: String(pickName(el, index, prefix)),
+            index: Number.isInteger(displayedObject?.number) ? displayedObject.number : index + 1,
+            name: Number.isInteger(displayedObject?.number)
+              ? displayedObject.type
+              : String(pickName(el, index, prefix)),
+            object_type: Number.isInteger(displayedObject?.number)
+              ? displayedObject.type
+              : objectTypeFrom(pickName(el, index, prefix)),
             color: getComputedStyle(el).backgroundColor,
             x: box.x,
             y: box.y,
@@ -287,7 +329,7 @@ _EXTRACT_SCRIPT = """
   });
 
   return {
-    dynamics: collect(opts.dynamic, "D"),
+    dynamics: collect(opts.dynamic, "D", dailyObjects),
     statics: collect(opts.static, "S"),
     config_statics: configStatics,
     viewport: { width: window.innerWidth, height: window.innerHeight },
@@ -326,6 +368,7 @@ class SceneObject:
     lat: float | None = None
     lng: float | None = None
     translate3d: tuple[float, float] | None = None
+    object_type: str = ""
 
 
 @dataclass(slots=True)
@@ -402,6 +445,7 @@ class TrackingSnapshot:
     scale_warning: str = ""
     geo_source: str = "none"
     map_center: tuple[float, float] | None = None
+    blue_limit: float = BLUE_ZONE_KM
 
 
 def extract_scene_from_page(page: Any, tracking: TrackingConfig) -> dict[str, Any]:
@@ -448,6 +492,7 @@ def objects_from_raw(items: list[dict[str, Any]] | None) -> list[SceneObject]:
                 lat=_maybe_float(item.get("lat")),
                 lng=_maybe_float(item.get("lng")),
                 translate3d=t3d,
+                object_type=str(item.get("object_type") or ""),
             )
         )
     return result
@@ -514,12 +559,16 @@ def resolve_statics(
     return configured
 
 
-def classify_distance(distance: float, tracking: TrackingConfig) -> Status:
-    """Красный ≤ threshold, жёлтый ≤ warning_limit, иначе норма."""
+def classify_distance(
+    distance: float, tracking: TrackingConfig, *, unit: str = "px"
+) -> Status:
+    """Красный/жёлтый по настройкам, затем синяя зона до заданного порога."""
     if distance <= tracking.threshold:
         return "alert"
     if distance <= tracking.warning_limit:
         return "warning"
+    if unit == "km" and distance <= tracking.blue_limit:
+        return "blue"
     return "ok"
 
 
@@ -569,7 +618,7 @@ def build_distance_rows(
                     dynamic_lng=dynamic.lng,
                     dynamic_color=dynamic.color,
                     distance=distance,
-                    status=classify_distance(distance, tracking),
+                    status=classify_distance(distance, tracking, unit=unit),
                     distance_unit=unit,
                     phone=phone,
                 )
@@ -655,6 +704,7 @@ def build_tracking_snapshot(
         rows=build_distance_rows(statics, dynamics, tracking, mode=mode),
         threshold=tracking.threshold,
         warning_limit=tracking.warning_limit,
+        blue_limit=tracking.blue_limit,
         coordinate_mode=mode,
         distance_unit=distance_unit(mode),
         map_size=map_size,
@@ -686,6 +736,7 @@ def _ensure_geo(item: SceneObject, map_view: MapView | None) -> SceneObject:
         lat=geo[0],
         lng=geo[1],
         translate3d=item.translate3d,
+        object_type=item.object_type,
     )
 
 
@@ -735,14 +786,8 @@ def _scale_warning(
 
 
 def _dynamic_label(item: SceneObject) -> str:
-    """Добавляет к имени маркера CSS-смещение и цвет для диагностики."""
-    hex_color = css_color_to_hex(item.color)
-    bits = [item.name]
-    if item.translate3d:
-        bits.append(f"t3d=({item.translate3d[0]:.0f},{item.translate3d[1]:.0f})")
-    if hex_color:
-        bits.append(hex_color)
-    return " ".join(bits) if len(bits) > 1 else item.name
+    """Возвращает стабильное имя; координаты и цвет не являются идентичностью."""
+    return item.name
 
 
 def css_color_to_hex(value: str) -> str:
@@ -810,6 +855,7 @@ def snapshot_to_dict(snapshot: TrackingSnapshot) -> dict[str, object]:
         "viewport": {"width": snapshot.viewport[0], "height": snapshot.viewport[1]},
         "threshold": snapshot.threshold,
         "warning_limit": snapshot.warning_limit,
+        "blue_limit": snapshot.blue_limit,
         "coordinate_mode": snapshot.coordinate_mode,
         "distance_unit": snapshot.distance_unit,
         "map_size": (
@@ -830,6 +876,7 @@ def snapshot_to_dict(snapshot: TrackingSnapshot) -> dict[str, object]:
         "statics_count": len(snapshot.statics),
         "alerts": sum(1 for row in snapshot.rows if row.status == "alert"),
         "warnings": sum(1 for row in snapshot.rows if row.status == "warning"),
+        "blues": sum(1 for row in snapshot.rows if row.status == "blue"),
         "dynamics": [
             {
                 "index": item.index,
@@ -840,6 +887,7 @@ def snapshot_to_dict(snapshot: TrackingSnapshot) -> dict[str, object]:
                 "lng": item.lng,
                 "translate3d": item.translate3d,
                 "color": item.color,
+                "object_type": item.object_type,
             }
             for item in snapshot.dynamics
         ],

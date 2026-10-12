@@ -6,6 +6,7 @@
 const STATUS_LABEL = {
   alert: "близко",
   warning: "внимание",
+  blue: "синяя зона",
   ok: "норма",
   running: "работает",
   starting: "запуск",
@@ -41,6 +42,7 @@ const els = {
   stat: document.getElementById("stat-stat"),
   alert: document.getElementById("stat-alert"),
   warn: document.getElementById("stat-warn"),
+  blue: document.getElementById("stat-blue"),
   interval: document.getElementById("stat-interval"),
   polls: document.getElementById("stat-polls"),
   historyRowsDay: document.getElementById("stat-history-rows-day"),
@@ -267,73 +269,259 @@ function checkNewAlerts(rows) {
   return false;
 }
 
+// ===== Группировка строк по статичным объектам =====
+// Состояние раскрытых групп живёт между опросами, чтобы не схлопывалось
+// при каждом обновлении (иначе раскрытая точка закрывается каждую секунду).
+const expandedStatics = new Set();
+
+/**
+ * Группирует строки снимка по static_index, сохраняя порядок первого появления.
+ * Внутри каждой группы сортирует по возрастанию дистанции — ближайший первым.
+ */
+function groupRowsByStatic(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    const key = row.static_index;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        static_index: row.static_index,
+        static_name: row.static_name,
+        static_coords: row.static_coords,
+        alert_count: row.alert_count ?? 0,
+        warning_count: row.warning_count ?? 0,
+        phone: row.phone || "",
+        rows: [],
+      });
+    }
+    groups.get(key).rows.push(row);
+  }
+  for (const group of groups.values()) {
+    group.rows.sort((a, b) => a.distance - b.distance);
+  }
+  return [...groups.values()];
+}
+
+/**
+ * Рендерит таблицу расстояний с группировкой по статичным объектам.
+ * В свёрнутом виде — только ближайший объект, в раскрытом — все.
+ */
+function renderDistanceTable(rows, unit, settings) {
+  if (!rows.length) {
+    els.tbody.innerHTML = `<tr class="empty"><td colspan="10">Объекты не найдены (${escapeHtml(settings.dynamic_selector)})</td></tr>`;
+    return;
+  }
+
+  const decimals = unit === "km" ? 2 : 1;
+  const groups = groupRowsByStatic(rows);
+  const html = [];
+
+  for (const group of groups) {
+    const nearest = group.rows[0];
+    const expanded = expandedStatics.has(group.static_index);
+    const extraCount = group.rows.length - 1;
+
+    // --- Строка-заголовок группы (всегда видна) ---
+    // Показывает ближайший объект, стрелку и счётчик остальных.
+    html.push(`
+      <tr class="static-group ${nearest.status}" data-static-index="${group.static_index}">
+        <td class="cell-toggle">
+          ${extraCount > 0
+            ? `<button type="button" class="group-toggle" data-toggle="${group.static_index}"
+                 aria-expanded="${expanded}" title="${expanded ? "Свернуть" : "Показать все объекты"}">
+                 <span class="chevron">${expanded ? "▾" : "▸"}</span>
+               </button>`
+            : `<span class="group-toggle-placeholder"></span>`}
+        </td>
+        <td>${group.static_index}</td>
+        <td>
+          ${escapeHtml(group.static_name)}
+          <span class="coords">${escapeHtml(group.static_coords)}</span>
+        </td>
+        <td>${escapeHtml(nearest.dynamic_name)}</td>
+        <td>${nearest.dynamic_index}</td>
+        <td>${escapeHtml(nearest.dynamic_coords)}</td>
+        <td>${Number(nearest.distance).toFixed(decimals)} ${nearest.distance_unit || unit}</td>
+        <td title="красных / жёлтых до этой статичной точки">
+          ${escapeHtml(nearest.nearby_counts || `${group.alert_count} / ${group.warning_count}`)}
+        </td>
+        <td>
+          ${STATUS_LABEL[nearest.status] || nearest.status}
+          ${extraCount > 0 ? `<span class="group-badge" title="Всего объектов у точки">+${extraCount}</span>` : ""}
+        </td>
+        <td>${escapeHtml(group.phone || "—")}</td>
+      </tr>
+    `);
+
+    // --- Вложенные строки (видны только при expanded) ---
+    // Первый (ближайший) уже показан в заголовке — начинаем со второго.
+    if (expanded && extraCount > 0) {
+      for (let i = 1; i < group.rows.length; i++) {
+        const row = group.rows[i];
+        html.push(`
+          <tr class="static-child ${row.status}" data-parent="${group.static_index}">
+            <td class="cell-toggle"></td>
+            <td>${group.static_index}</td>
+            <td class="muted-cell">${escapeHtml(group.static_name)}</td>
+            <td>${escapeHtml(row.dynamic_name)}</td>
+            <td>${row.dynamic_index}</td>
+            <td>${escapeHtml(row.dynamic_coords)}</td>
+            <td>${Number(row.distance).toFixed(decimals)} ${row.distance_unit || unit}</td>
+            <td>${escapeHtml(row.nearby_counts || `${row.alert_count ?? 0} / ${row.warning_count ?? 0}`)}</td>
+            <td>${STATUS_LABEL[row.status] || row.status}</td>
+            <td>${escapeHtml(row.phone || group.phone || "—")}</td>
+          </tr>
+        `);
+      }
+    }
+  }
+
+  els.tbody.innerHTML = html.join("");
+  bindGroupToggles();
+}
+
+/**
+ * Навешивает обработчики на кнопки-раскрывашки.
+ * Перерисовывает таблицу через сохранённый последний снимок.
+ */
+function bindGroupToggles() {
+  els.tbody.querySelectorAll("[data-toggle]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const key = Number(btn.dataset.toggle);
+      if (expandedStatics.has(key)) expandedStatics.delete(key);
+      else expandedStatics.add(key);
+      rerenderLastSnapshot();
+    });
+  });
+}
+
+// Последний применённый снимок нужен, чтобы перерисовывать таблицу
+// при клике по раскрывашке без нового запроса к серверу.
+let lastSnapshot = null;
+let lastSettings = null;
+
+/** Перерисовывает таблицу из последнего снимка (после toggle). */
+function rerenderLastSnapshot() {
+  if (!lastSnapshot || !lastSettings) return;
+  const unit = lastSnapshot.distance_unit || "px";
+  renderDistanceTable(lastSnapshot.rows || [], unit, lastSettings);
+}
+
 /**
  * Применяет данные снимка к интерфейсу
  */
+// function applySnapshot(snapshot, settings) {
+//   if (!snapshot) {
+//     els.dyn.textContent = "0";
+//     els.stat.textContent = "0";
+//     els.alert.textContent = "0";
+//     els.warn.textContent = "0";
+//     els.scaleWarning.hidden = true;
+//     return;
+//   }
+  
+//   const rows = snapshot.rows || [];
+//   const alerts = snapshot.alerts || 0;
+  
+//   // Проверяем наличие новых красных объектов
+//   const hasNewAlerts = checkNewAlerts(rows);
+  
+//   // Воспроизводим звук при появлении новых красных объектов
+//   if (hasNewAlerts) {
+//     playBeep();
+    
+//     // Показываем визуальное предупреждение
+//     showAlertBanner(alerts);
+//   }
+  
+//   const unit = snapshot.distance_unit || "px";
+//   const decimals = unit === "km" ? 2 : 1;
+//   els.dyn.textContent = String(snapshot.dynamics_count);
+//   els.stat.textContent = String(snapshot.statics_count);
+//   els.alert.textContent = String(alerts);
+//   els.warn.textContent = String(snapshot.warnings || 0);
+  
+//   const mode = snapshot.coordinate_mode || settings.coordinate_mode;
+//   const zoom = snapshot.map_zoom != null ? ` · zoom=${snapshot.map_zoom}` : "";
+//   const geo = snapshot.geo_source && snapshot.geo_source !== "none"
+//     ? ` · geo=${snapshot.geo_source}`
+//     : "";
+//   els.meta.textContent =
+//     `${snapshot.title || snapshot.url} · режим ${mode}${zoom}${geo} · красный ≤ ${snapshot.threshold} ${unit} · жёлтый ≤ ${snapshot.warning_limit} ${unit}`;
+  
+//   if (snapshot.scale_warning) {
+//     els.scaleWarning.hidden = false;
+//     els.scaleWarning.textContent = snapshot.scale_warning;
+//   } else {
+//     els.scaleWarning.hidden = true;
+//   }
+  
+//   if (!rows.length) {
+//     els.tbody.innerHTML = `<tr class="empty"><td colspan="9">Объекты не найдены (${escapeHtml(settings.dynamic_selector)})</td></tr>`;
+//     return;
+//   }
+  
+//   els.tbody.innerHTML = rows.map((row) => `
+//     <tr class="${row.status}">
+//       <td>${row.static_index}</td>
+//       <td>${escapeHtml(row.static_name)}</td>
+//       <td>${escapeHtml(row.dynamic_name)}</td>
+//       <td>${row.dynamic_index}</td>
+//       <td>${escapeHtml(row.dynamic_coords)}</td>
+//       <td>${Number(row.distance).toFixed(decimals)} ${row.distance_unit || unit}</td>
+//       <td title="красных / жёлтых до этой статичной точки">${escapeHtml(row.nearby_counts || `${row.alert_count ?? 0} / ${row.warning_count ?? 0}`)}</td>
+//       <td>${STATUS_LABEL[row.status] || row.status}</td>
+//       <td>${escapeHtml(row.phone || "—")}</td> <!-- Добавлено поле phone -->
+//     </tr>
+//   `).join("");
+// }
+
+
 function applySnapshot(snapshot, settings) {
   if (!snapshot) {
     els.dyn.textContent = "0";
     els.stat.textContent = "0";
     els.alert.textContent = "0";
     els.warn.textContent = "0";
+    els.blue.textContent = "0";
     els.scaleWarning.hidden = true;
     return;
   }
-  
+
+  lastSnapshot = snapshot;
+  lastSettings = settings;
+
   const rows = snapshot.rows || [];
   const alerts = snapshot.alerts || 0;
-  
-  // Проверяем наличие новых красных объектов
+
   const hasNewAlerts = checkNewAlerts(rows);
-  
-  // Воспроизводим звук при появлении новых красных объектов
   if (hasNewAlerts) {
     playBeep();
-    
-    // Показываем визуальное предупреждение
     showAlertBanner(alerts);
   }
-  
+
   const unit = snapshot.distance_unit || "px";
-  const decimals = unit === "km" ? 2 : 1;
   els.dyn.textContent = String(snapshot.dynamics_count);
   els.stat.textContent = String(snapshot.statics_count);
   els.alert.textContent = String(alerts);
   els.warn.textContent = String(snapshot.warnings || 0);
-  
+  els.blue.textContent = String(snapshot.blues || 0);
+
   const mode = snapshot.coordinate_mode || settings.coordinate_mode;
   const zoom = snapshot.map_zoom != null ? ` · zoom=${snapshot.map_zoom}` : "";
   const geo = snapshot.geo_source && snapshot.geo_source !== "none"
     ? ` · geo=${snapshot.geo_source}`
     : "";
   els.meta.textContent =
-    `${snapshot.title || snapshot.url} · режим ${mode}${zoom}${geo} · красный ≤ ${snapshot.threshold} ${unit} · жёлтый ≤ ${snapshot.warning_limit} ${unit}`;
-  
+    `${snapshot.title || snapshot.url} · режим ${mode}${zoom}${geo} · красный ≤ ${snapshot.threshold} ${unit} · жёлтый ≤ ${snapshot.warning_limit} ${unit}${unit === "km" ? ` · синий ≤ ${snapshot.blue_limit || 350} км` : ""}`;
+
   if (snapshot.scale_warning) {
     els.scaleWarning.hidden = false;
     els.scaleWarning.textContent = snapshot.scale_warning;
   } else {
     els.scaleWarning.hidden = true;
   }
-  
-  if (!rows.length) {
-    els.tbody.innerHTML = `<tr class="empty"><td colspan="9">Объекты не найдены (${escapeHtml(settings.dynamic_selector)})</td></tr>`;
-    return;
-  }
-  
-  els.tbody.innerHTML = rows.map((row) => `
-    <tr class="${row.status}">
-      <td>${row.static_index}</td>
-      <td>${escapeHtml(row.static_name)}</td>
-      <td>${escapeHtml(row.dynamic_name)}</td>
-      <td>${row.dynamic_index}</td>
-      <td>${escapeHtml(row.dynamic_coords)}</td>
-      <td>${Number(row.distance).toFixed(decimals)} ${row.distance_unit || unit}</td>
-      <td title="красных / жёлтых до этой статичной точки">${escapeHtml(row.nearby_counts || `${row.alert_count ?? 0} / ${row.warning_count ?? 0}`)}</td>
-      <td>${STATUS_LABEL[row.status] || row.status}</td>
-      <td>${escapeHtml(row.phone || "—")}</td> <!-- Добавлено поле phone -->
-    </tr>
-  `).join("");
+
+  renderDistanceTable(rows, unit, settings);
 }
 
 /**
@@ -408,6 +596,7 @@ function applySettings(settings) {
   soundEnabled = settings.sound_enabled !== false;
   document.documentElement.style.setProperty("--alert", settings.alert_color);
   document.documentElement.style.setProperty("--warning", settings.warning_color);
+  document.documentElement.style.setProperty("--blue", settings.blue_color);
   els.site.textContent = settings.site;
   els.interval.textContent = `${settings.interval_seconds} с`;
   if (!els.dialog.open) {
@@ -425,9 +614,11 @@ function fillForm(settings) {
   setFormValue("interval_seconds", settings.interval_seconds);
   setFormValue("threshold", settings.threshold);
   setFormValue("warning_distance", settings.warning_distance);
+  setFormValue("blue_distance", settings.blue_distance);
   setFormValue("reference_zoom", settings.reference_zoom);
   setFormValue("alert_color", settings.alert_color);
   setFormValue("warning_color", settings.warning_color);
+  setFormValue("blue_color", settings.blue_color);
   
   const soundField = els.form.elements.namedItem("sound_enabled");
   if (soundField) {
@@ -548,6 +739,7 @@ async function saveSettings(event) {
   data.interval_seconds = Number(data.interval_seconds);
   data.threshold = Number(data.threshold);
   data.warning_distance = Number(data.warning_distance);
+  data.blue_distance = Number(data.blue_distance);
   data.reference_zoom = Number(data.reference_zoom || 0);
   data.lock_scale = Boolean(els.form.elements.namedItem("lock_scale")?.checked);
   data.wait_for_selector = data.dynamic_selector;

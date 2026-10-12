@@ -5,7 +5,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Мониторинг объектов</title>
-    <link rel="stylesheet" href="/static/css/app.css" />
+    <link rel="stylesheet" href="/static/css/app.css?v=7" />
   </head>
   <body>
     <div class="app">
@@ -32,6 +32,7 @@
         <article><span>Статичных</span><strong id="stat-stat">0</strong></article>
         <article><span>Красных</span><strong id="stat-alert">0</strong></article>
         <article><span>Жёлтых</span><strong id="stat-warn">0</strong></article>
+        <article><span>Синих</span><strong id="stat-blue">0</strong></article>
         <article><span>Интервал</span><strong id="stat-interval">{{ settings.interval_seconds }} с</strong></article>
         <article><span>Опросов</span><strong id="stat-polls">0</strong></article>
         <article title="Оценка по текущему интервалу обновления"><span>Строк истории / сутки</span><strong id="stat-history-rows-day">0</strong></article>
@@ -51,20 +52,21 @@
           <table>
             <thead>
               <tr>
+                <th class="th-toggle" aria-label="Развернуть"></th>
                 <th>№ статичного</th>
                 <th>Координаты статичного</th>
                 <th>Динамический объект</th>
                 <th>№ динамического</th>
                 <th>Координаты динамического</th>
                 <th>Расстояние</th>
-                <!-- Сколько динамических объектов красные и жёлтые относительно этой статичной точки (одно число на цвет, одинаково во всех строках точки). -->
+                <!-- Сколько динамических объектов красные и жёлтые относительно этой статичной точки. -->
                 <th>Кр. / жёл. у точки</th>
                 <th>Статус</th>
                 <th>Телефон</th>
               </tr>
             </thead>
             <tbody id="distance-body">
-              <tr class="empty"><td colspan="9">Нет данных. Запустите парсинг или «Тест HTML».</td></tr>
+              <tr class="empty"><td colspan="10">Нет данных. Запустите парсинг или «Тест HTML».</td></tr>
             </tbody>
           </table>
         </div>
@@ -143,6 +145,10 @@
             <input name="warning_distance" type="number" min="0.001" step="0.1" required value="{{ settings.warning_distance }}" />
           </label>
           <label>
+            Синий порог (км, не меньше жёлтого)
+            <input name="blue_distance" type="number" min="0.001" step="0.1" required value="{{ settings.blue_distance }}" />
+          </label>
+          <label>
             Эталонный zoom Leaflet (0 = не проверять)
             <input name="reference_zoom" type="number" min="0" step="1" value="{{ settings.reference_zoom }}" />
           </label>
@@ -154,9 +160,13 @@
             Цвет красного выделения
             <input name="alert_color" type="color" required value="{{ settings.alert_color }}" />
           </label>
-          <label>
+                    <label>
                       Цвет жёлтого выделения
                       <input name="warning_color" type="color" required value="{{ settings.warning_color }}" />
+                    </label>
+                    <label>
+                      Цвет синего выделения
+                      <input name="blue_color" type="color" required value="{{ settings.blue_color }}" />
                     </label>
                     <label class="checkbox">
                       <input name="sound_enabled" type="checkbox" />
@@ -186,6 +196,6 @@
     <script>
       window.__INITIAL_SETTINGS__ = {{ settings | tojson }};
     </script>
-    <script src="/static/js/app.js?v=2"></script>
+    <script src="/static/js/app.js?v=4"></script>
   </body>
 </html>

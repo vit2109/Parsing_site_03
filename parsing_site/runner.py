@@ -48,10 +48,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if command == "inspect":
             return _inspect(config)
+        # if command == "web":
+        #     return _web()
+        # if command == "test-server":
+        #     return _test_server()
         if command == "web":
-            return _web()
+            return _web(args[1:])
         if command == "test-server":
-            return _test_server()
+            return _test_server(args[1:])
         if command == "probe":
             return _probe(config, args[1:])
         if command == "check":
@@ -70,6 +74,24 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         logger.exception("Необработанная ошибка команды")
         return 1
+
+def _parse_port(extra: list[str], default: int) -> int:
+    """Извлекает --port N, -p N или --port=N из аргументов команды."""
+    for i, item in enumerate(extra):
+        if item in {"--port", "-p"}:
+            if i + 1 >= len(extra):
+                raise SystemExit(f"Не указано значение для {item}")
+            try:
+                return int(extra[i + 1])
+            except ValueError:
+                raise SystemExit(f"Некорректный порт: {extra[i + 1]!r}")
+        if item.startswith("--port="):
+            value = item.split("=", 1)[1]
+            try:
+                return int(value)
+            except ValueError:
+                raise SystemExit(f"Некорректный порт: {value!r}")
+    return default
 
 
 def _inspect(config: AppConfig) -> int:
@@ -135,22 +157,25 @@ def _take_snapshot(session: BrowserSession, config: AppConfig) -> TrackingSnapsh
     return capture_snapshot(session, config.tracking)
 
 
-def _web() -> int:
+def _web(extra: list[str]) -> int:
     """Запускает локальный FastAPI-интерфейс через Uvicorn."""
     import uvicorn
 
-    print("Интерфейс: http://127.0.0.1:8081")
-    uvicorn.run("parsing_site.webapp:app", host="127.0.0.1", port=8081, reload=False)
+    port = _parse_port(extra, 8082)
+
+    print("Интерфейс: http://127.0.0.1:8082")
+    uvicorn.run("parsing_site.webapp:app", host="127.0.0.1", port=port, reload=False)
     return 0
 
 
-def _test_server() -> int:
+def _test_server(extra: list[str]) -> int:
     """Запускает локальную SVG-карту для сквозной проверки мониторинга."""
     import uvicorn
 
+    port = _parse_port(extra, 8000)
     print("Тестовая карта: http://127.0.0.1:8000")
     uvicorn.run(
-        "parsing_site.test_server:app", host="127.0.0.1", port=8000, reload=False
+        "parsing_site.test_server:app", host="127.0.0.1", port=port, reload=False
     )
     return 0
 

@@ -18,12 +18,14 @@ from parsing_site.tracking import TrackingSnapshot, row_to_dict
 STATUS_STYLES = {
     "alert": "bold white on dark_red",
     "warning": "black on yellow",
+    "blue": "white on blue",
     "ok": "",
 }
 
 STATUS_LABELS = {
     "alert": "близко",
     "warning": "внимание",
+    "blue": "синяя зона",
     "ok": "норма",
 }
 
@@ -226,6 +228,7 @@ def render_html(snapshot: TrackingSnapshot, refresh_seconds: float = 2.0) -> str
     th {{ background: #1a2230; font-weight: 650; }}
     tr.alert {{ background: #9b1c1c; color: #fff; }}
     tr.warning {{ background: #d4a017; color: #1a1400; }}
+    tr.blue {{ background: #2878b8; color: #f3f9ff; }}
     tr.ok {{ background: #18202c; }}
     .coords {{ color: inherit; opacity: 0.8; font-size: 12px; }}
     .legend span {{

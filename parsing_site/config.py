@@ -116,8 +116,10 @@ class TrackingConfig:
     warning_ratio: float = 1.4
     static_objects: list[StaticObjectConfig] = field(default_factory=list)
     warning_distance: float = 0.0
+    blue_distance: float = 350.0
     alert_color: str = "#9b1c1c"
     warning_color: str = "#d4a017"
+    blue_color: str = "#2878b8"
 
     @property
     def warning_limit(self) -> float:
@@ -125,6 +127,11 @@ class TrackingConfig:
         if self.warning_distance > self.threshold:
             return self.warning_distance
         return self.threshold * max(1.0, self.warning_ratio)
+
+    @property
+    def blue_limit(self) -> float:
+        """Возвращает синий порог, гарантированно не меньший жёлтого."""
+        return max(self.blue_distance, self.warning_limit)
 
 
 @dataclass(slots=True)
@@ -221,8 +228,10 @@ def load_config(path: Path | None = None) -> AppConfig:
             threshold=float(tracking_raw.get("threshold", 140.0)),
             warning_ratio=float(tracking_raw.get("warning_ratio", 1.4)),
             warning_distance=float(tracking_raw.get("warning_distance", 0.0)),
+            blue_distance=float(tracking_raw.get("blue_distance", 350.0)),
             alert_color=str(tracking_raw.get("alert_color", "#9b1c1c")),
             warning_color=str(tracking_raw.get("warning_color", "#d4a017")),
+            blue_color=str(tracking_raw.get("blue_color", "#2878b8")),
             static_objects=static_objects,
         ),
         path=config_path,

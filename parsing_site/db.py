@@ -11,7 +11,7 @@ from typing import Any
 
 from parsing_site.config import ROOT
 from parsing_site.coordinates import haversine_km
-from parsing_site.tracking import TrackingSnapshot
+from parsing_site.tracking import BLUE_ZONE_KM, TrackingSnapshot
 
 DEFAULT_DB_PATH = ROOT / "data" / "tracking.db"
 
@@ -175,6 +175,7 @@ class Database:
             "distance_unit": "TEXT",
             "threshold": "REAL",
             "warning_limit": "REAL",
+            "blue_limit": f"REAL NOT NULL DEFAULT {BLUE_ZONE_KM}",
             "map_width": "REAL",
             "map_height": "REAL",
             "map_zoom": "REAL",
@@ -354,9 +355,10 @@ class Database:
             cursor = self._conn.execute(
                 "INSERT INTO polls(ts, url, title, dynamics_count, statics_count, "
                 "alerts, warnings, coordinate_mode, distance_unit, threshold, "
-                "warning_limit, map_width, map_height, map_zoom, map_center_lat, "
+                "warning_limit, blue_limit, map_width, map_height, map_zoom, "
+                "map_center_lat, "
                 "map_center_lng, geo_source, data_source) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     ts,
                     snapshot.url,
@@ -369,6 +371,7 @@ class Database:
                     snapshot.distance_unit,
                     snapshot.threshold,
                     snapshot.warning_limit,
+                    snapshot.blue_limit,
                     snapshot.map_size[0] if snapshot.map_size else None,
                     snapshot.map_size[1] if snapshot.map_size else None,
                     snapshot.map_zoom,
@@ -505,9 +508,10 @@ class Database:
                 cursor = self._conn.execute(
                     "INSERT INTO polls(ts, url, title, dynamics_count, statics_count, "
                     "alerts, warnings, coordinate_mode, distance_unit, threshold, "
-                    "warning_limit, map_width, map_height, map_zoom, map_center_lat, "
+                    "warning_limit, blue_limit, map_width, map_height, map_zoom, "
+                    "map_center_lat, "
                     "map_center_lng, geo_source, data_source) "
-                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         ts,
                         "demo://history",
@@ -520,6 +524,7 @@ class Database:
                         "km",
                         50.0,
                         150.0,
+                        BLUE_ZONE_KM,
                         1000.0,
                         800.0,
                         7.0,
@@ -638,11 +643,17 @@ class Database:
                 "JOIN polls p2 ON p2.id = s2.poll_id "
                 "WHERE s2.static_index = s.static_index "
                 "AND p2.data_source = ? AND p2.distance_unit = 'km' "
-                "ORDER BY p2.ts DESC, p2.id DESC LIMIT 1) AS warning_radius_km "
+                "ORDER BY p2.ts DESC, p2.id DESC LIMIT 1) AS warning_radius_km, "
+                "(SELECT p2.blue_limit FROM static_observations s2 "
+                "JOIN polls p2 ON p2.id = s2.poll_id "
+                "WHERE s2.static_index = s.static_index "
+                "AND p2.data_source = ? AND p2.distance_unit = 'km' "
+                "ORDER BY p2.ts DESC, p2.id DESC LIMIT 1) AS blue_radius_km "
                 "FROM static_observations s JOIN polls p ON p.id = s.poll_id "
                 "WHERE p.data_source = ? GROUP BY s.static_index "
                 "ORDER BY static_name, s.static_index",
                 (
+                    _normalize_source(data_source),
                     _normalize_source(data_source),
                     _normalize_source(data_source),
                     _normalize_source(data_source),
@@ -692,7 +703,8 @@ class Database:
         with self._lock:
             static = self._conn.execute(
                 "SELECT s.static_index, s.name AS static_name, s.lat, s.lng, "
-                "p.threshold AS alert_radius_km, p.warning_limit AS warning_radius_km "
+                "p.threshold AS alert_radius_km, p.warning_limit AS warning_radius_km, "
+                "p.blue_limit AS blue_radius_km "
                 "FROM static_observations s JOIN polls p ON p.id = s.poll_id "
                 "WHERE s.static_index = ? AND p.data_source = ? "
                 "AND p.ts >= ? AND p.ts <= ? AND p.distance_unit = 'km' "
@@ -710,14 +722,16 @@ class Database:
                 "AND p.ts >= ? AND p.ts <= ? AND p.data_source = ? "
                 "AND p.distance_unit = 'km' AND s.lat IS NOT NULL "
                 "AND s.lng IS NOT NULL AND d.lat IS NOT NULL AND d.lng IS NOT NULL "
-                "AND haversine_km(s.lat, s.lng, d.lat, d.lng) <= p.warning_limit"
+                "AND haversine_km(s.lat, s.lng, d.lat, d.lng) <= p.blue_limit"
                 ") SELECT d.id, p.id AS poll_id, p.ts, d.dynamic_index, "
                 "d.name AS dynamic_name, d.lat, d.lng, d.color, "
                 "haversine_km(s.lat, s.lng, d.lat, d.lng) AS distance, CASE "
                 "WHEN p.distance_unit = 'km' AND haversine_km(s.lat, s.lng, d.lat, d.lng) "
                 "<= p.threshold THEN 'alert' WHEN p.distance_unit = 'km' AND "
                 "haversine_km(s.lat, s.lng, d.lat, d.lng) <= p.warning_limit "
-                "THEN 'warning' ELSE 'outside' END AS status "
+                "THEN 'warning' WHEN p.distance_unit = 'km' AND "
+                "haversine_km(s.lat, s.lng, d.lat, d.lng) <= p.blue_limit "
+                "THEN 'blue' ELSE 'outside' END AS status "
                 "FROM dynamic_observations d JOIN polls p ON p.id = d.poll_id "
                 "JOIN static_observations s ON s.poll_id = p.id AND s.static_index = ? "
                 "JOIN entered e ON e.dynamic_index = d.dynamic_index "
@@ -822,7 +836,10 @@ class Database:
             "WHEN p.distance_unit = 'km' AND haversine_km(s.lat, s.lng, d.lat, d.lng) "
             "<= p.threshold THEN 'alert' "
             "WHEN p.distance_unit = 'km' AND haversine_km(s.lat, s.lng, d.lat, d.lng) "
-            "<= p.warning_limit THEN 'warning' ELSE 'ok' END AS status "
+            "<= p.warning_limit THEN 'warning' "
+            "WHEN p.distance_unit = 'km' AND "
+            "haversine_km(s.lat, s.lng, d.lat, d.lng) <= p.blue_limit "
+            "THEN 'blue' ELSE 'ok' END AS status "
             "FROM static_observations s "
             "JOIN dynamic_observations d ON d.poll_id = s.poll_id "
             "JOIN polls p ON p.id = s.poll_id WHERE "

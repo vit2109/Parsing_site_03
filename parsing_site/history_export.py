@@ -14,11 +14,13 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 STATUS_LABELS = {
     "alert": "Красная зона",
     "warning": "Жёлтая зона",
+    "blue": "Синяя зона",
     "ok": "В выбранном радиусе",
 }
 STATUS_FILLS = {
     "alert": PatternFill("solid", fgColor="F4CCCC"),
     "warning": PatternFill("solid", fgColor="FFF2CC"),
+    "blue": PatternFill("solid", fgColor="D9EAF7"),
     "ok": PatternFill("solid", fgColor="D9EAD3"),
 }
 HEADERS = (

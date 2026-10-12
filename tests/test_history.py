@@ -10,6 +10,7 @@ from unittest.mock import patch
 from parsing_site.config import TrackingConfig
 from parsing_site.coordinates import MapView, container_to_latlng, latlng_to_container
 from parsing_site.db import Database
+from parsing_site.html_probe import extract_scene_from_html
 from parsing_site.tracking import (
     SceneObject,
     TrackingSnapshot,
@@ -18,6 +19,79 @@ from parsing_site.tracking import (
 
 
 class HistoryDatabaseTest(unittest.TestCase):
+    def test_saved_page_uses_displayed_daily_object_numbers(self) -> None:
+        html = (Path(__file__).parent.parent / "html_test" / "11.html").read_text(
+            encoding="utf-8"
+        )
+        scene = extract_scene_from_html(
+            html,
+            TrackingConfig(dynamic_selector=".leaflet-marker-icon.map-incident"),
+        )
+
+        self.assertEqual(
+            [(item["index"], item["name"]) for item in scene["dynamics"]],
+            [(5, "БПЛА"), (4, "БПЛА"), (3, "БПЛА")],
+        )
+
+    def test_dynamic_object_types_are_read_from_incident_cards(self) -> None:
+        html = """
+        <div class="_card_a"><span class="_operatorNumber_a">1</span>БПЛА №1</div>
+        <div class="_card_b"><span class="_operatorNumber_b">2</span>МВШ №2</div>
+        <div class="_card_c"><span class="_operatorNumber_c">3</span>Ракета №3</div>
+        <div class="leaflet-marker-icon map-incident" style="transform: translate3d(1px, 2px, 0px)"></div>
+        <div class="leaflet-marker-icon map-incident" style="transform: translate3d(3px, 4px, 0px)"></div>
+        <div class="leaflet-marker-icon map-incident" style="transform: translate3d(5px, 6px, 0px)"></div>
+        """
+        scene = extract_scene_from_html(
+            html,
+            TrackingConfig(dynamic_selector=".leaflet-marker-icon.map-incident"),
+        )
+
+        self.assertEqual(
+            [(item["index"], item["name"]) for item in scene["dynamics"]],
+            [(1, "БПЛА"), (2, "МВШ"), (3, "Ракета")],
+        )
+
+    def test_configured_blue_distance_controls_classification(self) -> None:
+        with patch("parsing_site.tracking.get_phone_for_static", return_value=""):
+            snapshot = build_tracking_snapshot(
+                url="https://example.test/map",
+                title="Карта",
+                tracking=TrackingConfig(
+                    coordinate_mode="latlng",
+                    static_source="page",
+                    threshold=50,
+                    warning_distance=150,
+                    blue_distance=275,
+                ),
+                raw={
+                    "coordinate_mode": "latlng",
+                    "dynamics": [
+                        {
+                            "index": 7,
+                            "name": "Объект №7",
+                            "x": 0,
+                            "y": 0,
+                            "lat": 57.8,
+                            "lng": 37.6173,
+                        }
+                    ],
+                    "statics": [
+                        {
+                            "index": 1,
+                            "name": "Москва",
+                            "x": 0,
+                            "y": 0,
+                            "lat": 55.7558,
+                            "lng": 37.6173,
+                        }
+                    ],
+                },
+            )
+
+        self.assertEqual(snapshot.rows[0].status, "blue")
+        self.assertEqual(snapshot.blue_limit, 275.0)
+
     def test_fake_history_is_complete_and_isolated(self) -> None:
         with TemporaryDirectory() as directory:
             db = Database(Path(directory) / "tracking.db")
@@ -85,10 +159,12 @@ class HistoryDatabaseTest(unittest.TestCase):
             self.assertIsNotNone(zones)
             self.assertEqual(zones["alert_radius_km"], 50.0)
             self.assertEqual(zones["warning_radius_km"], 150.0)
+            self.assertEqual(zones["blue_radius_km"], 350.0)
             self.assertGreater(len(zones["points"]), 0)
             self.assertTrue(
                 any(
-                    point["status"] in {"alert", "warning"} for point in zones["points"]
+                    point["status"] in {"alert", "warning", "blue"}
+                    for point in zones["points"]
                 )
             )
             db.close()

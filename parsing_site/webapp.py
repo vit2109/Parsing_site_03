@@ -55,8 +55,10 @@ class SettingsIn(BaseModel):
     interval_seconds: float = Field(ge=0.4, le=600)
     threshold: float = Field(gt=0)
     warning_distance: float = Field(gt=0)
+    blue_distance: float = Field(default=350.0, gt=0)
     alert_color: str
     warning_color: str
+    blue_color: str = "#2878b8"
     sound_enabled: bool = True
     wait_for_selector: str = ".leaflet-marker-icon.map-incident"
     dynamic_selector: str = ".leaflet-marker-icon.map-incident"
@@ -188,6 +190,11 @@ def api_history_statics(
                         if settings.coordinate_mode == "latlng"
                         else None
                     ),
+                    "blue_radius_km": (
+                        settings.blue_distance
+                        if settings.coordinate_mode == "latlng"
+                        else None
+                    ),
                 },
             )
     return sorted(
@@ -230,7 +237,7 @@ def api_history(
         data_source=source,
     )
     dynamics: dict[tuple[int, str], dict[str, Any]] = {}
-    status_rank = {"ok": 0, "warning": 1, "alert": 2}
+    status_rank = {"ok": 0, "blue": 1, "warning": 2, "alert": 3}
     for row in rows:
         key = (int(row["dynamic_index"]), str(row["dynamic_name"]))
         current = dynamics.setdefault(
@@ -385,6 +392,7 @@ def api_history_static_zones(
             status_code=404,
             detail="Для стационарного объекта нет географических данных и зон за этот период.",
         )
+    result["blue_color"] = store.current().blue_color
     grouped: dict[int, dict[str, Any]] = {}
     for point in result.pop("points"):
         item = grouped.setdefault(
@@ -396,6 +404,7 @@ def api_history_static_zones(
                 "points": [],
                 "entered_alert": False,
                 "entered_warning": False,
+                "entered_blue": False,
             },
         )
         item["points"].append(point)
@@ -403,6 +412,7 @@ def api_history_static_zones(
         item["entered_warning"] = (
             item["entered_warning"] or point["status"] == "warning"
         )
+        item["entered_blue"] = item["entered_blue"] or point["status"] == "blue"
     return {
         **result,
         "trajectories": list(grouped.values()),

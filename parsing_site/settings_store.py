@@ -24,8 +24,10 @@ class RuntimeSettings:
     interval_seconds: float = 2.0
     threshold: float = 500.0
     warning_distance: float = 1000.0
+    blue_distance: float = 350.0
     alert_color: str = "#9b1c1c"
     warning_color: str = "#d4a017"
+    blue_color: str = "#2878b8"
     sound_enabled: bool = True
     wait_for_selector: str = ".leaflet-marker-icon.map-incident"
     dynamic_selector: str = ".leaflet-marker-icon.map-incident"
@@ -63,8 +65,10 @@ class RuntimeSettings:
                 threshold=self.threshold,
                 warning_ratio=max(1.0, warning_ratio),
                 warning_distance=self.warning_distance,
+                blue_distance=self.blue_distance,
                 alert_color=self.alert_color,
                 warning_color=self.warning_color,
+                blue_color=self.blue_color,
                 static_source=self.static_source,
                 coordinate_mode=self.coordinate_mode,
                 map_container_selector=self.map_container_selector,
@@ -125,8 +129,10 @@ def from_app_config(cfg: AppConfig) -> RuntimeSettings:
         interval_seconds=cfg.schedule.interval_seconds,
         threshold=cfg.tracking.threshold,
         warning_distance=warning,
+        blue_distance=cfg.tracking.blue_limit,
         alert_color=cfg.tracking.alert_color,
         warning_color=cfg.tracking.warning_color,
+        blue_color=cfg.tracking.blue_color,
         sound_enabled=True,
         wait_for_selector=cfg.browser.wait_for_selector
         or cfg.tracking.dynamic_selector,
@@ -142,6 +148,9 @@ def from_app_config(cfg: AppConfig) -> RuntimeSettings:
 
 def from_dict(data: dict[str, Any]) -> RuntimeSettings:
     """Десериализует словарь API/SQLite в runtime-настройки."""
+    threshold = float(data.get("threshold", 500))
+    warning_distance = max(float(data.get("warning_distance", 1000)), threshold)
+    blue_distance = max(float(data.get("blue_distance", 350)), warning_distance)
     objects: list[StaticObjectConfig] = []
     for index, item in enumerate(data.get("static_objects") or [], start=1):
         objects.append(
@@ -158,10 +167,12 @@ def from_dict(data: dict[str, Any]) -> RuntimeSettings:
         site=str(data.get("site", "http://127.0.0.1:8000")),
         cdp_url=str(data.get("cdp_url", "http://127.0.0.1:9222")),
         interval_seconds=float(data.get("interval_seconds", 2)),
-        threshold=float(data.get("threshold", 500)),
-        warning_distance=float(data.get("warning_distance", 1000)),
+        threshold=threshold,
+        warning_distance=warning_distance,
+        blue_distance=blue_distance,
         alert_color=str(data.get("alert_color", "#9b1c1c")),
         warning_color=str(data.get("warning_color", "#d4a017")),
+        blue_color=str(data.get("blue_color", "#2878b8")),
         sound_enabled=bool(data.get("sound_enabled", True)),
         wait_for_selector=str(
             data.get("wait_for_selector", ".leaflet-marker-icon.map-incident")
@@ -193,6 +204,7 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
     if settings.threshold <= 0:
         raise ValueError("Порог красного выделения должен быть больше 0.")
     warning = max(settings.warning_distance, settings.threshold)
+    blue = max(settings.blue_distance, warning)
     mode = normalize_mode(settings.coordinate_mode)
     for item in settings.static_objects:
         # x/y пересчитаются в lat/lng по текущему виду карты при опросе.
@@ -217,8 +229,10 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
         interval_seconds=float(settings.interval_seconds),
         threshold=float(settings.threshold),
         warning_distance=float(warning),
+        blue_distance=float(blue),
         alert_color=_norm_color(settings.alert_color, "цвета красного выделения"),
         warning_color=_norm_color(settings.warning_color, "цвета жёлтого выделения"),
+        blue_color=_norm_color(settings.blue_color, "цвета синего выделения"),
         sound_enabled=bool(settings.sound_enabled),
         wait_for_selector=settings.wait_for_selector.strip()
         or settings.dynamic_selector.strip(),
