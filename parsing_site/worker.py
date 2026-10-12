@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from datetime import date
 from time import monotonic
 from typing import Any
 
@@ -92,8 +93,11 @@ class ParseWorker:
         settings = self._store.current()
         cfg = settings.to_app_config(load_config())
         snapshot = snapshot_from_html_file(target, cfg.tracking)
-        self._table_history.save_snapshot(snapshot, source="test")
+        poll_id = self._db.save_snapshot(snapshot)
+        table_snapshot_id = self._table_history.save_snapshot(snapshot, source="test")
         payload = snapshot_to_dict(snapshot)
+        payload["poll_id"] = poll_id
+        payload["table_snapshot_id"] = table_snapshot_id
         with self._lock:
             self._latest = payload
             self._error = ""
@@ -101,8 +105,8 @@ class ParseWorker:
         self._db.add_log(
             "INFO",
             "probe",
-            f"Тестовый HTML {target.name}: динамических {len(snapshot.dynamics)}, "
-            f"строк {len(snapshot.rows)}",
+            f"HTML {target.name} импортирован: опрос #{poll_id}, "
+            f"динамических {len(snapshot.dynamics)}, строк {len(snapshot.rows)}",
         )
         return payload
 
@@ -118,6 +122,7 @@ class ParseWorker:
             # Новое подключение может указывать на другой сайт или другой порядок
             # DOM-маркеров. Не считаем перемещение относительно прежней сессии.
             previous: dict[int, tuple[float, ...]] = {}
+            previous_day: str | None = None
             settings = self._store.current()
             cfg = settings.to_app_config(load_config())
             interval = max(0.4, settings.interval_seconds)
@@ -151,6 +156,10 @@ class ParseWorker:
                         cfg = settings.to_app_config(load_config())
                         interval = max(0.4, settings.interval_seconds)
                         snapshot = capture_snapshot(session, cfg.tracking)
+                        current_day = date.today().isoformat()
+                        if current_day != previous_day:
+                            previous = {}
+                            previous_day = current_day
                         poll_id = self._db.save_snapshot(snapshot, previous)
                         self._table_history.save_snapshot(snapshot)
                         previous = {

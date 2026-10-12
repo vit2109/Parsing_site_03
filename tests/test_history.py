@@ -19,8 +19,8 @@ from parsing_site.tracking import (
 
 
 class HistoryDatabaseTest(unittest.TestCase):
-    def test_saved_page_uses_displayed_daily_object_numbers(self) -> None:
-        html = (Path(__file__).parent.parent / "html_test" / "11.html").read_text(
+    def test_saved_page_uses_positioned_daily_object_numbers(self) -> None:
+        html = (Path(__file__).parent.parent / "html_test" / "ip.html").read_text(
             encoding="utf-8"
         )
         scene = extract_scene_from_html(
@@ -30,7 +30,14 @@ class HistoryDatabaseTest(unittest.TestCase):
 
         self.assertEqual(
             [(item["index"], item["name"]) for item in scene["dynamics"]],
-            [(5, "БПЛА"), (4, "БПЛА"), (3, "БПЛА")],
+            [
+                (61, "БПЛА"),
+                (62, "БПЛА"),
+                (63, "БПЛА"),
+                (64, "БПЛА"),
+                (66, "БПЛА"),
+                (65, "БПЛА"),
+            ],
         )
 
     def test_dynamic_object_types_are_read_from_incident_cards(self) -> None:
@@ -166,6 +173,82 @@ class HistoryDatabaseTest(unittest.TestCase):
                     point["status"] in {"alert", "warning", "blue"}
                     for point in zones["points"]
                 )
+            )
+            db.close()
+
+    def test_daily_object_number_builds_separate_trajectories(self) -> None:
+        with TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "tracking.db")
+            static = SceneObject(
+                index=1, name="Москва", x=0, y=0, lat=55.7558, lng=37.6173
+            )
+
+            def save_point(lat: float, lng: float, timestamp: str) -> int:
+                dynamic = SceneObject(
+                    index=62,
+                    name="БПЛА",
+                    x=0,
+                    y=0,
+                    lat=lat,
+                    lng=lng,
+                )
+                poll_id = db.save_snapshot(
+                    TrackingSnapshot(
+                        url="https://example.test/map",
+                        title="Карта",
+                        viewport=(1000, 800),
+                        dynamics=[dynamic],
+                        statics=[static],
+                        rows=[],
+                        threshold=50,
+                        warning_limit=150,
+                        blue_limit=350,
+                        coordinate_mode="latlng",
+                        distance_unit="km",
+                    )
+                )
+                db._conn.execute(
+                    "UPDATE polls SET ts = ? WHERE id = ?", (timestamp, poll_id)
+                )
+                db._conn.commit()
+                return poll_id
+
+            save_point(55.76, 37.62, "2026-10-12T10:00:00+03:00")
+            save_point(55.77, 37.63, "2026-10-12T11:00:00+03:00")
+            save_point(56.00, 37.90, "2026-10-13T10:00:00+03:00")
+
+            first_day = db.list_dynamic_trajectory(
+                dynamic_index=62,
+                object_date="2026-10-12",
+                date_from="2026-10-12T00:00:00",
+                date_to="2026-10-13T23:59:59",
+            )
+            second_day = db.list_dynamic_trajectory(
+                dynamic_index=62,
+                object_date="2026-10-13",
+                date_from="2026-10-12T00:00:00",
+                date_to="2026-10-13T23:59:59",
+            )
+
+            self.assertEqual(len(first_day), 2)
+            self.assertEqual(len(second_day), 1)
+            self.assertTrue(
+                all(point["object_date"] == "2026-10-12" for point in first_day)
+            )
+            self.assertEqual(second_day[0]["object_date"], "2026-10-13")
+
+            zones = db.get_static_zone_trajectories(
+                static_index=1,
+                date_from="2026-10-12T00:00:00",
+                date_to="2026-10-13T23:59:59",
+            )
+            self.assertIsNotNone(zones)
+            identities = {
+                (point["object_date"], point["dynamic_index"])
+                for point in zones["points"]
+            }
+            self.assertEqual(
+                identities, {("2026-10-12", 62), ("2026-10-13", 62)}
             )
             db.close()
 

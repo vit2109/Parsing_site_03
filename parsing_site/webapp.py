@@ -236,15 +236,20 @@ def api_history(
         dynamic_query=dynamic,
         data_source=source,
     )
-    dynamics: dict[tuple[int, str], dict[str, Any]] = {}
+    dynamics: dict[tuple[str, int, str], dict[str, Any]] = {}
     status_rank = {"ok": 0, "blue": 1, "warning": 2, "alert": 3}
     for row in rows:
-        key = (int(row["dynamic_index"]), str(row["dynamic_name"]))
+        key = (
+            str(row["object_date"]),
+            int(row["dynamic_index"]),
+            str(row["dynamic_name"]),
+        )
         current = dynamics.setdefault(
             key,
             {
                 "dynamic_index": row["dynamic_index"],
                 "dynamic_name": row["dynamic_name"],
+                "object_date": row["object_date"],
                 "events": 0,
                 "min_distance_km": float(row["distance"]),
                 "last_seen": row["ts"],
@@ -331,6 +336,7 @@ def api_history_export(
 @app.get("/api/history/trajectory/{dynamic_index}")
 def api_history_trajectory(
     dynamic_index: int,
+    object_date: str = Query(pattern=r"^\d{4}-\d{2}-\d{2}$"),
     date_from: str = Query(min_length=10),
     date_to: str = Query(min_length=10),
     source: str = Query(default="real", pattern="^(real|fake)$"),
@@ -347,6 +353,7 @@ def api_history_trajectory(
         dynamic_index=dynamic_index,
         date_from=start.isoformat(timespec="seconds"),
         date_to=end.isoformat(timespec="seconds"),
+        object_date=object_date,
         data_source=source,
         limit=limit,
     )
@@ -358,6 +365,7 @@ def api_history_trajectory(
     return {
         "dynamic_index": dynamic_index,
         "dynamic_name": points[-1]["dynamic_name"],
+        "object_date": object_date,
         "color": points[-1].get("color") or "#3d8bfd",
         "points": points,
         "total": len(points),
@@ -393,13 +401,18 @@ def api_history_static_zones(
             detail="Для стационарного объекта нет географических данных и зон за этот период.",
         )
     result["blue_color"] = store.current().blue_color
-    grouped: dict[int, dict[str, Any]] = {}
+    grouped: dict[tuple[str, int], dict[str, Any]] = {}
     for point in result.pop("points"):
+        object_date = str(point["object_date"])
+        dynamic_index = int(point["dynamic_index"])
+        key = (object_date, dynamic_index)
         item = grouped.setdefault(
-            int(point["dynamic_index"]),
+            key,
             {
                 "dynamic_index": point["dynamic_index"],
                 "dynamic_name": point["dynamic_name"],
+                "object_date": object_date,
+                "trajectory_key": f"{object_date}:{dynamic_index}",
                 "color": point.get("color") or "#3d8bfd",
                 "points": [],
                 "entered_alert": False,
@@ -435,7 +448,7 @@ def api_generate_fake_history() -> dict[str, Any]:
 
 @app.post("/api/test-file")
 def api_test_file(path: str = "data_test/1.html") -> dict[str, Any]:
-    """Разбирает HTML из data_test и кладёт снимок в таблицу без Chrome."""
+    """Разбирает HTML из data_test и сохраняет снимок в обе базы без Chrome."""
     target = (ROOT / path).resolve()
     allowed = (ROOT / "data_test").resolve()
     try:

@@ -116,6 +116,7 @@ def extract_scene_from_html(html: str, tracking: TrackingConfig) -> dict[str, ob
         pane_x,
         pane_y,
         displayed_objects=_daily_objects(soup),
+        operator_numbers=_map_operator_numbers(soup),
     )
     page_statics = _collect_markers(
         soup,
@@ -166,6 +167,7 @@ def _collect_markers(
     pane_x: float,
     pane_y: float,
     displayed_objects: list[tuple[int, str]] | None = None,
+    operator_numbers: list[tuple[int, float, float]] | None = None,
 ) -> list[dict[str, object]]:
     """Собирает подходящие маркеры и переводит их координаты в формат сцены."""
     if not selector.strip():
@@ -188,8 +190,17 @@ def _collect_markers(
             if displayed_objects and index <= len(displayed_objects)
             else None
         )
-        displayed_number = displayed_object[0] if displayed_object else None
-        object_type = displayed_object[1] if displayed_object else ""
+        positioned_number = _number_at_marker(translate, operator_numbers or [])
+        displayed_number = positioned_number or (
+            displayed_object[0] if displayed_object else None
+        )
+        marker_classes = " ".join(str(value) for value in (el.get("class") or []))
+        marker_type = _object_type(marker_classes)
+        object_type = (
+            marker_type
+            if marker_type != "Объект"
+            else displayed_object[1] if displayed_object else "Объект"
+        )
         items.append(
             {
                 "index": displayed_number or index,
@@ -210,6 +221,33 @@ def _collect_markers(
             }
         )
     return items
+
+
+def _map_operator_numbers(soup: BeautifulSoup) -> list[tuple[int, float, float]]:
+    """Читает видимые номера и координаты отдельных Leaflet-подписей."""
+    labels: list[tuple[int, float, float]] = []
+    for element in soup.select(".leaflet-marker-icon.map-incident-operator-number"):
+        match = re.fullmatch(r"№?\s*(\d+)", element.get_text(" ", strip=True))
+        translate = parse_translate3d(element.get("style") or "")
+        if match and translate and int(match.group(1)) > 0:
+            labels.append((int(match.group(1)), translate[0], translate[1]))
+    return labels
+
+
+def _number_at_marker(
+    marker_translate: tuple[float, float],
+    labels: list[tuple[int, float, float]],
+) -> int | None:
+    """Сопоставляет маркер с номером по одинаковой позиции ``translate3d``."""
+    if not labels:
+        return None
+    marker_x, marker_y = marker_translate
+    number, label_x, label_y = min(
+        labels,
+        key=lambda item: (item[1] - marker_x) ** 2 + (item[2] - marker_y) ** 2,
+    )
+    distance_sq = (label_x - marker_x) ** 2 + (label_y - marker_y) ** 2
+    return number if distance_sq <= 4 else None
 
 
 def _daily_objects(soup: BeautifulSoup) -> list[tuple[int, str]]:

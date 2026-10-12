@@ -269,18 +269,49 @@ _EXTRACT_SCRIPT = """
     return result;
   })();
 
+  // В новых версиях страницы суточный номер рисуется отдельным Leaflet-маркером.
+  // Подписей может быть две на объект, поэтому связываем номер с инцидентом по
+  // одинаковому translate3d, а не по порядку элементов в DOM.
+  const operatorNumbers = [...document.querySelectorAll(".leaflet-marker-icon.map-incident-operator-number")]
+    .map((el) => {
+      const match = String(el.textContent || "").trim().match(/^№?\\s*(\\d+)$/);
+      const transform = parseTransform(el.getAttribute("style") || "");
+      return match && transform
+        ? { number: Number(match[1]), x: transform.x, y: transform.y }
+        : null;
+    })
+    .filter((item) => item && Number.isInteger(item.number) && item.number > 0);
+
+  const numberAtMarker = (box) => {
+    if (!box.translate3d || !operatorNumbers.length) return null;
+    let nearest = null;
+    operatorNumbers.forEach((item) => {
+      const distance = (item.x - box.translate3d.x) ** 2 + (item.y - box.translate3d.y) ** 2;
+      if (!nearest || distance < nearest.distance) nearest = { ...item, distance };
+    });
+    return nearest && nearest.distance <= 4 ? nearest.number : null;
+  };
+
   const collect = (selector, prefix, displayedObjects = []) =>
     selector
       ? [...document.querySelectorAll(selector)].map((el, index) => {
           const box = centerOf(el);
-          const displayedObject = displayedObjects[index];
+          const positionedNumber = numberAtMarker(box);
+          const listedObject = displayedObjects[index];
+          const markerType = objectTypeFrom([...el.classList].join(" "));
+          const displayedObject = Number.isInteger(positionedNumber)
+            ? { number: positionedNumber, type: markerType }
+            : listedObject;
+          const objectType = markerType !== "Объект"
+            ? markerType
+            : displayedObject?.type || "Объект";
           return {
             index: Number.isInteger(displayedObject?.number) ? displayedObject.number : index + 1,
             name: Number.isInteger(displayedObject?.number)
-              ? displayedObject.type
+              ? objectType
               : String(pickName(el, index, prefix)),
             object_type: Number.isInteger(displayedObject?.number)
-              ? displayedObject.type
+              ? objectType
               : objectTypeFrom(pickName(el, index, prefix)),
             color: getComputedStyle(el).backgroundColor,
             x: box.x,

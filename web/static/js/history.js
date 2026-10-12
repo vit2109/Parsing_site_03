@@ -289,14 +289,14 @@ function renderHistory(data) {
 
   els.summaryPanel.hidden = !summary.length;
   els.summary.innerHTML = summary.map((item) => `
-    <button type="button" class="history-object-card history-status-${escapeAttr(item.status || "ok")}" data-dynamic-index="${item.dynamic_index}">
+    <button type="button" class="history-object-card history-status-${escapeAttr(item.status || "ok")}" data-dynamic-index="${item.dynamic_index}" data-object-date="${escapeAttr(item.object_date)}">
       <strong>#${item.dynamic_index} ${escapeHtml(item.dynamic_name)}</strong>
       <span>${Number(item.min_distance_km).toFixed(3)} км</span>
-      <small>${item.events} ${pluralRecords(item.events)}</small>
+      <small>${escapeHtml(item.object_date)} · ${item.events} ${pluralRecords(item.events)}</small>
     </button>
   `).join("");
   els.summary.querySelectorAll("[data-dynamic-index]").forEach((button) => {
-    button.addEventListener("click", () => openDynamicTrajectory(Number(button.dataset.dynamicIndex)));
+    button.addEventListener("click", () => openDynamicTrajectory(Number(button.dataset.dynamicIndex), button.dataset.objectDate));
   });
 
   if (!rows.length) {
@@ -308,14 +308,14 @@ function renderHistory(data) {
       <td>${escapeHtml(formatDateTime(row.ts))}</td>
       <td><button type="button" class="history-link" data-static-index="${row.static_index}">#${row.static_index} ${escapeHtml(row.static_name)}</button></td>
       <td>${formatCoords(row.static_lat, row.static_lng)}</td>
-      <td><button type="button" class="history-link" data-dynamic-index="${row.dynamic_index}">#${row.dynamic_index} ${escapeHtml(row.dynamic_name)}</button></td>
+      <td><button type="button" class="history-link" data-dynamic-index="${row.dynamic_index}" data-object-date="${escapeAttr(row.object_date)}">#${row.dynamic_index} ${escapeHtml(row.dynamic_name)}</button></td>
       <td>${formatCoords(row.dynamic_lat, row.dynamic_lng)}</td>
       <td><strong>${Number(row.distance).toFixed(3)} км</strong></td>
       <td>${STATUS_LABEL[row.status] || escapeHtml(row.status)}</td>
     </tr>
   `).join("");
   els.body.querySelectorAll("[data-dynamic-index]").forEach((button) => {
-    button.addEventListener("click", () => openDynamicTrajectory(Number(button.dataset.dynamicIndex)));
+    button.addEventListener("click", () => openDynamicTrajectory(Number(button.dataset.dynamicIndex), button.dataset.objectDate));
   });
   els.body.querySelectorAll("[data-static-index]").forEach((button) => {
     button.addEventListener("click", () => openStaticZones(Number(button.dataset.staticIndex)));
@@ -343,16 +343,18 @@ function renderOverviewMap() {
 }
 
 /** Загружает и открывает диалог траектории динамического объекта. */
-async function openDynamicTrajectory(dynamicIndex) {
+async function openDynamicTrajectory(dynamicIndex, objectDate) {
   hideError();
-  els.trajectoryTitle.textContent = `Объект #${dynamicIndex}`;
+  els.trajectoryTitle.textContent = `Объект #${dynamicIndex} · ${objectDate}`;
   els.trajectoryMeta.textContent = "Загрузка точек…";
   els.trajectoryPoints.innerHTML = '<p class="muted">Загрузка…</p>';
   els.trajectoryModal.showModal();
   try {
-    const data = await getJson(`/api/history/trajectory/${dynamicIndex}?${periodParams()}`);
-    els.trajectoryTitle.textContent = `#${data.dynamic_index} ${data.dynamic_name}`;
-    els.trajectoryMeta.textContent = `${data.total} ${pluralPoints(data.total)} за выбранный период${data.truncated ? " · список ограничен" : ""}`;
+    const params = periodParams();
+    params.set("object_date", objectDate);
+    const data = await getJson(`/api/history/trajectory/${dynamicIndex}?${params}`);
+    els.trajectoryTitle.textContent = `#${data.dynamic_index} ${data.dynamic_name} · ${data.object_date}`;
+    els.trajectoryMeta.textContent = `${data.total} ${pluralPoints(data.total)} за сутки${data.truncated ? " · список ограничен" : ""}`;
     renderDynamicMap(data);
   } catch (error) {
     els.trajectoryModal.close();
@@ -370,7 +372,7 @@ function renderDynamicMap(data) {
       label: `${index + 1}. ${formatDateTime(point.ts)}`,
       color,
     })),
-    polylines: [{ id: data.dynamic_index, color, points: data.points }],
+    polylines: [{ id: `${data.object_date}:${data.dynamic_index}`, label: `#${data.dynamic_index} · ${data.object_date}`, color, points: data.points }],
   });
   els.trajectoryPoints.innerHTML = data.points.map((point, index) => `
     <button type="button" class="history-point" data-point-index="${index}">
@@ -418,7 +420,8 @@ function renderStaticZoneMap(data) {
       markerClass: point.status === "outside" ? "offline-marker--dim" : "",
     })),
     polylines: data.trajectories.map((trajectory) => ({
-      id: trajectory.dynamic_index,
+      id: trajectory.trajectory_key,
+      label: `#${trajectory.dynamic_index} · ${trajectory.object_date}`,
       color: safeColor(trajectory.color),
       points: trajectory.points,
     })),
@@ -429,16 +432,16 @@ function renderStaticZoneMap(data) {
     ],
     centerPoint: { lat: data.lat, lng: data.lng, label: `#${data.static_index} ${data.static_name}` },
   });
-  els.staticTrajectories.innerHTML = data.trajectories.length ? data.trajectories.map((trajectory) => `
-    <section class="history-trajectory-group" data-trajectory-group="${trajectory.dynamic_index}">
-      <button type="button" class="history-point history-trajectory-toggle" data-zone-dynamic="${trajectory.dynamic_index}" aria-expanded="false">
+  els.staticTrajectories.innerHTML = data.trajectories.length ? data.trajectories.map((trajectory, trajectoryIndex) => `
+    <section class="history-trajectory-group" data-trajectory-group="${escapeAttr(trajectory.trajectory_key)}">
+      <button type="button" class="history-point history-trajectory-toggle" data-zone-trajectory="${trajectoryIndex}" aria-expanded="false">
         <strong><i class="trajectory-swatch" style="background:${safeColor(trajectory.color)}"></i>#${trajectory.dynamic_index} ${escapeHtml(trajectory.dynamic_name)}</strong>
-        <span>${trajectory.points.length} ${pluralPoints(trajectory.points.length)} · ${trajectory.entered_alert ? "входил в красную зону" : trajectory.entered_warning ? "входил в жёлтую зону" : "входил в синюю зону"}</span>
+        <span>${escapeHtml(trajectory.object_date)} · ${trajectory.points.length} ${pluralPoints(trajectory.points.length)} · ${trajectory.entered_alert ? "входил в красную зону" : trajectory.entered_warning ? "входил в жёлтую зону" : "входил в синюю зону"}</span>
         <i class="trajectory-chevron" aria-hidden="true">⌄</i>
       </button>
       <div class="history-trajectory-points" hidden>
         ${trajectory.points.map((point, index) => `
-          <button type="button" class="history-point history-point--nested" data-zone-point="${trajectory.dynamic_index}:${index}">
+          <button type="button" class="history-point history-point--nested" data-zone-point="${trajectoryIndex}:${index}">
             <strong><i class="zone-status-dot zone-status-${escapeAttr(point.status)}"></i>${index + 1}. ${escapeHtml(formatDateTime(point.ts))}</strong>
             <span>${escapeHtml(coordsText(point.lat, point.lng))} · ${Number(point.distance).toFixed(3)} км · ${zoneStatusLabel(point.status)}</span>
           </button>
@@ -446,25 +449,26 @@ function renderStaticZoneMap(data) {
       </div>
     </section>
   `).join("") : '<p class="muted history-empty-detail">За выбранный период никто не входил в зоны.</p>';
-  els.staticTrajectories.querySelectorAll("[data-zone-dynamic]").forEach((button) => {
+  els.staticTrajectories.querySelectorAll("[data-zone-trajectory]").forEach((button) => {
     button.addEventListener("click", () => {
       const group = button.closest(".history-trajectory-group");
       const points = group.querySelector(".history-trajectory-points");
       const expanded = button.getAttribute("aria-expanded") === "true";
       button.setAttribute("aria-expanded", String(!expanded));
       points.hidden = expanded;
-      staticZoneMap.highlightTrajectory(Number(button.dataset.zoneDynamic));
+      const trajectory = data.trajectories[Number(button.dataset.zoneTrajectory)];
+      staticZoneMap.highlightTrajectory(trajectory.trajectory_key);
     });
   });
   els.staticTrajectories.querySelectorAll("[data-zone-point]").forEach((button) => {
     button.addEventListener("click", () => {
-      const [dynamicIndex, pointIndex] = button.dataset.zonePoint.split(":").map(Number);
-      const trajectory = data.trajectories.find((item) => Number(item.dynamic_index) === dynamicIndex);
+      const [trajectoryIndex, pointIndex] = button.dataset.zonePoint.split(":").map(Number);
+      const trajectory = data.trajectories[trajectoryIndex];
       const point = trajectory?.points[pointIndex];
       if (!point) return;
       els.staticTrajectories.querySelectorAll("[data-zone-point].selected").forEach((item) => item.classList.remove("selected"));
       button.classList.add("selected");
-      staticZoneMap.highlightTrajectory(dynamicIndex);
+      staticZoneMap.highlightTrajectory(trajectory.trajectory_key);
       staticZoneMap.selectPoint(
         point,
         `${trajectory.dynamic_name} · ${formatDateTime(point.ts)} · ${Number(point.distance).toFixed(3)} км`,
@@ -479,6 +483,7 @@ function renderOfflineMap(container, options = {}) {
   const width = 1000;
   const height = 620;
   const padding = 52;
+  const minZoom = 0.35;
   const points = options.points || [];
   const polylines = options.polylines || [];
   const zones = (options.zones || []).filter((zone) => Number.isFinite(zone.radiusKm));
@@ -553,7 +558,13 @@ function renderOfflineMap(container, options = {}) {
       <text class="offline-grid-label" x="${x}" y="${height - 18}" text-anchor="middle">${lng.toFixed(2)}°</text>
       <text class="offline-grid-label" x="12" y="${y + 4}">${lat.toFixed(2)}°</text>`;
   }).join("");
-  const russiaMap = buildRussiaMapMarkup(project, toWorld, { minX, maxX, minY, maxY });
+  const mapExpansion = (1 / minZoom - 1) / 2;
+  const russiaMap = buildRussiaMapMarkup(project, toWorld, {
+    minX: minX - (maxX - minX) * mapExpansion,
+    maxX: maxX + (maxX - minX) * mapExpansion,
+    minY: minY - (maxY - minY) * mapExpansion,
+    maxY: maxY + (maxY - minY) * mapExpansion,
+  });
   const zoneMarkup = zones.map((zone) => {
     const center = project(zone.center);
     const radius = Math.max(1, zone.radiusKm * scale);
@@ -564,7 +575,8 @@ function renderOfflineMap(container, options = {}) {
       const projected = project(point);
       return `${projected.x},${projected.y}`;
     }).join(" ");
-    return `<polyline class="offline-route" data-route-id="${Number(line.id)}" points="${path}" style="--route-color:${safeColor(line.color)}"><title>Траектория объекта #${Number(line.id)}</title></polyline>`;
+    const routeId = String(line.id);
+    return `<polyline class="offline-route" data-route-id="${escapeAttr(routeId)}" points="${path}" style="--route-color:${safeColor(line.color)}"><title>Траектория ${escapeHtml(line.label || routeId)}</title></polyline>`;
   }).join("");
   const pointMarkup = points.map((point, index) => {
     const projected = project(point);
@@ -592,7 +604,7 @@ function renderOfflineMap(container, options = {}) {
   // <div class="offline-map-context">ЛНР, ДНР, Херсонская и Запорожская области показаны по административной модели РФ</div>
   container.innerHTML = `
     <svg class="offline-map-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Офлайн-карта России с объектами">
-      <rect class="offline-map-background" width="${width}" height="${height}" rx="16"></rect>
+      <rect class="offline-map-background" x="${-width * mapExpansion}" y="${-height * mapExpansion}" width="${width / minZoom}" height="${height / minZoom}" rx="16"></rect>
       <g class="offline-russia-map">${russiaMap.regions}</g>
       <g>${grid}</g>
       <g>${zoneMarkup}</g>
@@ -624,7 +636,6 @@ function renderOfflineMap(container, options = {}) {
   const zoomIn = container.querySelector('[data-map-zoom="in"]');
   const zoomOut = container.querySelector('[data-map-zoom="out"]');
   const zoomReset = container.querySelector('[data-map-zoom="reset"]');
-  const minZoom = 1;
   const maxZoom = 8;
   const zoomStep = 1.45;
   const view = { x: 0, y: 0, width, height, zoom: 1 };
@@ -665,7 +676,7 @@ function renderOfflineMap(container, options = {}) {
       selected.querySelector(".offline-selected-halo").style.strokeWidth = `${5 * inverseZoom}px`;
       selected.querySelector(".offline-selected-core").style.strokeWidth = `${2 * inverseZoom}px`;
     }
-    svg.classList.toggle("is-zoomed", view.zoom > minZoom + 0.001);
+    svg.classList.toggle("is-zoomed", Math.abs(view.zoom - 1) > 0.001);
     zoomReset.textContent = `${Math.round(view.zoom * 100)}%`;
     zoomIn.disabled = view.zoom >= maxZoom - 0.001;
     zoomOut.disabled = view.zoom <= minZoom + 0.001;
@@ -677,8 +688,8 @@ function renderOfflineMap(container, options = {}) {
     const worldAnchorY = view.y + view.height * anchorY;
     const nextWidth = width / nextZoom;
     const nextHeight = height / nextZoom;
-    view.x = Math.max(0, Math.min(width - nextWidth, worldAnchorX - nextWidth * anchorX));
-    view.y = Math.max(0, Math.min(height - nextHeight, worldAnchorY - nextHeight * anchorY));
+    view.x = clampMapOrigin(worldAnchorX - nextWidth * anchorX, width, nextWidth);
+    view.y = clampMapOrigin(worldAnchorY - nextHeight * anchorY, height, nextHeight);
     view.width = nextWidth;
     view.height = nextHeight;
     view.zoom = nextZoom;
@@ -703,7 +714,7 @@ function renderOfflineMap(container, options = {}) {
     changeZoom(view.zoom * (event.deltaY < 0 ? zoomStep : 1 / zoomStep), anchorX, anchorY);
   }, { passive: false });
   svg.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0 || view.zoom <= minZoom + 0.001) return;
+    if (event.button !== 0 || Math.abs(view.zoom - 1) < 0.001) return;
     // Маркер остаётся обычной кликабельной целью при любом масштабе.
     // Захват указателя на SVG раньше подменял цель click после zoom > 100%.
     if (event.target.closest("[data-static-index]")) return;
@@ -724,8 +735,8 @@ function renderOfflineMap(container, options = {}) {
     const deltaX = event.clientX - drag.clientX;
     const deltaY = event.clientY - drag.clientY;
     if (Math.hypot(deltaX, deltaY) >= 4) drag.moved = true;
-    view.x = Math.max(0, Math.min(width - view.width, drag.viewX - deltaX * view.width / rect.width));
-    view.y = Math.max(0, Math.min(height - view.height, drag.viewY - deltaY * view.height / rect.height));
+    view.x = clampMapOrigin(drag.viewX - deltaX * view.width / rect.width, width, view.width);
+    view.y = clampMapOrigin(drag.viewY - deltaY * view.height / rect.height, height, view.height);
     applyView();
   });
   const finishDrag = (event) => {
@@ -772,10 +783,17 @@ function renderOfflineMap(container, options = {}) {
     },
     highlightTrajectory(id) {
       container.querySelectorAll("[data-route-id]").forEach((route) => {
-        route.classList.toggle("selected", Number(route.dataset.routeId) === Number(id));
+        route.classList.toggle("selected", route.dataset.routeId === String(id));
       });
     },
   };
+}
+
+/** Ограничивает панорамирование как при приближении, так и при масштабе ниже 100%. */
+function clampMapOrigin(value, baseSize, viewSize) {
+  const minimum = Math.min(0, baseSize - viewSize);
+  const maximum = Math.max(0, baseSize - viewSize);
+  return Math.max(minimum, Math.min(maximum, value));
 }
 
 /** Формирует SVG-подпись, сохраняющую размер при масштабировании карты. */

@@ -667,25 +667,33 @@ class Database:
         dynamic_index: int,
         date_from: str,
         date_to: str,
+        object_date: str | None = None,
         data_source: str = "real",
         limit: int = 20_000,
     ) -> list[dict[str, Any]]:
-        """Все географические положения динамического объекта по времени."""
+        """Положения объекта; при указанной дате — только его суточная траектория."""
+        day_filter = " AND substr(p.ts, 1, 10) = ?" if object_date else ""
+        params: list[Any] = [
+            dynamic_index,
+            date_from,
+            date_to,
+            _normalize_source(data_source),
+        ]
+        if object_date:
+            params.append(object_date)
+        params.append(max(1, min(limit, 20_000)))
         with self._lock:
             rows = self._conn.execute(
-                "SELECT d.id, p.id AS poll_id, p.ts, d.dynamic_index, d.name AS "
+                "SELECT d.id, p.id AS poll_id, p.ts, substr(p.ts, 1, 10) AS "
+                "object_date, d.dynamic_index, d.name AS "
                 "dynamic_name, d.lat, d.lng, d.color FROM dynamic_observations d "
                 "JOIN polls p ON p.id = d.poll_id WHERE d.dynamic_index = ? "
                 "AND p.ts >= ? AND p.ts <= ? AND p.data_source = ? "
+                + day_filter
+                + " "
                 "AND d.lat IS NOT NULL AND d.lng IS NOT NULL "
                 "ORDER BY p.ts ASC, d.id ASC LIMIT ?",
-                (
-                    dynamic_index,
-                    date_from,
-                    date_to,
-                    _normalize_source(data_source),
-                    max(1, min(limit, 20_000)),
-                ),
+                params,
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -716,14 +724,16 @@ class Database:
                 return None
             rows = self._conn.execute(
                 "WITH entered AS ("
-                "SELECT DISTINCT d.dynamic_index FROM static_observations s "
+                "SELECT DISTINCT substr(p.ts, 1, 10) AS object_date, "
+                "d.dynamic_index FROM static_observations s "
                 "JOIN dynamic_observations d ON d.poll_id = s.poll_id "
                 "JOIN polls p ON p.id = s.poll_id WHERE s.static_index = ? "
                 "AND p.ts >= ? AND p.ts <= ? AND p.data_source = ? "
                 "AND p.distance_unit = 'km' AND s.lat IS NOT NULL "
                 "AND s.lng IS NOT NULL AND d.lat IS NOT NULL AND d.lng IS NOT NULL "
                 "AND haversine_km(s.lat, s.lng, d.lat, d.lng) <= p.blue_limit"
-                ") SELECT d.id, p.id AS poll_id, p.ts, d.dynamic_index, "
+                ") SELECT d.id, p.id AS poll_id, p.ts, "
+                "substr(p.ts, 1, 10) AS object_date, d.dynamic_index, "
                 "d.name AS dynamic_name, d.lat, d.lng, d.color, "
                 "haversine_km(s.lat, s.lng, d.lat, d.lng) AS distance, CASE "
                 "WHEN p.distance_unit = 'km' AND haversine_km(s.lat, s.lng, d.lat, d.lng) "
@@ -735,10 +745,11 @@ class Database:
                 "FROM dynamic_observations d JOIN polls p ON p.id = d.poll_id "
                 "JOIN static_observations s ON s.poll_id = p.id AND s.static_index = ? "
                 "JOIN entered e ON e.dynamic_index = d.dynamic_index "
+                "AND e.object_date = substr(p.ts, 1, 10) "
                 "WHERE p.ts >= ? AND p.ts <= ? AND p.data_source = ? "
                 "AND d.lat IS NOT NULL AND d.lng IS NOT NULL "
                 "AND s.lat IS NOT NULL AND s.lng IS NOT NULL "
-                "ORDER BY d.dynamic_index, p.ts ASC, d.id ASC LIMIT ?",
+                "ORDER BY object_date, d.dynamic_index, p.ts ASC, d.id ASC LIMIT ?",
                 (
                     static_index,
                     date_from,
@@ -828,6 +839,7 @@ class Database:
         params.extend([max_distance_km, max(1, min(limit, 20_000))])
         sql = (
             "SELECT * FROM (SELECT d.id, p.ts, p.id AS poll_id, "
+            "substr(p.ts, 1, 10) AS object_date, "
             "s.static_index, s.name AS static_name, s.lat AS static_lat, "
             "s.lng AS static_lng, d.dynamic_index, d.name AS dynamic_name, "
             "d.lat AS dynamic_lat, d.lng AS dynamic_lng, "
