@@ -290,7 +290,7 @@ function renderHistory(data) {
   els.summaryPanel.hidden = !summary.length;
   els.summary.innerHTML = summary.map((item) => `
     <button type="button" class="history-object-card history-status-${escapeAttr(item.status || "ok")}" data-dynamic-index="${item.dynamic_index}" data-object-date="${escapeAttr(item.object_date)}">
-      <strong>#${item.dynamic_index} ${escapeHtml(item.dynamic_name)}</strong>
+      <strong>${dynamicNumberLabel(item.dynamic_index)} ${escapeHtml(item.dynamic_name)}</strong>
       <span>${Number(item.min_distance_km).toFixed(3)} км</span>
       <small>${escapeHtml(item.object_date)} · ${item.events} ${pluralRecords(item.events)}</small>
     </button>
@@ -308,7 +308,7 @@ function renderHistory(data) {
       <td>${escapeHtml(formatDateTime(row.ts))}</td>
       <td><button type="button" class="history-link" data-static-index="${row.static_index}">#${row.static_index} ${escapeHtml(row.static_name)}</button></td>
       <td>${formatCoords(row.static_lat, row.static_lng)}</td>
-      <td><button type="button" class="history-link" data-dynamic-index="${row.dynamic_index}" data-object-date="${escapeAttr(row.object_date)}">#${row.dynamic_index} ${escapeHtml(row.dynamic_name)}</button></td>
+      <td><button type="button" class="history-link" data-dynamic-index="${row.dynamic_index}" data-object-date="${escapeAttr(row.object_date)}">${dynamicNumberLabel(row.dynamic_index)} ${escapeHtml(row.dynamic_name)}</button></td>
       <td>${formatCoords(row.dynamic_lat, row.dynamic_lng)}</td>
       <td><strong>${Number(row.distance).toFixed(3)} км</strong></td>
       <td>${STATUS_LABEL[row.status] || escapeHtml(row.status)}</td>
@@ -342,10 +342,16 @@ function renderOverviewMap() {
   });
 }
 
+/** Отличает временный ID маркера от суточного номера сайта. */
+function dynamicNumberLabel(index) {
+  const value = Number(index);
+  return value < 0 ? `ID ${-value}` : `№${value}`;
+}
+
 /** Загружает и открывает диалог траектории динамического объекта. */
 async function openDynamicTrajectory(dynamicIndex, objectDate) {
   hideError();
-  els.trajectoryTitle.textContent = `Объект #${dynamicIndex} · ${objectDate}`;
+  els.trajectoryTitle.textContent = `Объект ${dynamicNumberLabel(dynamicIndex)} · ${objectDate}`;
   els.trajectoryMeta.textContent = "Загрузка точек…";
   els.trajectoryPoints.innerHTML = '<p class="muted">Загрузка…</p>';
   els.trajectoryModal.showModal();
@@ -353,7 +359,7 @@ async function openDynamicTrajectory(dynamicIndex, objectDate) {
     const params = periodParams();
     params.set("object_date", objectDate);
     const data = await getJson(`/api/history/trajectory/${dynamicIndex}?${params}`);
-    els.trajectoryTitle.textContent = `#${data.dynamic_index} ${data.dynamic_name} · ${data.object_date}`;
+    els.trajectoryTitle.textContent = `${dynamicNumberLabel(data.dynamic_index)} ${data.dynamic_name} · ${data.object_date}`;
     els.trajectoryMeta.textContent = `${data.total} ${pluralPoints(data.total)} за сутки${data.truncated ? " · список ограничен" : ""}`;
     renderDynamicMap(data);
   } catch (error) {
@@ -372,7 +378,7 @@ function renderDynamicMap(data) {
       label: `${index + 1}. ${formatDateTime(point.ts)}`,
       color,
     })),
-    polylines: [{ id: `${data.object_date}:${data.dynamic_index}`, label: `#${data.dynamic_index} · ${data.object_date}`, color, points: data.points }],
+    polylines: [{ id: `${data.object_date}:${data.dynamic_index}`, label: `${dynamicNumberLabel(data.dynamic_index)} · ${data.object_date}`, color, points: data.points }],
   });
   els.trajectoryPoints.innerHTML = data.points.map((point, index) => `
     <button type="button" class="history-point" data-point-index="${index}">
@@ -421,7 +427,7 @@ function renderStaticZoneMap(data) {
     })),
     polylines: data.trajectories.map((trajectory) => ({
       id: trajectory.trajectory_key,
-      label: `#${trajectory.dynamic_index} · ${trajectory.object_date}`,
+      label: `${dynamicNumberLabel(trajectory.dynamic_index)} · ${trajectory.object_date}`,
       color: safeColor(trajectory.color),
       points: trajectory.points,
     })),
@@ -435,7 +441,7 @@ function renderStaticZoneMap(data) {
   els.staticTrajectories.innerHTML = data.trajectories.length ? data.trajectories.map((trajectory, trajectoryIndex) => `
     <section class="history-trajectory-group" data-trajectory-group="${escapeAttr(trajectory.trajectory_key)}">
       <button type="button" class="history-point history-trajectory-toggle" data-zone-trajectory="${trajectoryIndex}" aria-expanded="false">
-        <strong><i class="trajectory-swatch" style="background:${safeColor(trajectory.color)}"></i>#${trajectory.dynamic_index} ${escapeHtml(trajectory.dynamic_name)}</strong>
+        <strong><i class="trajectory-swatch" style="background:${safeColor(trajectory.color)}"></i>${dynamicNumberLabel(trajectory.dynamic_index)} ${escapeHtml(trajectory.dynamic_name)}</strong>
         <span>${escapeHtml(trajectory.object_date)} · ${trajectory.points.length} ${pluralPoints(trajectory.points.length)} · ${trajectory.entered_alert ? "входил в красную зону" : trajectory.entered_warning ? "входил в жёлтую зону" : "входил в синюю зону"}</span>
         <i class="trajectory-chevron" aria-hidden="true">⌄</i>
       </button>

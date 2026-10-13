@@ -15,12 +15,13 @@ from parsing_site.html_probe import extract_scene_from_html
 from parsing_site.tracking import (
     SceneObject,
     TrackingSnapshot,
+    build_distance_rows,
     build_tracking_snapshot,
 )
 
 
 class HistoryDatabaseTest(unittest.TestCase):
-    def test_new_index_without_labels_does_not_invent_numbers(self) -> None:
+    def test_new_index_without_labels_uses_distinct_temporary_ids(self) -> None:
         path = Path(__file__).parent.parent / "html_test" / "index.html"
         if not path.exists():
             self.skipTest("пользовательский файл index.html не включён в репозиторий")
@@ -28,8 +29,33 @@ class HistoryDatabaseTest(unittest.TestCase):
         scene = extract_scene_from_html(
             html, TrackingConfig(dynamic_selector=".leaflet-marker-icon.map-incident")
         )
-        self.assertEqual(scene["dynamics"], [])
+        self.assertGreater(len(scene["dynamics"]), 0)
+        self.assertTrue(all(item["index"] < 0 for item in scene["dynamics"]))
+        self.assertEqual(len({item["index"] for item in scene["dynamics"]}), len(scene["dynamics"]))
         self.assertGreater(scene["unnumbered_dynamics"], 0)
+
+    def test_second_page_matches_numbers_by_marker_position(self) -> None:
+        path = Path(__file__).parent.parent / "html_test" / "2.html"
+        if not path.exists():
+            self.skipTest("пользовательский файл 2.html не включён в репозиторий")
+        scene = extract_scene_from_html(
+            path.read_text(encoding="utf-8"),
+            TrackingConfig(dynamic_selector=".leaflet-marker-icon.map-incident"),
+        )
+        self.assertEqual(
+            {item["index"] for item in scene["dynamics"]},
+            {801, 802, 803, 804, 805, 806, 807, 809, 810},
+        )
+        self.assertEqual(next(item["name"] for item in scene["dynamics"] if item["index"] == 805), "МВШ")
+
+    def test_distance_table_uses_object_type_instead_of_generic_name(self) -> None:
+        rows = build_distance_rows(
+            [SceneObject(index=1, name="Точка", x=0, y=0)],
+            [SceneObject(index=805, name="Объект", object_type="МВШ", x=1, y=1)],
+            TrackingConfig(coordinate_mode="screen"),
+            mode="screen",
+        )
+        self.assertEqual(rows[0].dynamic_name, "МВШ")
 
     def test_duplicate_markers_with_one_visible_number_are_one_object(self) -> None:
         html = """

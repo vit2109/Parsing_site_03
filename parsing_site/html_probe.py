@@ -117,7 +117,7 @@ def extract_scene_from_html(html: str, tracking: TrackingConfig) -> dict[str, ob
         pane_x,
         pane_y,
         operator_numbers=_map_operator_numbers(soup),
-        require_displayed_number=True,
+        use_fallback_id=True,
     )
     page_statics = _collect_markers(
         soup,
@@ -135,7 +135,7 @@ def extract_scene_from_html(html: str, tracking: TrackingConfig) -> dict[str, ob
         map_raw["zoom"] = map_view.zoom
     return {
         "dynamics": dynamics,
-        "unnumbered_dynamics": max(0, len(soup.select(dynamic_selector)) - len(dynamics)),
+        "unnumbered_dynamics": sum(item["index"] < 0 for item in dynamics),
         "statics": page_statics,
         "config_statics": [],
         "viewport": {
@@ -169,7 +169,7 @@ def _collect_markers(
     pane_x: float,
     pane_y: float,
     operator_numbers: list[tuple[int, float, float]] | None = None,
-    require_displayed_number: bool = False,
+    use_fallback_id: bool = False,
 ) -> list[dict[str, object]]:
     """Собирает подходящие маркеры и переводит их координаты в формат сцены."""
     if not selector.strip():
@@ -190,16 +190,29 @@ def _collect_markers(
                 lat, lng = round(geo[0], 6), round(geo[1], 6)
         positioned_number = _number_at_marker(translate, operator_numbers or [])
         displayed_number = positioned_number
-        if require_displayed_number:
-            if displayed_number is None or displayed_number in seen_numbers:
-                continue
-            seen_numbers.add(displayed_number)
         marker_classes = " ".join(str(value) for value in (el.get("class") or []))
         marker_type = _object_type(marker_classes)
         object_type = marker_type
+        if use_fallback_id:
+            source_id = next(
+                (el.get(name) for name in ("data-incident-id", "data-object-id", "data-id", "id") if el.get(name)),
+                None,
+            )
+            point = (
+                f"{lat:.4f}:{lng:.4f}"
+                if lat is not None and lng is not None
+                else f"{translate[0]}:{translate[1]}"
+            )
+            identity = f"id:{source_id}" if source_id else f"geo:{object_type}:{point}"
+            object_index = displayed_number or _fallback_index(identity)
+            if object_index in seen_numbers:
+                continue
+            seen_numbers.add(object_index)
+        else:
+            object_index = displayed_number or index
         items.append(
             {
-                "index": displayed_number or index,
+                "index": object_index,
                 "name": (
                     object_type
                     if displayed_number is not None
@@ -230,6 +243,14 @@ def _map_operator_numbers(soup: BeautifulSoup) -> list[tuple[int, float, float]]
     return labels
 
 
+def _fallback_index(identity: str) -> int:
+    """Временный отрицательный ID, отделённый от суточных номеров сайта."""
+    value = 5381
+    for char in identity:
+        value = ((value * 33) ^ ord(char)) & 0xFFFFFFFF
+    return -(value % 1_000_000_000 + 1)
+
+
 def _number_at_marker(
     marker_translate: tuple[float, float],
     labels: list[tuple[int, float, float]],
@@ -250,10 +271,13 @@ def _object_type(text: str) -> str:
     """Нормализует тип объекта из заголовка карточки сайта."""
     if re.search(r"БПЛА|aircraft-drone", text, re.IGNORECASE):
         return "БПЛА"
-    if re.search(r"МВШ|balloon|aerostat", text, re.IGNORECASE):
+    if re.search(r"МВШ|\bmvsh\b|map-incident_mvsh|balloon|aerostat", text, re.IGNORECASE):
         return "МВШ"
     if re.search(r"ракет|missile|rocket", text, re.IGNORECASE):
         return "Ракета"
+    marker_class = re.search(r"map-incident_([a-z][\w-]*)", text, re.IGNORECASE)
+    if marker_class and marker_class.group(1) != "new":
+        return marker_class.group(1).replace("-", " ")
     return "Объект"
 
 

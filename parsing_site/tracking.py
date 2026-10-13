@@ -241,8 +241,10 @@ _EXTRACT_SCRIPT = """
   const objectTypeFrom = (value) => {
     const text = String(value || "");
     if (/БПЛА|aircraft-drone/i.test(text)) return "БПЛА";
-    if (/МВШ|balloon|aerostat/i.test(text)) return "МВШ";
+    if (/МВШ|mvsh|balloon|aerostat/i.test(text)) return "МВШ";
     if (/ракет|missile|rocket/i.test(text)) return "Ракета";
+    const markerClass = text.match(/map-incident_([a-z][\\w-]*)/i);
+    if (markerClass && markerClass[1] !== "new") return markerClass[1].replace(/-/g, " ");
     return "Объект";
   };
 
@@ -269,12 +271,36 @@ _EXTRACT_SCRIPT = """
     return nearest && nearest.distance <= 4 ? nearest.number : null;
   };
 
+  // На малом масштабе сайт скрывает подписи, но сами маркеры остаются.
+  // Отрицательная область ID не пересекается с положительными суточными номерами.
+  const hashIdentity = (value) => {
+    let hash = 5381;
+    for (const char of String(value)) hash = ((hash * 33) ^ char.charCodeAt(0)) >>> 0;
+    return -(hash % 1000000000 + 1);
+  };
+  const leafletLayers = new Map();
+  if (map?._layers) {
+    Object.values(map._layers).forEach((layer) => {
+      if (layer?._icon) leafletLayers.set(layer._icon, layer);
+    });
+  }
+  const fallbackIndex = (el, box, objectType) => {
+    const layer = leafletLayers.get(el);
+    const sourceId = el.dataset.incidentId || el.dataset.objectId || el.dataset.id ||
+      layer?.options?.incidentId || layer?.options?.objectId || layer?.options?.id ||
+      layer?.incidentId || layer?.id || layer?._leaflet_id || el._leaflet_id;
+    if (sourceId != null && String(sourceId).trim()) return hashIdentity(`id:${sourceId}`);
+    const point = Number.isFinite(box.lat) && Number.isFinite(box.lng)
+      ? `${box.lat.toFixed(4)}:${box.lng.toFixed(4)}`
+      : `${box.translate3d?.x ?? box.x}:${box.translate3d?.y ?? box.y}`;
+    return hashIdentity(`geo:${objectType}:${point}`);
+  };
+
   const collect = (selector, prefix, requireNumber = false) =>
     selector
       ? [...document.querySelectorAll(selector)].map((el, index) => {
           const box = centerOf(el);
           const positionedNumber = numberAtMarker(box);
-          if (requireNumber && !Number.isInteger(positionedNumber)) return null;
           const markerType = objectTypeFrom([...el.classList].join(" "));
           const displayedObject = Number.isInteger(positionedNumber)
             ? { number: positionedNumber, type: markerType }
@@ -282,14 +308,13 @@ _EXTRACT_SCRIPT = """
           const objectType = markerType !== "Объект"
             ? markerType
             : displayedObject?.type || "Объект";
+          const objectIndex = Number.isInteger(displayedObject?.number)
+            ? displayedObject.number
+            : requireNumber ? fallbackIndex(el, box, objectType) : index + 1;
           return {
-            index: Number.isInteger(displayedObject?.number) ? displayedObject.number : index + 1,
-            name: Number.isInteger(displayedObject?.number)
-              ? objectType
-              : String(pickName(el, index, prefix)),
-            object_type: Number.isInteger(displayedObject?.number)
-              ? objectType
-              : objectTypeFrom(pickName(el, index, prefix)),
+            index: objectIndex,
+            name: requireNumber ? objectType : String(pickName(el, index, prefix)),
+            object_type: requireNumber ? objectType : objectTypeFrom(pickName(el, index, prefix)),
             color: getComputedStyle(el).backgroundColor,
             x: box.x,
             y: box.y,
@@ -336,12 +361,11 @@ _EXTRACT_SCRIPT = """
     };
   });
 
-  const dynamicMarkers = opts.dynamic ? document.querySelectorAll(opts.dynamic).length : 0;
   const dynamics = collect(opts.dynamic, "D", true);
 
   return {
     dynamics,
-    unnumbered_dynamics: Math.max(0, dynamicMarkers - dynamics.length),
+    unnumbered_dynamics: dynamics.filter((item) => item.index < 0).length,
     statics: collect(opts.static, "S"),
     config_statics: configStatics,
     viewport: { width: window.innerWidth, height: window.innerHeight },
@@ -705,9 +729,9 @@ def build_tracking_snapshot(
     unnumbered_dynamics = int(raw.get("unnumbered_dynamics") or 0)
     if unnumbered_dynamics:
         number_warning = (
-            f"Для {unnumbered_dynamics} маркеров не найден уникальный суточный номер "
-            "(нет подписи или маркер дублируется): они не показаны и не сохранены. "
-            "Проверьте подписи номеров на карте."
+            f"Для {unnumbered_dynamics} объектов подписи суточных номеров скрыты: "
+            "в таблице и истории показаны временные ID. "
+            "При появлении подписей снова используются номера сайта."
         )
         scale_warning = f"{scale_warning} {number_warning}".strip()
     center = None
@@ -808,8 +832,8 @@ def _scale_warning(
 
 
 def _dynamic_label(item: SceneObject) -> str:
-    """Возвращает стабильное имя; координаты и цвет не являются идентичностью."""
-    return item.name
+    """В колонке объекта показывает тип, если он определён по маркеру."""
+    return item.object_type if item.object_type and item.object_type != "Объект" else item.name
 
 
 def css_color_to_hex(value: str) -> str:

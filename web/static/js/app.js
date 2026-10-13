@@ -349,7 +349,7 @@ function renderDistanceTable(rows, unit, settings) {
           <span class="coords">${escapeHtml(group.static_coords)}</span>
         </td>
         <td>${escapeHtml(nearest.dynamic_name)}</td>
-        <td>${nearest.dynamic_index}</td>
+        <td>${dynamicNumberLabel(nearest.dynamic_index)}</td>
         <td>${escapeHtml(nearest.dynamic_coords)}</td>
         <td>${Number(nearest.distance).toFixed(decimals)} ${nearest.distance_unit || unit}</td>
         <td title="красных / жёлтых до этой статичной точки">
@@ -374,7 +374,7 @@ function renderDistanceTable(rows, unit, settings) {
             <td>${group.static_index}</td>
             <td class="muted-cell">${escapeHtml(group.static_name)}</td>
             <td>${escapeHtml(row.dynamic_name)}</td>
-            <td>${row.dynamic_index}</td>
+            <td>${dynamicNumberLabel(row.dynamic_index)}</td>
             <td>${escapeHtml(row.dynamic_coords)}</td>
             <td>${Number(row.distance).toFixed(decimals)} ${row.distance_unit || unit}</td>
             <td>${escapeHtml(row.nearby_counts || `${row.alert_count ?? 0} / ${row.warning_count ?? 0}`)}</td>
@@ -668,6 +668,12 @@ function applyLogs(logs) {
   `).join("");
 }
 
+/** Не выдаёт временный ID за суточный номер сайта. */
+function dynamicNumberLabel(index) {
+  const value = Number(index);
+  return value < 0 ? `ID ${-value}` : `№${value}`;
+}
+
 /** Отрисовывает последние смещения динамических объектов. */
 function applyMoves(rows) {
   if (!rows.length) {
@@ -677,7 +683,7 @@ function applyMoves(rows) {
   els.moves.innerHTML = rows.map((row) => `
     <tr>
       <td>${escapeHtml(row.ts)}</td>
-      <td>#${row.object_index} ${escapeHtml(row.name)}</td>
+      <td>${dynamicNumberLabel(row.object_index)} ${escapeHtml(row.name)}</td>
       <td>${row.x}</td>
       <td>${row.y}</td>
       <td>${row.distance_moved == null ? "—" : row.distance_moved}</td>
