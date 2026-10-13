@@ -30,7 +30,7 @@ def play_system_beep() -> bool:
             )
             if result.returncode == 0:
                 return True
-    except OSError, subprocess.SubprocessError:
+    except (OSError, subprocess.SubprocessError):
         # Терминальный bell остаётся безопасным резервным вариантом, когда утилиты нет.
         pass
 

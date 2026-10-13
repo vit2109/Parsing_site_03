@@ -36,7 +36,7 @@ _EXTRACT_SCRIPT = """
 /* Скрипт выполняется в контексте вкладки Chrome (Playwright page.evaluate).
    Ищет экземпляр L.Map; если его нет — lat/lng из transform .leaflet-proxy (EPSG:3857).
    Пиксели x/y зависят от текущего зума; lat/lng при пересчёте вида карты сохраняются. */
-(opts) => {
+async (opts) => {
   const mode = opts.mode || "screen";
   const mapSelector = opts.mapContainer || ".leaflet-container";
   const round2 = (v) => Math.round(v * 100) / 100;
@@ -251,7 +251,7 @@ _EXTRACT_SCRIPT = """
   // В новых версиях страницы суточный номер рисуется отдельным Leaflet-маркером.
   // Подписей может быть две на объект, поэтому связываем номер с инцидентом по
   // одинаковому translate3d, а не по порядку элементов в DOM.
-  const operatorNumbers = [...document.querySelectorAll(".leaflet-marker-icon.map-incident-operator-number")]
+  const operatorNumbers = () => [...document.querySelectorAll(".leaflet-marker-icon.map-incident-operator-number")]
     .map((el) => {
       const match = String(el.textContent || "").trim().match(/^№?\\s*(\\d+)$/);
       const transform = parseTransform(el.getAttribute("style") || "");
@@ -262,9 +262,10 @@ _EXTRACT_SCRIPT = """
     .filter((item) => item && Number.isInteger(item.number) && item.number > 0);
 
   const numberAtMarker = (box) => {
-    if (!box.translate3d || !operatorNumbers.length) return null;
+    const numbers = operatorNumbers();
+    if (!box.translate3d || !numbers.length) return null;
     let nearest = null;
-    operatorNumbers.forEach((item) => {
+    numbers.forEach((item) => {
       const distance = (item.x - box.translate3d.x) ** 2 + (item.y - box.translate3d.y) ** 2;
       if (!nearest || distance < nearest.distance) nearest = { ...item, distance };
     });
@@ -278,14 +279,8 @@ _EXTRACT_SCRIPT = """
     for (const char of String(value)) hash = ((hash * 33) ^ char.charCodeAt(0)) >>> 0;
     return -(hash % 1000000000 + 1);
   };
-  const leafletLayers = new Map();
-  if (map?._layers) {
-    Object.values(map._layers).forEach((layer) => {
-      if (layer?._icon) leafletLayers.set(layer._icon, layer);
-    });
-  }
   const fallbackIndex = (el, box, objectType) => {
-    const layer = leafletLayers.get(el);
+    const layer = map?._layers && Object.values(map._layers).find((item) => item?._icon === el);
     const sourceId = el.dataset.incidentId || el.dataset.objectId || el.dataset.id ||
       layer?.options?.incidentId || layer?.options?.objectId || layer?.options?.id ||
       layer?.incidentId || layer?.id || layer?._leaflet_id || el._leaflet_id;
@@ -313,6 +308,7 @@ _EXTRACT_SCRIPT = """
             : requireNumber ? fallbackIndex(el, box, objectType) : index + 1;
           return {
             index: objectIndex,
+            fallback_id: requireNumber ? fallbackIndex(el, box, objectType) : null,
             name: requireNumber ? objectType : String(pickName(el, index, prefix)),
             object_type: requireNumber ? objectType : objectTypeFrom(pickName(el, index, prefix)),
             color: getComputedStyle(el).backgroundColor,
@@ -362,11 +358,133 @@ _EXTRACT_SCRIPT = """
   });
 
   const dynamics = collect(opts.dynamic, "D", true);
+  const statics = collect(opts.static, "S");
+
+  // Сначала собираем маркеры при отдалении, затем читаем подписи в увеличенном виде.
+  // Позиции всех объектов в результате пересчитываются для исходного вида карты.
+  if (opts.scanNumbers && map && typeof map.setView === "function" &&
+      typeof map.getCenter === "function" && typeof map.latLngToContainerPoint === "function" &&
+      Number.isFinite(zoom) && mapRect?.width && mapRect?.height) {
+    const originalCenter = map.getCenter();
+    const reportedMaxZoom = typeof map.getMaxZoom === "function" ? map.getMaxZoom() : Infinity;
+    const maxZoom = Number.isFinite(reportedMaxZoom) ? reportedMaxZoom : zoom + 6;
+    const reportedMinZoom = typeof map.getMinZoom === "function" ? map.getMinZoom() : -Infinity;
+    const minZoom = Number.isFinite(reportedMinZoom) ? reportedMinZoom : zoom - 4;
+    const targetZoom = Math.min(
+      dynamics.some((item) => item.index > 0) ? zoom : zoom + 4, maxZoom
+    );
+    const attempted = new Set();
+    const usedNumbers = new Set(dynamics.filter((item) => item.index > 0).map((item) => item.index));
+    const moveTo = async (lat, lng, z) => {
+      await new Promise((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          if (typeof map.off === "function") map.off("moveend", finish);
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(finish, 1500);
+        if (typeof map.on === "function") map.on("moveend", finish);
+        try { map.setView([lat, lng], z, { animate: false }); }
+        catch (error) { finish(); }
+        if (typeof map.on !== "function") finish();
+      });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    };
+    const matchVisible = () => {
+      const visible = collect(opts.dynamic, "D", true).filter((item) => item.index > 0);
+      for (const item of visible) {
+        if (usedNumbers.has(item.index) || !Number.isFinite(item.lat) || !Number.isFinite(item.lng)) continue;
+        let best = null;
+        for (const candidate of dynamics) {
+          if (candidate.index >= 0 || !Number.isFinite(candidate.lat) || !Number.isFinite(candidate.lng)) continue;
+          let distance = Infinity;
+          if (candidate.fallback_id === item.fallback_id) distance = 0;
+          else {
+            const p = map.latLngToContainerPoint([candidate.lat, candidate.lng]);
+            const q = map.latLngToContainerPoint([item.lat, item.lng]);
+            if (p && q) distance = Math.hypot(p.x - q.x, p.y - q.y);
+          }
+          if (distance <= 8 && (!best || distance < best.distance)) best = { candidate, distance };
+        }
+        if (best) {
+          best.candidate.index = item.index;
+          usedNumbers.add(item.index);
+        }
+      }
+      return visible.length;
+    };
+    try {
+      for (let step = 1; step <= 4 && zoom - step >= minZoom; step++) {
+        await moveTo(originalCenter.lat, originalCenter.lng, zoom - step);
+        for (const item of collect(opts.dynamic, "D", true)) {
+          if (!Number.isFinite(item.lat) || !Number.isFinite(item.lng)) continue;
+          const duplicate = dynamics.some((existing) => existing.fallback_id === item.fallback_id);
+          if (!duplicate) dynamics.push(item);
+        }
+      }
+      dynamics.filter((item) => item.index > 0).forEach((item) => usedNumbers.add(item.index));
+      if (targetZoom > zoom) {
+        let scans = 0;
+        for (const target of dynamics) {
+          if (target.index >= 0 || !Number.isFinite(target.lat) || !Number.isFinite(target.lng) ||
+              attempted.has(target.fallback_id) || scans >= 200) continue;
+          await moveTo(target.lat, target.lng, targetZoom);
+          scans++;
+          let found = matchVisible();
+          // На некоторых картах номера появляются только ещё на один-два уровня выше.
+          if (!found && targetZoom < Math.min(zoom + 6, maxZoom)) {
+            await moveTo(target.lat, target.lng, Math.min(zoom + 6, maxZoom));
+            scans++;
+            found = matchVisible();
+          }
+          for (const candidate of dynamics) {
+            if (candidate.index >= 0 || !Number.isFinite(candidate.lat) || !Number.isFinite(candidate.lng)) continue;
+            const p = map.latLngToContainerPoint([candidate.lat, candidate.lng]);
+            if (p && p.x >= mapRect.width * 0.1 && p.x <= mapRect.width * 0.9 &&
+                p.y >= mapRect.height * 0.1 && p.y <= mapRect.height * 0.9) {
+              attempted.add(candidate.fallback_id);
+            }
+          }
+        }
+      } else if (dynamics.some((item) => item.index < 0)) {
+        // Текущий масштаб уже показывает номера; обходим остальные области на нём.
+        let scans = 0;
+        for (const target of dynamics) {
+          if (target.index >= 0 || !Number.isFinite(target.lat) || !Number.isFinite(target.lng) ||
+              attempted.has(target.fallback_id) || scans >= 200) continue;
+          await moveTo(target.lat, target.lng, targetZoom);
+          scans++;
+          matchVisible();
+          for (const candidate of dynamics) {
+            if (candidate.index >= 0 || !Number.isFinite(candidate.lat) || !Number.isFinite(candidate.lng)) continue;
+            const p = map.latLngToContainerPoint([candidate.lat, candidate.lng]);
+            if (p && p.x >= mapRect.width * 0.1 && p.x <= mapRect.width * 0.9 &&
+                p.y >= mapRect.height * 0.1 && p.y <= mapRect.height * 0.9) {
+              attempted.add(candidate.fallback_id);
+            }
+          }
+        }
+      }
+    } finally {
+      await moveTo(originalCenter.lat, originalCenter.lng, zoom);
+      for (const item of dynamics) {
+        if (!Number.isFinite(item.lat) || !Number.isFinite(item.lng)) continue;
+        const p = map.latLngToContainerPoint([item.lat, item.lng]);
+        if (!p) continue;
+        const xy = xyForMode(mapRect.left + p.x, mapRect.top + p.y);
+        item.x = round2(xy.x);
+        item.y = round2(xy.y);
+      }
+    }
+  }
 
   return {
     dynamics,
     unnumbered_dynamics: dynamics.filter((item) => item.index < 0).length,
-    statics: collect(opts.static, "S"),
+    statics,
     config_statics: configStatics,
     viewport: { width: window.innerWidth, height: window.innerHeight },
     map: mapRect
@@ -494,6 +612,7 @@ def extract_scene_from_page(page: Any, tracking: TrackingConfig) -> dict[str, An
             "static": tracking.static_selector,
             "mode": tracking.coordinate_mode,
             "mapContainer": tracking.map_container_selector,
+            "scanNumbers": True,
             "staticObjects": [
                 {
                     "id": item.id,

@@ -82,7 +82,11 @@ class BrowserSession:
 
     def capture_scene(self, tracking: TrackingConfig) -> tuple[PageSnapshot, dict]:
         """HTML не качается целиком: в странице выполняется JS-съём маркеров и карты."""
-        page = self._ready_page()
+        waiter = ", ".join(
+            part for part in (tracking.map_container_selector, self._config.wait_for_selector)
+            if part.strip()
+        )
+        page = self._ready_page(waiter)
         snapshot = PageSnapshot(
             url=page.url,
             title=page.title(),
@@ -99,10 +103,10 @@ class BrowserSession:
                 tabs.append((page.url, page.title()))
         return tabs
 
-    def _ready_page(self) -> Page:
+    def _ready_page(self, waiter_override: str | None = None) -> Page:
         """Выбирает вкладку и при необходимости ждёт обязательный CSS-селектор."""
         page = self._find_page()
-        waiter = self._config.wait_for_selector.strip()
+        waiter = (waiter_override or self._config.wait_for_selector).strip()
         if waiter:
             from playwright.sync_api import TimeoutError as PlaywrightTimeout
 

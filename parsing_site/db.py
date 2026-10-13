@@ -969,7 +969,7 @@ def _sqlite_haversine_km(
         return None
     try:
         return _geo_distance_values(static_lat, static_lng, dynamic_lat, dynamic_lng)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return None
 
 
