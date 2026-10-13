@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +82,23 @@ class TableHistoryDatabase:
         """Закрывает соединение с историей основной таблицы."""
         with self._lock:
             self._conn.close()
+
+    def prune_dynamic_history(self, keep_days: int = 20) -> dict[str, int | str]:
+        """Оставляет в истории таблицы последние календарные дни."""
+        cutoff = (date.today() - timedelta(days=max(1, keep_days) - 1)).isoformat()
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM table_snapshots WHERE source IN ('real', 'test') "
+                "AND captured_at < ?", (cutoff,)
+            )
+            self._conn.commit()
+        return {"cutoff": cutoff, "snapshots_deleted": cursor.rowcount}
+
+    def compact(self) -> None:
+        """Физически уменьшает файл SQLite после ручной очистки."""
+        with self._lock:
+            self._conn.execute("VACUUM")
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     def save_snapshot(
         self,

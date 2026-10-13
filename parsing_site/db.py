@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from math import cos, pi, sin
 from pathlib import Path
 from typing import Any
@@ -89,6 +89,23 @@ class Database:
         """Закрывает общее SQLite-соединение под блокировкой."""
         with self._lock:
             self._conn.close()
+
+    def prune_dynamic_history(self, keep_days: int = 20) -> dict[str, int | str]:
+        """Удаляет старые реальные опросы; настройки статичных точек не затрагивает."""
+        cutoff = (date.today() - timedelta(days=max(1, keep_days) - 1)).isoformat()
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM polls WHERE data_source = 'real' AND ts < ?",
+                (cutoff,),
+            )
+            self._conn.commit()
+        return {"cutoff": cutoff, "polls_deleted": cursor.rowcount}
+
+    def compact(self) -> None:
+        """Возвращает операционной системе место после ручной очистки."""
+        with self._lock:
+            self._conn.execute("VACUUM")
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     def init_schema(self) -> None:
         """Создаёт актуальную схему и выполняет одноразовые миграции."""
@@ -607,8 +624,9 @@ class Database:
                 "SELECT d.id, p.ts, d.dynamic_index AS object_index, d.name, "
                 "d.x, d.y, d.dx, d.dy, d.distance_moved, d.color, p.url "
                 "FROM dynamic_observations d JOIN polls p ON p.id = d.poll_id "
-                "WHERE p.data_source = 'real' ORDER BY d.id DESC LIMIT ?",
-                (max(1, min(limit, 1000)),),
+                "WHERE p.data_source = 'real' AND substr(p.ts, 1, 10) = ? "
+                "ORDER BY d.id DESC LIMIT ?",
+                (date.today().isoformat(), max(1, min(limit, 1000))),
             ).fetchall()
         result = []
         for row in rows:

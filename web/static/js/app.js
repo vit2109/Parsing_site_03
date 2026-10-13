@@ -28,6 +28,7 @@ const els = {
   stop: document.getElementById("btn-stop"),
   settingsBtn: document.getElementById("btn-settings"),
   testHtml: document.getElementById("btn-test-html"),
+  pruneHistory: document.getElementById("btn-prune-history"),
   dialog: document.getElementById("settings-dialog"),
   form: document.getElementById("settings-form"),
   cancel: document.getElementById("btn-cancel"),
@@ -55,6 +56,16 @@ els.start.addEventListener("click", () => post("/api/worker/start"));
 els.stop.addEventListener("click", () => post("/api/worker/stop"));
 els.settingsBtn.addEventListener("click", openSettings);
 if (els.testHtml) els.testHtml.addEventListener("click", loadTestHtml);
+if (els.pruneHistory) els.pruneHistory.addEventListener("click", async () => {
+  if (!window.confirm("Удалить историю динамических объектов старше 20 дней? Настройки стационарных объектов сохранятся.")) return;
+  try {
+    const result = await post("/api/history/prune");
+    window.alert(`Удалено опросов: ${result.polls_deleted}; снимков таблицы: ${result.snapshots_deleted}.`);
+    tick();
+  } catch (error) {
+    showError(error.message);
+  }
+});
 els.cancel.addEventListener("click", () => els.dialog.close());
 els.form.addEventListener("submit", saveSettings);
 els.addStatic.addEventListener("click", addStaticRow);
@@ -584,7 +595,8 @@ async function tick() {
     applySnapshot(state.snapshot, state.settings);
     applyTableHistoryStats(state.table_history);
     applyLogs(state.logs || []);
-    applyMoves(movements || []);
+    const visibleNumbers = new Set((state.snapshot?.dynamics || []).map((item) => Number(item.index)));
+    applyMoves((movements || []).filter((item) => visibleNumbers.has(Number(item.object_index))));
   } catch (err) {
     showError("Нет связи с сервером: " + err.message);
   }

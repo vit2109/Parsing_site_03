@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -9,6 +10,17 @@ from parsing_site.tracking import DistanceRow, TrackingSnapshot
 
 
 class TableHistoryDatabaseTest(unittest.TestCase):
+    def test_retention_cascades_old_table_rows(self) -> None:
+        with TemporaryDirectory() as directory:
+            database = TableHistoryDatabase(Path(directory) / "table_history.db")
+            old_day = (date.today() - timedelta(days=20)).isoformat()
+            database.save_snapshot(_snapshot(rows=2), captured_at=old_day)
+            database.save_snapshot(_snapshot(rows=1))
+            result = database.prune_dynamic_history()
+            self.assertEqual(result["snapshots_deleted"], 1)
+            self.assertEqual(len(database.list_rows()), 1)
+            database.close()
+
     def test_saves_every_visible_row_with_timestamp(self) -> None:
         with TemporaryDirectory() as directory:
             database = TableHistoryDatabase(Path(directory) / "table_history.db")

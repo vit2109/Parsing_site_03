@@ -93,6 +93,8 @@ class ParseWorker:
         settings = self._store.current()
         cfg = settings.to_app_config(load_config())
         snapshot = snapshot_from_html_file(target, cfg.tracking)
+        if snapshot.unnumbered_dynamics and not snapshot.dynamics:
+            raise RuntimeError(snapshot.scale_warning)
         poll_id = self._db.save_snapshot(snapshot)
         table_snapshot_id = self._table_history.save_snapshot(snapshot, source="test")
         payload = snapshot_to_dict(snapshot)
@@ -160,6 +162,18 @@ class ParseWorker:
                         if current_day != previous_day:
                             previous = {}
                             previous_day = current_day
+                            self._db.prune_dynamic_history()
+                            self._table_history.prune_dynamic_history()
+                        if snapshot.unnumbered_dynamics and not snapshot.dynamics:
+                            previous = {}
+                            with self._lock:
+                                self._latest = snapshot_to_dict(snapshot)
+                                self._status = "running"
+                                self._error = ""
+                            remaining = interval - (monotonic() - started)
+                            if remaining > 0:
+                                self._stop.wait(remaining)
+                            continue
                         poll_id = self._db.save_snapshot(snapshot, previous)
                         self._table_history.save_snapshot(snapshot)
                         previous = {

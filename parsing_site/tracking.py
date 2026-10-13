@@ -241,33 +241,10 @@ _EXTRACT_SCRIPT = """
   const objectTypeFrom = (value) => {
     const text = String(value || "");
     if (/БПЛА|aircraft-drone/i.test(text)) return "БПЛА";
-    if (/МВШ/i.test(text)) return "МВШ";
+    if (/МВШ|balloon|aerostat/i.test(text)) return "МВШ";
     if (/ракет|missile|rocket/i.test(text)) return "Ракета";
     return "Объект";
   };
-
-  const dailyObjects = (() => {
-    const result = [];
-    const add = (value, context = "") => {
-      const match = String(value || "").trim().match(/^№?\\s*(\\d+)$/);
-      if (!match) return;
-      const number = Number(match[1]);
-      if (Number.isInteger(number) && number > 0 && !result.some((item) => item.number === number)) {
-        result.push({ number, type: objectTypeFrom(context) });
-      }
-    };
-    document.querySelectorAll('[class*="_operatorNumber_"]').forEach((el) => {
-      const card = el.closest('[class*="_card_"]');
-      add(el.textContent, card?.textContent || "");
-    });
-    if (result.length) return result;
-    document.querySelectorAll('[class*="_card_"][class*="_isActive_"]').forEach((card) => {
-      const text = card.textContent || "";
-      const matches = [...text.matchAll(/(?:БПЛА|МВШ|ракет\\w*|объект\\w*)\\s*№\\s*(\\d+)/gi)];
-      if (matches.length) add(matches[0][1], text);
-    });
-    return result;
-  })();
 
   // В новых версиях страницы суточный номер рисуется отдельным Leaflet-маркером.
   // Подписей может быть две на объект, поэтому связываем номер с инцидентом по
@@ -292,16 +269,16 @@ _EXTRACT_SCRIPT = """
     return nearest && nearest.distance <= 4 ? nearest.number : null;
   };
 
-  const collect = (selector, prefix, displayedObjects = []) =>
+  const collect = (selector, prefix, requireNumber = false) =>
     selector
       ? [...document.querySelectorAll(selector)].map((el, index) => {
           const box = centerOf(el);
           const positionedNumber = numberAtMarker(box);
-          const listedObject = displayedObjects[index];
+          if (requireNumber && !Number.isInteger(positionedNumber)) return null;
           const markerType = objectTypeFrom([...el.classList].join(" "));
           const displayedObject = Number.isInteger(positionedNumber)
             ? { number: positionedNumber, type: markerType }
-            : listedObject;
+            : null;
           const objectType = markerType !== "Объект"
             ? markerType
             : displayedObject?.type || "Объект";
@@ -322,7 +299,7 @@ _EXTRACT_SCRIPT = """
             height: box.height,
             translate3d: box.translate3d,
           };
-        })
+        }).filter((item, index, all) => item && (!requireNumber || all.findIndex((other) => other?.index === item.index) === index))
       : [];
 
   const configStatics = (opts.staticObjects || []).map((item, index) => {
@@ -359,8 +336,12 @@ _EXTRACT_SCRIPT = """
     };
   });
 
+  const dynamicMarkers = opts.dynamic ? document.querySelectorAll(opts.dynamic).length : 0;
+  const dynamics = collect(opts.dynamic, "D", true);
+
   return {
-    dynamics: collect(opts.dynamic, "D", dailyObjects),
+    dynamics,
+    unnumbered_dynamics: Math.max(0, dynamicMarkers - dynamics.length),
     statics: collect(opts.static, "S"),
     config_statics: configStatics,
     viewport: { width: window.innerWidth, height: window.innerHeight },
@@ -477,6 +458,7 @@ class TrackingSnapshot:
     geo_source: str = "none"
     map_center: tuple[float, float] | None = None
     blue_limit: float = BLUE_ZONE_KM
+    unnumbered_dynamics: int = 0
 
 
 def extract_scene_from_page(page: Any, tracking: TrackingConfig) -> dict[str, Any]:
@@ -720,6 +702,14 @@ def build_tracking_snapshot(
         dynamics=dynamics,
         statics=statics,
     )
+    unnumbered_dynamics = int(raw.get("unnumbered_dynamics") or 0)
+    if unnumbered_dynamics:
+        number_warning = (
+            f"Для {unnumbered_dynamics} маркеров не найден уникальный суточный номер "
+            "(нет подписи или маркер дублируется): они не показаны и не сохранены. "
+            "Проверьте подписи номеров на карте."
+        )
+        scale_warning = f"{scale_warning} {number_warning}".strip()
     center = None
     if map_view and map_view.center_lat is not None and map_view.center_lng is not None:
         center = (map_view.center_lat, map_view.center_lng)
@@ -744,6 +734,7 @@ def build_tracking_snapshot(
         scale_warning=scale_warning,
         geo_source=geo_source,
         map_center=center,
+        unnumbered_dynamics=unnumbered_dynamics,
     )
 
 
@@ -897,6 +888,7 @@ def snapshot_to_dict(snapshot: TrackingSnapshot) -> dict[str, object]:
         "map_zoom": snapshot.map_zoom,
         "reference_zoom": snapshot.reference_zoom,
         "scale_warning": snapshot.scale_warning,
+        "unnumbered_dynamics": snapshot.unnumbered_dynamics,
         "geo_source": snapshot.geo_source,
         "map_center": (
             {"lat": snapshot.map_center[0], "lng": snapshot.map_center[1]}

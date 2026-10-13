@@ -4,6 +4,7 @@ import json
 import sqlite3
 import unittest
 from pathlib import Path
+from datetime import date, timedelta
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -19,6 +20,48 @@ from parsing_site.tracking import (
 
 
 class HistoryDatabaseTest(unittest.TestCase):
+    def test_new_index_without_labels_does_not_invent_numbers(self) -> None:
+        path = Path(__file__).parent.parent / "html_test" / "index.html"
+        if not path.exists():
+            self.skipTest("пользовательский файл index.html не включён в репозиторий")
+        html = path.read_text(encoding="utf-8")
+        scene = extract_scene_from_html(
+            html, TrackingConfig(dynamic_selector=".leaflet-marker-icon.map-incident")
+        )
+        self.assertEqual(scene["dynamics"], [])
+        self.assertGreater(scene["unnumbered_dynamics"], 0)
+
+    def test_duplicate_markers_with_one_visible_number_are_one_object(self) -> None:
+        html = """
+        <div class="leaflet-marker-icon map-incident map-incident_aircraft-drone" style="transform: translate3d(4px, 8px, 0px)"></div>
+        <div class="leaflet-marker-icon map-incident map-incident_aircraft-drone" style="transform: translate3d(4px, 8px, 0px)"></div>
+        <div class="leaflet-marker-icon map-incident-operator-number" style="transform: translate3d(4px, 8px, 0px)">722</div>
+        """
+        scene = extract_scene_from_html(
+            html, TrackingConfig(dynamic_selector=".leaflet-marker-icon.map-incident")
+        )
+        self.assertEqual([item["index"] for item in scene["dynamics"]], [722])
+
+    def test_retention_keeps_recent_real_and_all_fake_polls(self) -> None:
+        with TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "tracking.db")
+            db.ensure_fake_history()
+            snapshot = TrackingSnapshot(
+                url="test", title="test", viewport=(1, 1), dynamics=[],
+                statics=[], rows=[], threshold=1, warning_limit=2,
+            )
+            old_id = db.save_snapshot(snapshot)
+            recent_id = db.save_snapshot(snapshot)
+            old_day = (date.today() - timedelta(days=20)).isoformat()
+            db._conn.execute("UPDATE polls SET ts = ? WHERE id = ?", (old_day, old_id))
+            db._conn.commit()
+            result = db.prune_dynamic_history()
+            self.assertEqual(result["polls_deleted"], 1)
+            self.assertIsNone(db._conn.execute("SELECT id FROM polls WHERE id = ?", (old_id,)).fetchone())
+            self.assertIsNotNone(db._conn.execute("SELECT id FROM polls WHERE id = ?", (recent_id,)).fetchone())
+            self.assertEqual(db._conn.execute("SELECT COUNT(*) FROM polls WHERE data_source = 'fake'").fetchone()[0], 169)
+            db.close()
+
     def test_saved_page_uses_positioned_daily_object_numbers(self) -> None:
         html = (Path(__file__).parent.parent / "html_test" / "ip.html").read_text(
             encoding="utf-8"
@@ -40,14 +83,17 @@ class HistoryDatabaseTest(unittest.TestCase):
             ],
         )
 
-    def test_dynamic_object_types_are_read_from_incident_cards(self) -> None:
+    def test_dynamic_object_types_follow_numbered_markers_not_card_order(self) -> None:
         html = """
         <div class="_card_a"><span class="_operatorNumber_a">1</span>БПЛА №1</div>
         <div class="_card_b"><span class="_operatorNumber_b">2</span>МВШ №2</div>
         <div class="_card_c"><span class="_operatorNumber_c">3</span>Ракета №3</div>
-        <div class="leaflet-marker-icon map-incident" style="transform: translate3d(1px, 2px, 0px)"></div>
-        <div class="leaflet-marker-icon map-incident" style="transform: translate3d(3px, 4px, 0px)"></div>
-        <div class="leaflet-marker-icon map-incident" style="transform: translate3d(5px, 6px, 0px)"></div>
+        <div class="leaflet-marker-icon map-incident map-incident_aircraft-drone" style="transform: translate3d(1px, 2px, 0px)"></div>
+        <div class="leaflet-marker-icon map-incident map-incident_aircraft-balloon" style="transform: translate3d(3px, 4px, 0px)"></div>
+        <div class="leaflet-marker-icon map-incident map-incident_rocket" style="transform: translate3d(5px, 6px, 0px)"></div>
+        <div class="leaflet-marker-icon map-incident-operator-number" style="transform: translate3d(1px, 2px, 0px)">1</div>
+        <div class="leaflet-marker-icon map-incident-operator-number" style="transform: translate3d(3px, 4px, 0px)">2</div>
+        <div class="leaflet-marker-icon map-incident-operator-number" style="transform: translate3d(5px, 6px, 0px)">3</div>
         """
         scene = extract_scene_from_html(
             html,

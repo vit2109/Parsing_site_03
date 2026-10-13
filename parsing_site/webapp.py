@@ -30,6 +30,8 @@ worker = ParseWorker(db, store, table_history_db)
 async def lifespan(_app: FastAPI):
     """Инициализирует данные при старте и освобождает ресурсы при остановке ASGI."""
     store.ensure_defaults(load_config())
+    db.prune_dynamic_history()
+    table_history_db.prune_dynamic_history()
     db.ensure_fake_history()
     db.add_log("INFO", "web", "Интерфейс запущен")
     try:
@@ -444,6 +446,24 @@ def api_generate_fake_history() -> dict[str, Any]:
         f"Тестовая хронология пересоздана: {counts['polls']} опросов",
     )
     return {"source": "fake", **counts}
+
+
+@app.post("/api/history/prune")
+def api_prune_history() -> dict[str, Any]:
+    """Вручную удаляет реальные динамические наблюдения старше 20 дней."""
+    tracking_result = db.prune_dynamic_history()
+    table_result = table_history_db.prune_dynamic_history()
+    if tracking_result["polls_deleted"]:
+        db.compact()
+    if table_result["snapshots_deleted"]:
+        table_history_db.compact()
+    db.add_log(
+        "INFO", "history",
+        f"Очистка истории до {tracking_result['cutoff']}: "
+        f"{tracking_result['polls_deleted']} опросов, "
+        f"{table_result['snapshots_deleted']} снимков таблицы",
+    )
+    return {**tracking_result, **table_result}
 
 
 @app.post("/api/test-file")
