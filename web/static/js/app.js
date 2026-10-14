@@ -671,7 +671,7 @@ function applyLogs(logs) {
 /** Не выдаёт временный ID за суточный номер сайта. */
 function dynamicNumberLabel(index) {
   const value = Number(index);
-  return value < 0 ? `ID ${-value}` : `№${value}`;
+  return value < 0 ? "номер не определён" : `№${value}`;
 }
 
 /** Отрисовывает последние смещения динамических объектов. */

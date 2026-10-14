@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Self
 
 from parsing_site.cdp_check import cdp_endpoint_ok, format_cdp_help
 from parsing_site.config import BrowserConfig, TrackingConfig
-from parsing_site.tracking import extract_scene_from_page
+from parsing_site.tracking import extract_scene_with_mouse_scan
 
 if TYPE_CHECKING:
     from playwright.sync_api import Browser, Page, Playwright
@@ -34,6 +35,9 @@ class BrowserSession:
         self._config = config
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
+        self._number_cache: dict[int, tuple[int, float, float, float]] = {}
+        self._cache_day = datetime.now().astimezone().date()
+        self._cache_url = ""
 
     def __enter__(self) -> Self:
         """Открывает CDP-сессию для использования класса как контекстного менеджера."""
@@ -82,17 +86,24 @@ class BrowserSession:
 
     def capture_scene(self, tracking: TrackingConfig) -> tuple[PageSnapshot, dict]:
         """HTML не качается целиком: в странице выполняется JS-съём маркеров и карты."""
+        today = datetime.now().astimezone().date()
+        if today != self._cache_day:
+            self._number_cache.clear()
+            self._cache_day = today
         waiter = ", ".join(
             part for part in (tracking.map_container_selector, self._config.wait_for_selector)
             if part.strip()
         )
         page = self._ready_page(waiter)
+        if page.url != self._cache_url:
+            self._number_cache.clear()
+            self._cache_url = page.url
         snapshot = PageSnapshot(
             url=page.url,
             title=page.title(),
             html="",
         )
-        return snapshot, extract_scene_from_page(page, tracking)
+        return snapshot, extract_scene_with_mouse_scan(page, tracking, self._number_cache)
 
     def list_tabs(self) -> list[tuple[str, str]]:
         """Перечисляет URL и заголовки всех вкладок во всех контекстах."""

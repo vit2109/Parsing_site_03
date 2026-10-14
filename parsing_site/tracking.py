@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any, Literal
 
 from parsing_site.config import StaticObjectConfig, TrackingConfig
@@ -22,8 +23,11 @@ from parsing_site.coordinates import (
     container_to_latlng,
     distance_between,
     distance_unit,
+    haversine_km,
+    latlng_to_container,
     map_view_from_raw,
     normalize_mode,
+    project_3857,
     static_to_point,
 )
 from parsing_site.phone_loader import get_phone_for_static
@@ -45,42 +49,60 @@ async (opts) => {
   const mapEl = mapSelector ? document.querySelector(mapSelector) : null;
   const mapRect = mapEl ? mapEl.getBoundingClientRect() : null;
 
-  const isMap = (v) =>
-    v && typeof v === "object" &&
-    typeof v.getZoom === "function" &&
-    (typeof v.containerPointToLatLng === "function" ||
-     typeof v.latLngToContainerPoint === "function");
+  const isMap = (v) => {
+    try {
+      return v && typeof v === "object" &&
+        typeof v.getZoom === "function" &&
+        (typeof v.containerPointToLatLng === "function" ||
+         typeof v.latLngToContainerPoint === "function");
+    } catch (e) { return false; }
+  };
 
-  const searchMap = (obj, depth) => {
-    if (!obj || typeof obj !== "object" || depth > 5) return null;
-    if (isMap(obj)) return obj;
-    const keys = ["map", "leafletMap", "leafletObject", "mapObject", "_map"];
-    for (const key of keys) {
-      try { if (isMap(obj[key])) return obj[key]; } catch (e) {}
+  const searchMap = (root) => {
+    const seen = new WeakSet();
+    const queue = [[root, 0]];
+    let visited = 0;
+    while (queue.length && visited < 4000) {
+      const [obj, depth] = queue.shift();
+      if (!obj || typeof obj !== "object" || seen.has(obj)) continue;
+      if (isMap(obj)) return obj;
+      seen.add(obj);
+      visited++;
+      if (depth >= 6 || obj.nodeType || obj === window || obj === document) continue;
+      const keys = new Set([
+        "value", "map", "leafletMap", "leafletObject", "mapObject", "_map",
+        "setupState", "ctx", "exposed", "data", "proxy", "provides", "refs",
+      ]);
+      try { Object.keys(obj).forEach((key) => keys.add(key)); } catch (e) {}
+      for (const key of keys) {
+        if (["parent", "appContext", "vnode", "subTree", "$el", "_container"].includes(key)) continue;
+        try {
+          const value = obj[key];
+          if (isMap(value)) return value;
+          if (value && typeof value === "object" && !seen.has(value)) queue.push([value, depth + 1]);
+        } catch (e) {}
+      }
     }
     return null;
   };
 
   const findLeafletMap = (el) => {
     if (!el) return null;
-    const direct = el._leaflet_map || el.__leaflet_map || el._leaflet || el.leafletMap;
-    if (isMap(direct)) return direct;
-    try {
-      for (const key of Object.getOwnPropertyNames(el)) {
-        if (isMap(el[key])) return el[key];
+    for (let node = el, depth = 0; node && depth < 25; node = node.parentElement, depth++) {
+      for (const key of ["_leaflet_map", "__leaflet_map", "_leaflet", "leafletMap"]) {
+        try { if (isMap(node[key])) return node[key]; } catch (e) {}
       }
-    } catch (e) {}
-    let vue = el.__vueParentComponent || el.__vue__;
-    for (let i = 0; i < 30 && vue; i++) {
-      const bags = [
-        vue, vue.setupState, vue.ctx, vue.exposed, vue.data,
-        vue.ctx && vue.ctx.map, vue.proxy,
-      ];
-      for (const bag of bags) {
-        const found = searchMap(bag, 0);
+      try {
+        for (const key of Object.getOwnPropertyNames(node)) {
+          if (isMap(node[key])) return node[key];
+        }
+      } catch (e) {}
+      let vue = node.__vueParentComponent || node.__vue__ || node.__vue_app__?._instance;
+      for (let i = 0; i < 30 && vue; i++) {
+        const found = searchMap(vue);
         if (found) return found;
+        vue = vue.parent || vue.$?.parent;
       }
-      vue = vue.parent || (vue.$ && vue.$.parent);
     }
     return null;
   };
@@ -359,23 +381,26 @@ async (opts) => {
 
   const dynamics = collect(opts.dynamic, "D", true);
   const statics = collect(opts.static, "S");
+  const scan = { status: map ? "ready" : "no_leaflet_instance", views: 0, overview_count: dynamics.length };
 
   // Сначала собираем маркеры при отдалении, затем читаем подписи в увеличенном виде.
   // Позиции всех объектов в результате пересчитываются для исходного вида карты.
   if (opts.scanNumbers && map && typeof map.setView === "function" &&
       typeof map.getCenter === "function" && typeof map.latLngToContainerPoint === "function" &&
       Number.isFinite(zoom) && mapRect?.width && mapRect?.height) {
+    scan.status = "running";
     const originalCenter = map.getCenter();
     const reportedMaxZoom = typeof map.getMaxZoom === "function" ? map.getMaxZoom() : Infinity;
     const maxZoom = Number.isFinite(reportedMaxZoom) ? reportedMaxZoom : zoom + 6;
     const reportedMinZoom = typeof map.getMinZoom === "function" ? map.getMinZoom() : -Infinity;
     const minZoom = Number.isFinite(reportedMinZoom) ? reportedMinZoom : zoom - 4;
     const targetZoom = Math.min(
-      dynamics.some((item) => item.index > 0) ? zoom : zoom + 4, maxZoom
+      dynamics.some((item) => item.index > 0) ? zoom : zoom + 2, maxZoom
     );
     const attempted = new Set();
     const usedNumbers = new Set(dynamics.filter((item) => item.index > 0).map((item) => item.index));
     const moveTo = async (lat, lng, z) => {
+      scan.views++;
       await new Promise((resolve) => {
         let done = false;
         const finish = () => {
@@ -391,7 +416,8 @@ async (opts) => {
         catch (error) { finish(); }
         if (typeof map.on !== "function") finish();
       });
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      // Vue может перерисовать маркеры после moveend и ответа API.
+      await new Promise((resolve) => setTimeout(resolve, 600));
     };
     const matchVisible = () => {
       const visible = collect(opts.dynamic, "D", true).filter((item) => item.index > 0);
@@ -400,6 +426,7 @@ async (opts) => {
         let best = null;
         for (const candidate of dynamics) {
           if (candidate.index >= 0 || !Number.isFinite(candidate.lat) || !Number.isFinite(candidate.lng)) continue;
+          if (candidate.object_type !== item.object_type) continue;
           let distance = Infinity;
           if (candidate.fallback_id === item.fallback_id) distance = 0;
           else {
@@ -426,6 +453,7 @@ async (opts) => {
         }
       }
       dynamics.filter((item) => item.index > 0).forEach((item) => usedNumbers.add(item.index));
+      scan.overview_count = dynamics.length;
       if (targetZoom > zoom) {
         let scans = 0;
         for (const target of dynamics) {
@@ -435,10 +463,15 @@ async (opts) => {
           scans++;
           let found = matchVisible();
           // На некоторых картах номера появляются только ещё на один-два уровня выше.
-          if (!found && targetZoom < Math.min(zoom + 6, maxZoom)) {
+          if (!found && targetZoom < maxZoom) {
             await moveTo(target.lat, target.lng, Math.min(zoom + 6, maxZoom));
             scans++;
             found = matchVisible();
+          }
+          if (!found && Math.min(zoom + 6, maxZoom) < maxZoom) {
+            await moveTo(target.lat, target.lng, maxZoom);
+            scans++;
+            matchVisible();
           }
           for (const candidate of dynamics) {
             if (candidate.index >= 0 || !Number.isFinite(candidate.lat) || !Number.isFinite(candidate.lng)) continue;
@@ -478,11 +511,15 @@ async (opts) => {
         item.x = round2(xy.x);
         item.y = round2(xy.y);
       }
+      scan.status = dynamics.every((item) => item.index > 0) ? "complete" : "partial";
     }
+  } else if (map && opts.scanNumbers) {
+    scan.status = "map_controls_unavailable";
   }
 
   return {
     dynamics,
+    scan,
     unnumbered_dynamics: dynamics.filter((item) => item.index < 0).length,
     statics,
     config_statics: configStatics,
@@ -601,9 +638,12 @@ class TrackingSnapshot:
     map_center: tuple[float, float] | None = None
     blue_limit: float = BLUE_ZONE_KM
     unnumbered_dynamics: int = 0
+    scan_status: str = ""
 
 
-def extract_scene_from_page(page: Any, tracking: TrackingConfig) -> dict[str, Any]:
+def extract_scene_from_page(
+    page: Any, tracking: TrackingConfig, *, scan_numbers: bool = True
+) -> dict[str, Any]:
     """Снимает маркеры и вид карты из живой вкладки (JS _EXTRACT_SCRIPT)."""
     return page.evaluate(
         _EXTRACT_SCRIPT,
@@ -612,7 +652,7 @@ def extract_scene_from_page(page: Any, tracking: TrackingConfig) -> dict[str, An
             "static": tracking.static_selector,
             "mode": tracking.coordinate_mode,
             "mapContainer": tracking.map_container_selector,
-            "scanNumbers": True,
+            "scanNumbers": scan_numbers,
             "staticObjects": [
                 {
                     "id": item.id,
@@ -626,6 +666,207 @@ def extract_scene_from_page(page: Any, tracking: TrackingConfig) -> dict[str, An
             ],
         },
     )
+
+
+def extract_scene_with_mouse_scan(
+    page: Any,
+    tracking: TrackingConfig,
+    number_cache: dict[int, tuple[int, float, float, float]] | None = None,
+) -> dict[str, Any]:
+    """Обходит карту колесом браузера, если Vue не отдаёт экземпляр L.Map."""
+    raw = extract_scene_from_page(page, tracking, scan_numbers=False)
+    _apply_number_cache(raw, number_cache)
+    scan = raw.get("scan") or {}
+    if not raw.get("unnumbered_dynamics"):
+        if scan.get("status") == "no_leaflet_instance":
+            scan["status"] = "cached" if number_cache else "complete"
+        elif scan.get("status") == "ready":
+            scan["status"] = "complete"
+        _remember_numbers(raw, number_cache)
+        return raw
+    if scan.get("status") == "ready":
+        raw = extract_scene_from_page(page, tracking, scan_numbers=True)
+        _apply_number_cache(raw, number_cache)
+        _remember_numbers(raw, number_cache)
+        return raw
+    if scan.get("status") != "no_leaflet_instance":
+        _remember_numbers(raw, number_cache)
+        return raw
+    base_map = raw.get("map") or {}
+    base_view = map_view_from_raw(base_map)
+    base_zoom = _maybe_float(raw.get("map_zoom"))
+    if base_view is None or not base_view.can_unproject or base_zoom is None:
+        scan["status"] = "mouse_scan_unavailable"
+        raw["scan"] = scan
+        return raw
+
+    targets = [
+        item for item in raw.get("dynamics") or []
+        if item.get("index", 0) < 0 and _maybe_float(item.get("lat")) is not None
+        and _maybe_float(item.get("lng")) is not None
+    ]
+    used_numbers = {item["index"] for item in raw["dynamics"] if item["index"] > 0}
+    attempted: set[int] = set()
+    map_left = float(base_map.get("left") or 0)
+    map_top = float(base_map.get("top") or 0)
+    wheel_ticks: int | None = None
+    views = 0
+    wheel_worked = False
+
+    def scene_after_wheel(x: float, y: float, delta: int) -> dict[str, Any]:
+        page.mouse.move(x, y)
+        page.mouse.wheel(0, delta)
+        page.wait_for_timeout(650)
+        scene = extract_scene_from_page(page, tracking, scan_numbers=False)
+        zoom_after = _maybe_float(scene.get("map_zoom"))
+        if delta < 0 and zoom_after is not None and zoom_after >= base_zoom + 2:
+            for _ in range(3):
+                if any(item["index"] > 0 for item in scene.get("dynamics") or []):
+                    break
+                page.wait_for_timeout(500)
+                scene = extract_scene_from_page(page, tracking, scan_numbers=False)
+        return scene
+
+    for target in targets:
+        if target["index"] > 0 or target["index"] in attempted:
+            continue
+        point = latlng_to_container(target["lat"], target["lng"], base_view)
+        if point is None:
+            continue
+        x, y = point
+        if not (0 <= x <= base_view.width and 0 <= y <= base_view.height):
+            continue
+        screen_x, screen_y = map_left + x, map_top + y
+        current = raw
+        ticks = 0
+        restore_failed = False
+        try:
+            limit = wheel_ticks or 6
+            while ticks < limit:
+                previous_zoom = _maybe_float(current.get("map_zoom"))
+                current = scene_after_wheel(screen_x, screen_y, -120)
+                ticks += 1
+                now_zoom = _maybe_float(current.get("map_zoom"))
+                if now_zoom is not None and previous_zoom is not None and now_zoom > previous_zoom:
+                    wheel_worked = True
+                if ticks == 1 and not wheel_worked:
+                    break
+                if wheel_ticks is None and any(item["index"] > 0 for item in current.get("dynamics") or []):
+                    wheel_ticks = ticks
+                    break
+            if not wheel_worked:
+                scan["status"] = "mouse_wheel_unavailable"
+                break
+            views += 1
+            _merge_numbered_scene(raw, current, used_numbers)
+            current_view = map_view_from_raw(current.get("map"))
+            if current_view:
+                for candidate in targets:
+                    if candidate["index"] > 0:
+                        continue
+                    p = latlng_to_container(candidate["lat"], candidate["lng"], current_view)
+                    if p and 0.1 * current_view.width <= p[0] <= 0.9 * current_view.width \
+                            and 0.1 * current_view.height <= p[1] <= 0.9 * current_view.height:
+                        attempted.add(candidate["index"])
+        finally:
+            for _ in range(ticks + 4):
+                current_zoom = _maybe_float(current.get("map_zoom"))
+                if current_zoom is not None and abs(current_zoom - base_zoom) <= 0.01:
+                    break
+                current = scene_after_wheel(
+                    screen_x, screen_y, 120 if current_zoom is None or current_zoom > base_zoom else -120
+                )
+            restored_zoom = _maybe_float(current.get("map_zoom"))
+            if restored_zoom is None or abs(restored_zoom - base_zoom) > 0.01:
+                scan["status"] = "mouse_restore_failed"
+                restore_failed = True
+            restored_view = map_view_from_raw(current.get("map"))
+            if restored_view is not None:
+                base_view = restored_view
+        if restore_failed:
+            break
+    else:
+        scan["status"] = "complete" if all(item["index"] > 0 for item in raw["dynamics"]) else "partial"
+
+    scan["views"] = views
+    raw["scan"] = scan
+    raw["unnumbered_dynamics"] = sum(item["index"] < 0 for item in raw["dynamics"])
+    _remember_numbers(raw, number_cache)
+    return raw
+
+
+def _apply_number_cache(
+    raw: dict[str, Any], cache: dict[int, tuple[int, float, float, float]] | None
+) -> None:
+    if not cache:
+        return
+    now = monotonic()
+    used = {item["index"] for item in raw.get("dynamics") or [] if item["index"] > 0}
+    for item in raw.get("dynamics") or []:
+        identity = item.get("fallback_id")
+        known = cache.get(identity) if isinstance(identity, int) else None
+        lat = _maybe_float(item.get("lat"))
+        lng = _maybe_float(item.get("lng"))
+        if not known or item["index"] > 0 or lat is None or lng is None:
+            continue
+        number, old_lat, old_lng, captured_at = known
+        if now - captured_at <= 60 and haversine_km(lat, lng, old_lat, old_lng) <= 20 and number not in used:
+            item["index"] = number
+            used.add(number)
+    raw["unnumbered_dynamics"] = sum(item["index"] < 0 for item in raw.get("dynamics") or [])
+
+
+def _remember_numbers(
+    raw: dict[str, Any], cache: dict[int, tuple[int, float, float, float]] | None
+) -> None:
+    if cache is None:
+        return
+    now = monotonic()
+    for item in raw.get("dynamics") or []:
+        identity = item.get("fallback_id")
+        lat = _maybe_float(item.get("lat"))
+        lng = _maybe_float(item.get("lng"))
+        if isinstance(identity, int) and item["index"] > 0 and lat is not None and lng is not None:
+            cache[identity] = (item["index"], lat, lng, now)
+
+
+def _merge_numbered_scene(
+    overview: dict[str, Any], detailed: dict[str, Any], used_numbers: set[int]
+) -> None:
+    """Привязывает номера на увеличенной карте к обзорным маркерам."""
+    zoom = _maybe_float(detailed.get("map_zoom"))
+    if zoom is None:
+        return
+    for visible in detailed.get("dynamics") or []:
+        number = visible.get("index")
+        if not isinstance(number, int) or number <= 0 or number in used_numbers:
+            continue
+        lat = _maybe_float(visible.get("lat"))
+        lng = _maybe_float(visible.get("lng"))
+        if lat is None or lng is None:
+            continue
+        visible_x, visible_y = project_3857(lat, lng, zoom)
+        best: tuple[float, dict[str, Any]] | None = None
+        for candidate in overview.get("dynamics") or []:
+            if candidate.get("index", 0) >= 0:
+                continue
+            if visible.get("object_type") and candidate.get("object_type") \
+                    and visible["object_type"] != candidate["object_type"]:
+                continue
+            candidate_lat = _maybe_float(candidate.get("lat"))
+            candidate_lng = _maybe_float(candidate.get("lng"))
+            if candidate_lat is None or candidate_lng is None:
+                continue
+            if visible.get("fallback_id") is not None and visible.get("fallback_id") == candidate.get("fallback_id"):
+                distance = 0.0
+            else:
+                candidate_x, candidate_y = project_3857(candidate_lat, candidate_lng, zoom)
+                distance = ((candidate_x - visible_x) ** 2 + (candidate_y - visible_y) ** 2) ** 0.5
+            if distance <= 8 and (best is None or distance < best[0]):
+                best = (distance, candidate)
+        if best:
+            best[1]["index"] = number
+            used_numbers.add(number)
 
 
 def objects_from_raw(items: list[dict[str, Any]] | None) -> list[SceneObject]:
@@ -846,11 +1087,19 @@ def build_tracking_snapshot(
         statics=statics,
     )
     unnumbered_dynamics = int(raw.get("unnumbered_dynamics") or 0)
+    scan_status = str((raw.get("scan") or {}).get("status") or "")
     if unnumbered_dynamics:
+        detail = {
+            "no_leaflet_instance": "Экземпляр Leaflet не найден; обход карты не выполнен.",
+            "map_controls_unavailable": "У карты недоступны команды смены масштаба и центра.",
+            "partial": "Обход выполнен, но сайт не показал номера всех объектов.",
+            "mouse_scan_unavailable": "У карты нет данных для обхода колесом браузера.",
+            "mouse_wheel_unavailable": "Карта не меняет масштаб от колеса браузера.",
+            "mouse_restore_failed": "После обхода не удалось восстановить исходный масштаб карты.",
+        }.get(scan_status, "")
         number_warning = (
-            f"Для {unnumbered_dynamics} объектов подписи суточных номеров скрыты: "
-            "в таблице и истории показаны временные ID. "
-            "При появлении подписей снова используются номера сайта."
+            f"Номера {unnumbered_dynamics} объектов не определены. {detail} "
+            "Временные ID не являются номерами сайта."
         )
         scale_warning = f"{scale_warning} {number_warning}".strip()
     center = None
@@ -878,6 +1127,7 @@ def build_tracking_snapshot(
         geo_source=geo_source,
         map_center=center,
         unnumbered_dynamics=unnumbered_dynamics,
+        scan_status=scan_status,
     )
 
 
@@ -1032,6 +1282,7 @@ def snapshot_to_dict(snapshot: TrackingSnapshot) -> dict[str, object]:
         "reference_zoom": snapshot.reference_zoom,
         "scale_warning": snapshot.scale_warning,
         "unnumbered_dynamics": snapshot.unnumbered_dynamics,
+        "scan_status": snapshot.scan_status,
         "geo_source": snapshot.geo_source,
         "map_center": (
             {"lat": snapshot.map_center[0], "lng": snapshot.map_center[1]}

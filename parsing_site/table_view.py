@@ -64,7 +64,7 @@ def build_rich_view(snapshot: TrackingSnapshot) -> Panel:
                 str(row.static_index),
                 f"{row.static_name}  {row.static_coords}",
                 row.dynamic_name,
-                str(row.dynamic_index),
+                str(row.dynamic_index) if row.dynamic_index > 0 else "номер не определён",
                 row.dynamic_coords,
                 f"{row.distance:.1f} {row.distance_unit}",
                 row.nearby_counts_label,
@@ -180,7 +180,7 @@ def render_html(snapshot: TrackingSnapshot, refresh_seconds: float = 2.0) -> str
                 f"<td>{row.static_index}</td>"
                 f"<td>{escape(row.static_name)}<br><span class='coords'>{escape(row.static_coords)}</span></td>"
                 f"<td>{escape(row.dynamic_name)}</td>"
-                f"<td>{row.dynamic_index}</td>"
+                f"<td>{row.dynamic_index if row.dynamic_index > 0 else 'номер не определён'}</td>"
                 f"<td>{escape(row.dynamic_coords)}</td>"
                 f"<td>{row.distance:.3f} {escape(row.distance_unit)}</td>"
                 f"<td>{escape(row.nearby_counts_label)}</td>"
