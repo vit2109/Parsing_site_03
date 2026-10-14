@@ -342,7 +342,7 @@ def api_history_trajectory(
     date_from: str = Query(min_length=10),
     date_to: str = Query(min_length=10),
     source: str = Query(default="real", pattern="^(real|fake)$"),
-    limit: int = Query(default=20_000, ge=1, le=20_000),
+    limit: int = Query(default=1_500, ge=1, le=20_000),
 ) -> dict[str, Any]:
     """Возвращает географическую траекторию одного динамического объекта."""
     start = _parse_history_date(date_from, end_of_day=False)
@@ -357,13 +357,15 @@ def api_history_trajectory(
         date_to=end.isoformat(timespec="seconds"),
         object_date=object_date,
         data_source=source,
-        limit=limit,
+        limit=limit + 1,
     )
     if not points:
         raise HTTPException(
             status_code=404,
             detail="Для объекта нет точек с географическими координатами за этот период.",
         )
+    truncated = len(points) > limit
+    points = points[:limit]
     return {
         "dynamic_index": dynamic_index,
         "dynamic_name": points[-1]["dynamic_name"],
@@ -371,7 +373,7 @@ def api_history_trajectory(
         "color": points[-1].get("color") or "#3d8bfd",
         "points": points,
         "total": len(points),
-        "truncated": len(points) >= limit,
+        "truncated": truncated,
     }
 
 
@@ -381,7 +383,7 @@ def api_history_static_zones(
     date_from: str = Query(min_length=10),
     date_to: str = Query(min_length=10),
     source: str = Query(default="real", pattern="^(real|fake)$"),
-    limit: int = Query(default=20_000, ge=1, le=20_000),
+    limit: int = Query(default=1_500, ge=1, le=20_000),
 ) -> dict[str, Any]:
     """Возвращает траектории объектов, входивших в зоны выбранной точки."""
     start = _parse_history_date(date_from, end_of_day=False)
@@ -395,16 +397,18 @@ def api_history_static_zones(
         date_from=start.isoformat(timespec="seconds"),
         date_to=end.isoformat(timespec="seconds"),
         data_source=source,
-        limit=limit,
+        limit=limit + 1,
     )
     if result is None:
         raise HTTPException(
             status_code=404,
             detail="Для стационарного объекта нет географических данных и зон за этот период.",
         )
+    points = result.pop("points")
+    truncated = len(points) > limit
     result["blue_color"] = store.current().blue_color
     grouped: dict[tuple[str, int], dict[str, Any]] = {}
-    for point in result.pop("points"):
+    for point in points[:limit]:
         object_date = str(point["object_date"])
         dynamic_index = int(point["dynamic_index"])
         key = (object_date, dynamic_index)
@@ -433,6 +437,7 @@ def api_history_static_zones(
         "trajectories": list(grouped.values()),
         "objects_total": len(grouped),
         "points_total": sum(len(item["points"]) for item in grouped.values()),
+        "truncated": truncated,
     }
 
 

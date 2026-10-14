@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from contextlib import closing
 from datetime import date, datetime, timedelta
 from math import cos, pi, sin
 from pathlib import Path
@@ -57,6 +58,14 @@ class Database:
         except Exception:
             connection.close()
             raise
+
+    def _open_read_connection(self) -> sqlite3.Connection:
+        """Отдельное WAL-соединение: долгий отчёт не блокирует опрос и настройки."""
+        connection = sqlite3.connect(self.path, check_same_thread=False)
+        connection.row_factory = sqlite3.Row
+        connection.create_function("haversine_km", 4, _sqlite_haversine_km)
+        connection.execute("PRAGMA query_only=ON")
+        return connection
 
     def _restore_salvaged_data(
         self,
@@ -642,8 +651,8 @@ class Database:
 
     def list_history_statics(self, data_source: str = "real") -> list[dict[str, Any]]:
         """Статичные объекты и объём географической/старой пиксельной истории."""
-        with self._lock:
-            rows = self._conn.execute(
+        with closing(self._open_read_connection()) as read_conn:
+            rows = read_conn.execute(
                 "SELECT s.static_index, MAX(s.name) AS static_name, "
                 "MAX(s.lat) AS static_lat, MAX(s.lng) AS static_lng, "
                 "MIN(p.ts) AS first_seen, MAX(p.ts) AS last_seen, "
@@ -699,9 +708,9 @@ class Database:
         ]
         if object_date:
             params.append(object_date)
-        params.append(max(1, min(limit, 20_000)))
-        with self._lock:
-            rows = self._conn.execute(
+        params.append(max(1, min(limit, 20_001)))
+        with closing(self._open_read_connection()) as read_conn:
+            rows = read_conn.execute(
                 "SELECT d.id, p.id AS poll_id, p.ts, substr(p.ts, 1, 10) AS "
                 "object_date, d.dynamic_index, d.name AS "
                 "dynamic_name, d.lat, d.lng, d.color FROM dynamic_observations d "
@@ -726,8 +735,8 @@ class Database:
     ) -> dict[str, Any] | None:
         """Траектории объектов, хотя бы раз вошедших в одну из зон объекта."""
         source = _normalize_source(data_source)
-        with self._lock:
-            static = self._conn.execute(
+        with closing(self._open_read_connection()) as read_conn:
+            static = read_conn.execute(
                 "SELECT s.static_index, s.name AS static_name, s.lat, s.lng, "
                 "p.threshold AS alert_radius_km, p.warning_limit AS warning_radius_km, "
                 "p.blue_limit AS blue_radius_km "
@@ -740,7 +749,7 @@ class Database:
             ).fetchone()
             if static is None:
                 return None
-            rows = self._conn.execute(
+            rows = read_conn.execute(
                 "WITH entered AS ("
                 "SELECT DISTINCT substr(p.ts, 1, 10) AS object_date, "
                 "d.dynamic_index FROM static_observations s "
@@ -777,7 +786,7 @@ class Database:
                     date_from,
                     date_to,
                     source,
-                    max(1, min(limit, 20_000)),
+                    max(1, min(limit, 20_001)),
                 ),
             ).fetchall()
         result = dict(static)
@@ -813,8 +822,8 @@ class Database:
         if query:
             where.append("(d.name LIKE ? OR CAST(d.dynamic_index AS TEXT) = ?)")
             params.extend([f"%{query}%", query])
-        with self._lock:
-            row = self._conn.execute(
+        with closing(self._open_read_connection()) as read_conn:
+            row = read_conn.execute(
                 "SELECT COUNT(*) FROM static_observations s "
                 "JOIN dynamic_observations d ON d.poll_id = s.poll_id "
                 "JOIN polls p ON p.id = s.poll_id WHERE " + " AND ".join(where),
@@ -877,8 +886,8 @@ class Database:
             + ") WHERE distance <= ? "
             "ORDER BY ts DESC, distance ASC, id DESC LIMIT ?"
         )
-        with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
+        with closing(self._open_read_connection()) as read_conn:
+            rows = read_conn.execute(sql, params).fetchall()
         result = []
         for row in rows:
             item = dict(row)

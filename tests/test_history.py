@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -21,6 +22,18 @@ from parsing_site.tracking import (
 
 
 class HistoryDatabaseTest(unittest.TestCase):
+    def test_history_reads_do_not_wait_for_worker_connection_lock(self) -> None:
+        with TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "tracking.db")
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                db._lock.acquire()
+                try:
+                    result = executor.submit(db.list_history_statics, "real")
+                    self.assertEqual(result.result(timeout=2), [])
+                finally:
+                    db._lock.release()
+            db.close()
+
     def test_new_index_without_labels_uses_distinct_temporary_ids(self) -> None:
         path = Path(__file__).parent.parent / "html_test" / "index.html"
         if not path.exists():

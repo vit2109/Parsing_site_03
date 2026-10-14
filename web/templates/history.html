@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Хронология сближений</title>
-    <link rel="stylesheet" href="/static/css/app.css?v=7" />
+    <link rel="stylesheet" href="/static/css/app.css?v=8" />
   </head>
   <body>
     <div class="app history-app">
@@ -129,7 +129,10 @@
           <h2 id="trajectory-title">Динамический объект</h2>
           <p id="trajectory-meta" class="muted"></p>
         </div>
-        <button class="btn btn-ghost modal-close" type="button" aria-label="Закрыть">✕</button>
+        <div class="history-modal__actions">
+          <a class="btn btn-ghost" href="/">← Мониторинг</a>
+          <button class="btn btn-ghost modal-close" type="button" aria-label="Закрыть">✕</button>
+        </div>
       </div>
       <div class="history-modal__layout">
         <div id="trajectory-map" class="history-map history-detail-map"></div>
@@ -147,7 +150,10 @@
           <h2 id="static-title">Зоны объекта</h2>
           <p id="static-zone-meta" class="muted"></p>
         </div>
-        <button class="btn btn-ghost modal-close" type="button" aria-label="Закрыть">✕</button>
+        <div class="history-modal__actions">
+          <a class="btn btn-ghost" href="/">← Мониторинг</a>
+          <button class="btn btn-ghost modal-close" type="button" aria-label="Закрыть">✕</button>
+        </div>
       </div>
       <div class="history-modal__layout">
         <div id="static-zone-map" class="history-map history-detail-map"></div>
@@ -161,6 +167,6 @@
     <script src="/static/js/russia-map-data.js?v=1"></script>
     <script src="/static/js/russia-region-names.js?v=1"></script>
     <script src="/static/js/russia-additional-regions-data.js?v=1"></script>
-    <script src="/static/js/history.js?v=13"></script>
+    <script src="/static/js/history.js?v=14"></script>
   </body>
 </html>

@@ -416,6 +416,12 @@ select {
   border-bottom: 1px solid var(--line);
 }
 .history-modal__head > div { display: grid; gap: 5px; }
+.history-modal__head > .history-modal__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
 .history-modal__layout {
   display: grid;
   grid-template-columns: minmax(0, 2fr) minmax(280px, 0.8fr);
