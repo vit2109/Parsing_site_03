@@ -9,7 +9,9 @@ function renderGeographicMap(container, options = {}) {
     element.textContent = String(value || "");
     return element;
   };
-  const map = L.map(container, { preferCanvas: true, minZoom: 2, maxZoom: 19 })
+  const map = L.map(container, {
+    preferCanvas: true, minZoom: 2, maxZoom: 19, attributionControl: false,
+  })
     .setView([61, 95], 3);
   const bounds = L.latLngBounds([]);
   const routes = new Map();

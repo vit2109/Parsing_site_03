@@ -495,9 +495,13 @@ function renderHistoryMap(container, options = {}) {
       </select></label>
       <span class="muted">Географическая подложка загружается через интернет</span>
     </div>
-    <div class="history-map-surface"></div>`;
+    <div class="history-map-surface"></div>
+    <div class="history-map-credit" hidden>
+      &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors
+    </div>`;
   const select = container.querySelector("select");
   const surface = container.querySelector(".history-map-surface");
+  const credit = container.querySelector(".history-map-credit");
   let mode = "geographic";
   try { mode = localStorage.getItem("history-map-mode") || mode; } catch (_) {}
   select.value = mode === "offline" ? "offline" : "geographic";
@@ -512,6 +516,7 @@ function renderHistoryMap(container, options = {}) {
     current?.destroy?.();
     surface.innerHTML = "";
     const geographic = select.value === "geographic";
+    credit.hidden = !geographic;
     surface.classList.toggle("geographic-map", geographic);
     current = geographic
       ? renderGeographicMap(surface, options)

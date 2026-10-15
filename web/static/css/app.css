@@ -394,8 +394,13 @@ select {
 .history-map-toolbar > span { font-size: 12px; }
 .history-map-surface { position: relative; min-height: 360px; }
 .history-map-surface.geographic-map { height: clamp(360px, 60vh, 620px); }
-.geographic-map .leaflet-control-attribution { color: #222; }
-.geographic-map .leaflet-control-attribution a { color: #075c91; }
+.history-map-credit {
+  padding: 5px 12px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--muted);
+}
+.history-map-credit a { color: inherit; }
 .geographic-map .leaflet-tooltip,
 .geographic-map .leaflet-popup-content { color: #222; }
 .geographic-map-message {
