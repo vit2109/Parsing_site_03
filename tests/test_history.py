@@ -22,6 +22,54 @@ from parsing_site.tracking import (
 
 
 class HistoryDatabaseTest(unittest.TestCase):
+    def test_number_search_spans_all_static_objects_and_respects_time(self) -> None:
+        with TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "tracking.db")
+            snapshot = TrackingSnapshot(
+                url="test", title="test", viewport=(800, 600),
+                dynamics=[SceneObject(index=62, name="БПЛА", x=0, y=0, lat=55.76, lng=37.62)],
+                statics=[
+                    SceneObject(index=1, name="Склад", x=0, y=0, lat=55.75, lng=37.61),
+                    SceneObject(index=2, name="Аэропорт", x=0, y=0, lat=55.77, lng=37.63),
+                ],
+                rows=[], threshold=50, warning_limit=150,
+                coordinate_mode="latlng", distance_unit="km",
+            )
+            poll_id = db.save_snapshot(snapshot)
+            db._conn.execute(
+                "UPDATE polls SET ts = ? WHERE id = ?",
+                ("2026-10-15T10:15:30+03:00", poll_id),
+            )
+            db._conn.commit()
+            search = dict(
+                date_from="2026-10-15T10:15:00",
+                date_to="2026-10-15T10:15:59.999999",
+                max_distance_km=10,
+                dynamic_query="62",
+            )
+            self.assertEqual(
+                {row["static_index"] for row in db.list_distance_history(static_index=None, **search)},
+                {1, 2},
+            )
+            self.assertEqual(
+                {row["static_index"] for row in db.list_distance_history(static_index=1, **search)},
+                {1},
+            )
+            self.assertEqual(
+                db.list_distance_history(
+                    static_index=None, **{**search, "date_to": "2026-10-15T10:14:59.999999"}
+                ),
+                [],
+            )
+            zones = db.get_static_zone_trajectories(
+                static_index=1,
+                date_from="2026-10-15T11:00:00",
+                date_to="2026-10-15T12:00:59.999999",
+            )
+            self.assertIsNotNone(zones)
+            self.assertEqual(zones["points"], [])
+            db.close()
+
     def test_discovered_number_replaces_temporary_id_in_history(self) -> None:
         with TemporaryDirectory() as directory:
             db = Database(Path(directory) / "tracking.db")

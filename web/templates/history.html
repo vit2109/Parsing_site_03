@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Хронология сближений</title>
     <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css?v=1.9.4" />
-    <link rel="stylesheet" href="/static/css/app.css?v=10" />
+    <link rel="stylesheet" href="/static/css/app.css?v=11" />
   </head>
   <body>
     <div class="app history-app">
@@ -15,7 +15,7 @@
           <h1>Хронология сближений</h1>
         </div>
         <p class="muted history-lead">
-          Динамические объекты, приближавшиеся к выбранной стационарной точке
+          Динамические объекты, приближавшиеся к стационарным точкам
         </p>
         <div class="topbar__actions">
           <a class="btn btn-ghost" href="/">← Мониторинг</a>
@@ -33,7 +33,7 @@
           </label>
           <label>
             Стационарный объект
-            <select id="history-static" name="static_index" required>
+            <select id="history-static" name="static_index">
               <option value="">Загрузка…</option>
             </select>
           </label>
@@ -42,16 +42,24 @@
             <input id="history-from" name="date_from" type="date" required />
           </label>
           <label>
+            Время с
+            <input id="history-time-from" name="time_from" type="time" value="00:00" required />
+          </label>
+          <label>
             Период по
             <input id="history-to" name="date_to" type="date" required />
+          </label>
+          <label>
+            Время по
+            <input id="history-time-to" name="time_to" type="time" value="23:59" required />
           </label>
           <label>
             Радиус приближения, км
             <input name="max_distance_km" type="number" min="0.001" max="20000" step="0.001" value="10" required />
           </label>
           <label>
-            Динамический объект
-            <input name="dynamic" type="search" placeholder="Все, либо имя / номер" />
+            Номер или имя динамического объекта
+            <input name="dynamic" type="search" placeholder="Номер ищется по всем точкам" />
           </label>
           <button class="btn btn-primary history-submit" type="submit">Показать</button>
           <button id="btn-export-history" class="btn" type="button">Экспорт в Excel</button>
@@ -170,6 +178,6 @@
     <script src="/static/js/russia-additional-regions-data.js?v=1"></script>
     <script src="/static/vendor/leaflet/leaflet.js?v=1.9.4"></script>
     <script src="/static/js/history-geographic-map.js?v=2"></script>
-    <script src="/static/js/history.js?v=16"></script>
+    <script src="/static/js/history.js?v=17"></script>
   </body>
 </html>

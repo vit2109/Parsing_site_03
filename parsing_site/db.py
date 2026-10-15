@@ -218,6 +218,10 @@ class Database:
                 self._conn.execute(
                     f"ALTER TABLE polls ADD COLUMN {column} {declaration}"
                 )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_polls_source_ts "
+            "ON polls(data_source, ts, id)"
+        )
 
     def _ensure_dynamic_columns(self) -> None:
         """Сохраняет устойчивый ID маркера для связывания с найденным номером."""
@@ -794,10 +798,10 @@ class Database:
                 "p.blue_limit AS blue_radius_km "
                 "FROM static_observations s JOIN polls p ON p.id = s.poll_id "
                 "WHERE s.static_index = ? AND p.data_source = ? "
-                "AND p.ts >= ? AND p.ts <= ? AND p.distance_unit = 'km' "
+                "AND p.distance_unit = 'km' "
                 "AND s.lat IS NOT NULL AND s.lng IS NOT NULL "
                 "ORDER BY p.ts DESC, p.id DESC LIMIT 1",
-                (static_index, source, date_from, date_to),
+                (static_index, source),
             ).fetchone()
             if static is None:
                 return None
@@ -814,13 +818,8 @@ class Database:
                 ") SELECT d.id, p.id AS poll_id, p.ts, "
                 "substr(p.ts, 1, 10) AS object_date, d.dynamic_index, "
                 "d.name AS dynamic_name, d.lat, d.lng, d.color, "
-                "haversine_km(s.lat, s.lng, d.lat, d.lng) AS distance, CASE "
-                "WHEN p.distance_unit = 'km' AND haversine_km(s.lat, s.lng, d.lat, d.lng) "
-                "<= p.threshold THEN 'alert' WHEN p.distance_unit = 'km' AND "
-                "haversine_km(s.lat, s.lng, d.lat, d.lng) <= p.warning_limit "
-                "THEN 'warning' WHEN p.distance_unit = 'km' AND "
-                "haversine_km(s.lat, s.lng, d.lat, d.lng) <= p.blue_limit "
-                "THEN 'blue' ELSE 'outside' END AS status "
+                "haversine_km(s.lat, s.lng, d.lat, d.lng) AS distance, "
+                "p.distance_unit, p.threshold, p.warning_limit, p.blue_limit "
                 "FROM dynamic_observations d JOIN polls p ON p.id = d.poll_id "
                 "JOIN static_observations s ON s.poll_id = p.id AND s.static_index = ? "
                 "JOIN entered e ON e.dynamic_index = d.dynamic_index "
@@ -842,15 +841,28 @@ class Database:
                 ),
             ).fetchall()
         result = dict(static)
-        result["points"] = [
-            {**dict(row), "distance": round(float(row["distance"]), 3)} for row in rows
-        ]
+        result["points"] = []
+        for row in rows:
+            point = dict(row)
+            distance = float(point["distance"])
+            unit = point.pop("distance_unit")
+            alert = point.pop("threshold")
+            warning = point.pop("warning_limit")
+            blue = point.pop("blue_limit")
+            point["status"] = (
+                "alert" if unit == "km" and alert is not None and distance <= alert
+                else "warning" if unit == "km" and warning is not None and distance <= warning
+                else "blue" if unit == "km" and blue is not None and distance <= blue
+                else "outside"
+            )
+            point["distance"] = round(distance, 3)
+            result["points"].append(point)
         return result
 
     def count_legacy_history(
         self,
         *,
-        static_index: int,
+        static_index: int | None,
         date_from: str,
         date_to: str,
         dynamic_query: str = "",
@@ -858,18 +870,19 @@ class Database:
     ) -> int:
         """Считает записи без полной географии, исключённые из истории в километрах."""
         where = [
-            "s.static_index = ?",
             "p.ts >= ?",
             "p.ts <= ?",
             "p.data_source = ?",
             "(s.lat IS NULL OR s.lng IS NULL OR d.lat IS NULL OR d.lng IS NULL)",
         ]
         params: list[Any] = [
-            static_index,
             date_from,
             date_to,
             _normalize_source(data_source),
         ]
+        if static_index is not None:
+            where.append("s.static_index = ?")
+            params.append(static_index)
         query = dynamic_query.strip()
         if query:
             where.append("(d.name LIKE ? OR CAST(d.dynamic_index AS TEXT) = ?)")
@@ -886,7 +899,7 @@ class Database:
     def list_distance_history(
         self,
         *,
-        static_index: int,
+        static_index: int | None,
         date_from: str,
         date_to: str,
         max_distance_km: float,
@@ -896,7 +909,6 @@ class Database:
     ) -> list[dict[str, Any]]:
         """Хронология приближений в географическом режиме, от новых к старым."""
         where = [
-            "s.static_index = ?",
             "p.ts >= ?",
             "p.ts <= ?",
             "p.data_source = ?",
@@ -906,11 +918,13 @@ class Database:
             "d.lng IS NOT NULL",
         ]
         params: list[Any] = [
-            static_index,
             date_from,
             date_to,
             _normalize_source(data_source),
         ]
+        if static_index is not None:
+            where.append("s.static_index = ?")
+            params.append(static_index)
         query = dynamic_query.strip()
         if query:
             where.append("(d.name LIKE ? OR CAST(d.dynamic_index AS TEXT) = ?)")

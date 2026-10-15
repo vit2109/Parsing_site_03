@@ -3,10 +3,19 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const extract = eval(fs.readFileSync(process.argv[2], 'utf8'));
 const nativeSetTimeout = global.setTimeout;
-global.setTimeout = (callback, delay, ...args) =>
-  nativeSetTimeout(callback, Math.min(delay, 1), ...args);
 
 async function check(initialZoom, mapDiscoverable = true, crowded = false) {
+  let zoomInMoves = 0;
+  let zoomInWaits = 0;
+  let awaitingZoomInPause = false;
+  global.setTimeout = (callback, delay, ...args) => {
+    if (awaitingZoomInPause && delay !== 1500) {
+      assert.equal(delay, 1000, 'pause after zooming in');
+      zoomInWaits++;
+      awaitingZoomInPause = false;
+    }
+    return nativeSetTimeout(callback, Math.min(delay, 1), ...args);
+  };
   const points = Array.from({length: 12}, (_, i) => ({lat: 50, lng: i * 0.5, number: 101 + i}));
   const listeners = new Set();
   const map = {
@@ -18,6 +27,10 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false) {
     on(_event, callback) { listeners.add(callback); },
     off(_event, callback) { listeners.delete(callback); },
     setView([lat, lng], zoom) {
+      if (zoom > this.zoom) {
+        zoomInMoves++;
+        awaitingZoomInPause = true;
+      }
       this.center = {lat, lng}; this.zoom = zoom;
       for (const callback of [...listeners]) callback();
     },
@@ -87,6 +100,8 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false) {
   assert.equal(result.scan.status, 'complete');
   assert.deepEqual(map.center, {lat: 50, lng: 0});
   assert.equal(map.zoom, initialZoom);
+  assert.ok(zoomInMoves > 0);
+  assert.equal(zoomInWaits, zoomInMoves);
 }
 
 (async () => {

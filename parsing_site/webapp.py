@@ -207,25 +207,27 @@ def api_history_statics(
 
 @app.get("/api/history")
 def api_history(
-    static_index: int = Query(gt=0),
+    static_index: int | None = Query(default=None, gt=0),
     date_from: str = Query(min_length=10),
     date_to: str = Query(min_length=10),
+    time_from: str = Query(default="00:00", pattern=r"^\d{2}:\d{2}$"),
+    time_to: str = Query(default="23:59", pattern=r"^\d{2}:\d{2}$"),
     max_distance_km: float = Query(gt=0, le=20_000),
     dynamic: str = Query(default="", max_length=200),
     limit: int = Query(default=5000, ge=1, le=20_000),
     source: str = Query(default="real", pattern="^(real|fake)$"),
 ) -> dict[str, Any]:
     """Фильтрует историю сближений и формирует сводку по объектам."""
-    start = _parse_history_date(date_from, end_of_day=False)
-    end = _parse_history_date(date_to, end_of_day=True)
+    start, end = _history_bounds(date_from, date_to, time_from, time_to)
     if start > end:
         raise HTTPException(
             status_code=400, detail="Начало периода позже его окончания."
         )
+    static_index, dynamic = _history_search_scope(static_index, dynamic)
     rows = db.list_distance_history(
         static_index=static_index,
         date_from=start.isoformat(timespec="seconds"),
-        date_to=end.isoformat(timespec="seconds"),
+        date_to=end.isoformat(),
         max_distance_km=max_distance_km,
         dynamic_query=dynamic,
         limit=limit,
@@ -234,7 +236,7 @@ def api_history(
     legacy_records = db.count_legacy_history(
         static_index=static_index,
         date_from=start.isoformat(timespec="seconds"),
-        date_to=end.isoformat(timespec="seconds"),
+        date_to=end.isoformat(),
         dynamic_query=dynamic,
         data_source=source,
     )
@@ -295,24 +297,26 @@ def api_history(
 
 @app.get("/api/history/export.xlsx")
 def api_history_export(
-    static_index: int = Query(gt=0),
+    static_index: int | None = Query(default=None, gt=0),
     date_from: str = Query(min_length=10),
     date_to: str = Query(min_length=10),
+    time_from: str = Query(default="00:00", pattern=r"^\d{2}:\d{2}$"),
+    time_to: str = Query(default="23:59", pattern=r"^\d{2}:\d{2}$"),
     max_distance_km: float = Query(gt=0, le=20_000),
     dynamic: str = Query(default="", max_length=200),
     source: str = Query(default="real", pattern="^(real|fake)$"),
 ) -> Response:
     """Выгружает выбранную историю сближений в XLSX."""
-    start = _parse_history_date(date_from, end_of_day=False)
-    end = _parse_history_date(date_to, end_of_day=True)
+    start, end = _history_bounds(date_from, date_to, time_from, time_to)
     if start > end:
         raise HTTPException(
             status_code=400, detail="Начало периода позже его окончания."
         )
+    static_index, dynamic = _history_search_scope(static_index, dynamic)
     rows = db.list_distance_history(
         static_index=static_index,
         date_from=start.isoformat(timespec="seconds"),
-        date_to=end.isoformat(timespec="seconds"),
+        date_to=end.isoformat(),
         max_distance_km=max_distance_km,
         dynamic_query=dynamic,
         limit=20_000,
@@ -326,6 +330,8 @@ def api_history_export(
         max_distance_km=max_distance_km,
         dynamic_query=dynamic,
         source=source,
+        time_from=time_from,
+        time_to=time_to,
     )
     filename = f"chronology_{date_from}_{date_to}.xlsx"
     return Response(
@@ -341,12 +347,13 @@ def api_history_trajectory(
     object_date: str = Query(pattern=r"^\d{4}-\d{2}-\d{2}$"),
     date_from: str = Query(min_length=10),
     date_to: str = Query(min_length=10),
+    time_from: str = Query(default="00:00", pattern=r"^\d{2}:\d{2}$"),
+    time_to: str = Query(default="23:59", pattern=r"^\d{2}:\d{2}$"),
     source: str = Query(default="real", pattern="^(real|fake)$"),
     limit: int = Query(default=1_500, ge=1, le=20_000),
 ) -> dict[str, Any]:
     """Возвращает географическую траекторию одного динамического объекта."""
-    start = _parse_history_date(date_from, end_of_day=False)
-    end = _parse_history_date(date_to, end_of_day=True)
+    start, end = _history_bounds(date_from, date_to, time_from, time_to)
     if start > end:
         raise HTTPException(
             status_code=400, detail="Начало периода позже его окончания."
@@ -354,7 +361,7 @@ def api_history_trajectory(
     points = db.list_dynamic_trajectory(
         dynamic_index=dynamic_index,
         date_from=start.isoformat(timespec="seconds"),
-        date_to=end.isoformat(timespec="seconds"),
+        date_to=end.isoformat(),
         object_date=object_date,
         data_source=source,
         limit=limit + 1,
@@ -382,12 +389,13 @@ def api_history_static_zones(
     static_index: int,
     date_from: str = Query(min_length=10),
     date_to: str = Query(min_length=10),
+    time_from: str = Query(default="00:00", pattern=r"^\d{2}:\d{2}$"),
+    time_to: str = Query(default="23:59", pattern=r"^\d{2}:\d{2}$"),
     source: str = Query(default="real", pattern="^(real|fake)$"),
     limit: int = Query(default=1_500, ge=1, le=20_000),
 ) -> dict[str, Any]:
     """Возвращает траектории объектов, входивших в зоны выбранной точки."""
-    start = _parse_history_date(date_from, end_of_day=False)
-    end = _parse_history_date(date_to, end_of_day=True)
+    start, end = _history_bounds(date_from, date_to, time_from, time_to)
     if start > end:
         raise HTTPException(
             status_code=400, detail="Начало периода позже его окончания."
@@ -395,15 +403,30 @@ def api_history_static_zones(
     result = db.get_static_zone_trajectories(
         static_index=static_index,
         date_from=start.isoformat(timespec="seconds"),
-        date_to=end.isoformat(timespec="seconds"),
+        date_to=end.isoformat(),
         data_source=source,
         limit=limit + 1,
     )
     if result is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Для стационарного объекта нет географических данных и зон за этот период.",
-        )
+        settings = store.current()
+        configured = next(
+            (item for item in settings.static_objects if item.id == static_index), None
+        ) if source == "real" else None
+        if configured is None or configured.lat is None or configured.lng is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Для стационарного объекта нет географических координат.",
+            )
+        result = {
+            "static_index": static_index,
+            "static_name": configured.name,
+            "lat": configured.lat,
+            "lng": configured.lng,
+            "alert_radius_km": settings.threshold if settings.coordinate_mode == "latlng" else None,
+            "warning_radius_km": settings.warning_distance if settings.coordinate_mode == "latlng" else None,
+            "blue_radius_km": settings.blue_distance if settings.coordinate_mode == "latlng" else None,
+            "points": [],
+        }
     points = result.pop("points")
     truncated = len(points) > limit
     result["blue_color"] = store.current().blue_color
@@ -527,3 +550,27 @@ def _parse_history_date(value: str, *, end_of_day: bool) -> datetime:
     if "T" not in value and end_of_day:
         return parsed.replace(hour=23, minute=59, second=59)
     return parsed
+
+
+def _history_bounds(
+    date_from: str, date_to: str, time_from: str, time_to: str
+) -> tuple[datetime, datetime]:
+    """Собирает включительный интервал из даты и времени с точностью до минуты."""
+    start_value = date_from if "T" in date_from else f"{date_from}T{time_from}:00"
+    end_value = date_to if "T" in date_to else f"{date_to}T{time_to}:59"
+    start = _parse_history_date(start_value, end_of_day=False)
+    end = _parse_history_date(end_value, end_of_day=False)
+    if "T" not in date_to:
+        end = end.replace(microsecond=999999)
+    return start, end
+
+
+def _history_search_scope(
+    static_index: int | None, dynamic_query: str
+) -> tuple[int | None, str]:
+    """Ищет введённый номер объекта по всем стационарным точкам."""
+    query = dynamic_query.strip()
+    number = query.removeprefix("№").strip()
+    if number.isdecimal():
+        return None, number
+    return static_index, query

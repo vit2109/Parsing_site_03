@@ -46,6 +46,7 @@ const STATUS_LABEL = { alert: "красная зона", warning: "жёлтая 
  * @type {Array<Object>}
  */
 let staticObjects = [];
+let staticLoadRequest = 0;
 
 /**
  * Карта (инстанс) офлайн-карты для отображения динамической траектории.
@@ -74,7 +75,9 @@ const els = {
   source: document.getElementById("history-source"),
   staticSelect: document.getElementById("history-static"),
   dateFrom: document.getElementById("history-from"),
+  timeFrom: document.getElementById("history-time-from"),
   dateTo: document.getElementById("history-to"),
+  timeTo: document.getElementById("history-time-to"),
   staticMeta: document.getElementById("history-static-meta"),
   error: document.getElementById("history-error"),
   notice: document.getElementById("history-notice"),
@@ -165,12 +168,15 @@ document.querySelectorAll("dialog").forEach((dialog) => {
  * @returns {Promise<void>}
  */
 async function loadStaticObjects() {
+  const request = ++staticLoadRequest;
+  const selectedSource = els.source.value;
   try {
-    const source = encodeURIComponent(els.source.value);
+    const source = encodeURIComponent(selectedSource);
     const [objects, settings] = await Promise.all([
       getJson(`/api/history/static-objects?source=${source}`),
       getJson("/api/settings"),
     ]);
+    if (request !== staticLoadRequest || selectedSource !== els.source.value) return;
     staticObjects = objects;
     document.documentElement.style.setProperty("--blue", settings.blue_color || "#2878b8");
     if (!staticObjects.length) {
@@ -178,7 +184,7 @@ async function loadStaticObjects() {
       showError("Сначала добавьте стационарный объект в настройках мониторинга.");
       return;
     }
-    els.staticSelect.innerHTML = staticObjects.map((item) => {
+    els.staticSelect.innerHTML = '<option value="">Все стационарные объекты</option>' + staticObjects.map((item) => {
       const samples = Number(item.samples || 0);
       const kmSamples = Number(item.km_samples || 0);
       const suffix = samples
@@ -186,10 +192,12 @@ async function loadStaticObjects() {
         : " · истории пока нет";
       return `<option value="${item.static_index}" data-name="${escapeAttr(item.static_name)}">${escapeHtml(item.static_name)} (#${item.static_index})${suffix}</option>`;
     }).join("");
+    const latest = staticObjects.map((item) => item.last_seen).filter(Boolean).sort().at(-1);
+    if (latest) setPeriodNear(latest);
     showStaticMeta();
     renderOverviewMap();
   } catch (error) {
-    showError(error.message);
+    if (request === staticLoadRequest) showError(error.message);
   }
 }
 
@@ -218,7 +226,7 @@ async function loadHistory(event) {
   button.disabled = true;
   button.textContent = "Загрузка…";
   try {
-    const params = new URLSearchParams(new FormData(els.form));
+    const params = historyParams();
     const data = await getJson(`/api/history?${params}`);
     renderHistory(data);
   } catch (error) {
@@ -237,7 +245,7 @@ async function exportHistory() {
   els.exportHistory.disabled = true;
   els.exportHistory.textContent = "Подготовка…";
   try {
-    const params = new URLSearchParams(new FormData(els.form));
+    const params = historyParams();
     const response = await fetch(`/api/history/export.xlsx?${params}`);
     if (!response.ok) {
       let message = response.statusText;
@@ -327,7 +335,11 @@ function renderOverviewMap() {
   els.staticCount.textContent = `${staticObjects.length} ${pluralObjects(staticObjects.length)}`;
   const valid = staticObjects.filter((item) => item.static_lat != null && item.static_lng != null);
   renderHistoryMap(els.overviewMap, {
-    onStaticSelect: openStaticZones,
+    onStaticSelect: (staticIndex) => {
+      els.staticSelect.value = String(staticIndex);
+      showStaticMeta();
+      openStaticZones(staticIndex);
+    },
     points: valid.map((item) => ({
       ...item,
       lat: item.static_lat,
@@ -399,10 +411,22 @@ function renderDynamicMap(data) {
 /** Загружает зоны точки и траектории входивших в них объектов. */
 async function openStaticZones(staticIndex) {
   hideError();
-  els.staticTitle.textContent = `Объект #${staticIndex}`;
+  const selected = staticObjects.find((item) => Number(item.static_index) === staticIndex);
+  els.staticTitle.textContent = selected ? `#${staticIndex} ${selected.static_name}` : `Объект #${staticIndex}`;
   els.staticZoneMeta.textContent = "Загрузка зон и траекторий…";
   els.staticTrajectories.innerHTML = '<p class="muted">Загрузка…</p>';
   els.staticModal.showModal();
+  if (selected?.static_lat != null && selected?.static_lng != null) {
+    renderStaticZoneMap({
+      static_index: staticIndex, static_name: selected.static_name,
+      lat: selected.static_lat, lng: selected.static_lng,
+      alert_radius_km: selected.alert_radius_km,
+      warning_radius_km: selected.warning_radius_km,
+      blue_radius_km: selected.blue_radius_km,
+      trajectories: [],
+    });
+    els.staticTrajectories.innerHTML = '<p class="muted">Загрузка объектов за выбранный период…</p>';
+  }
   try {
     const data = await getJson(`/api/history/static-zones/${staticIndex}?${periodParams()}`);
     els.staticTitle.textContent = `#${data.static_index} ${data.static_name}`;
@@ -410,8 +434,8 @@ async function openStaticZones(staticIndex) {
     if (!els.staticModal.open) return;
     renderStaticZoneMap(data);
   } catch (error) {
-    els.staticModal.close();
-    showError(error.message);
+    els.staticZoneMeta.textContent = error.message;
+    els.staticTrajectories.innerHTML = `<p class="muted history-empty-detail">${escapeHtml(error.message)}</p>`;
   }
 }
 
@@ -493,11 +517,9 @@ function renderHistoryMap(container, options = {}) {
         <option value="geographic">Географическая · OpenStreetMap</option>
         <option value="offline">Схема · без интернета</option>
       </select></label>
-      <span class="muted">Географическая подложка загружается через интернет</span>
     </div>
     <div class="history-map-surface"></div>
     <div class="history-map-credit" hidden>
-      &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors
     </div>`;
   const select = container.querySelector("select");
   const surface = container.querySelector(".history-map-surface");
@@ -1018,9 +1040,24 @@ function zoneStatusLabel(status) {
 function periodParams() {
   return new URLSearchParams({
     date_from: els.dateFrom.value,
+    time_from: els.timeFrom.value,
     date_to: els.dateTo.value,
+    time_to: els.timeTo.value,
     source: els.source.value,
   });
+}
+
+/** Передаёт все фильтры, опуская пустой выбор стационарного объекта. */
+function historyParams() {
+  const params = new URLSearchParams(new FormData(els.form));
+  const number = (params.get("dynamic") || "").trim().match(/^№?\s*(\d+)$/);
+  if (number) {
+    params.set("dynamic", number[1]);
+    els.staticSelect.value = "";
+    showStaticMeta();
+  }
+  if (!params.get("static_index") || number) params.delete("static_index");
+  return params;
 }
 
 /** Показывает координаты и доступность географической истории выбранной точки. */
@@ -1040,19 +1077,31 @@ function showStaticMeta() {
     : " · накопленных данных пока нет";
   const compatibility = ` · географических записей: ${kmSamples}, старых в px: ${legacySamples}`;
   els.staticMeta.textContent = `Географические координаты: ${coords}${range}${compatibility}`;
-  if (selected.first_seen && selected.last_seen) {
-    els.dateFrom.value = selected.first_seen.slice(0, 10);
-    els.dateTo.value = selected.last_seen.slice(0, 10);
-  }
 }
 
-/** Устанавливает период по умолчанию: последние семь суток. */
+/** Устанавливает период по умолчанию: последний час. */
 function setDefaultDates() {
   const now = new Date();
-  const weekAgo = new Date(now);
-  weekAgo.setDate(now.getDate() - 7);
+  const hourAgo = new Date(now.getTime() - 60 * 60 * 1000);
   els.dateTo.value = localDate(now);
-  els.dateFrom.value = localDate(weekAgo);
+  els.timeTo.value = localTime(now);
+  els.dateFrom.value = localDate(hourAgo);
+  els.timeFrom.value = localTime(hourAgo);
+}
+
+/** Выбирает последний час доступной истории источника. */
+function setPeriodNear(lastSeen) {
+  const end = new Date(lastSeen);
+  if (Number.isNaN(end.getTime())) return;
+  const start = new Date(end.getTime() - 60 * 60 * 1000);
+  els.dateFrom.value = localDate(start);
+  els.timeFrom.value = localTime(start);
+  els.dateTo.value = localDate(end);
+  els.timeTo.value = localTime(end);
+}
+
+function localTime(date) {
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
 /** Форматирует локальную календарную дату как YYYY-MM-DD. */

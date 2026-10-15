@@ -68,6 +68,8 @@ class LeafletScanTest(unittest.TestCase):
         self.assertEqual(page.mouse.wheel_calls, moves)
         self.assertEqual(page.zoom, 5)
         self.assertAlmostEqual(page.center_lng, 40, places=5)
+        self.assertGreater(page.mouse.zoom_in_calls, 0)
+        self.assertEqual(page.waits.count(1000), page.mouse.zoom_in_calls)
 
     def test_browser_wheel_retries_unlabelled_object_in_crowd(self) -> None:
         page = _FakePage(crowded=True)
@@ -81,6 +83,8 @@ class LeafletScanTest(unittest.TestCase):
         )
         self.assertEqual(result["scan"]["status"], "complete")
         self.assertEqual(page.zoom, 5)
+        self.assertGreater(page.mouse.zoom_in_calls, 0)
+        self.assertEqual(page.waits.count(1000), page.mouse.zoom_in_calls)
 
 
 class _FakeMouse:
@@ -89,12 +93,14 @@ class _FakeMouse:
         self.x = 400.0
         self.y = 300.0
         self.wheel_calls = 0
+        self.zoom_in_calls = 0
 
     def move(self, x: float, y: float) -> None:
         self.x, self.y = x, y
 
     def wheel(self, _dx: int, dy: int) -> None:
         self.wheel_calls += 1
+        self.zoom_in_calls += dy < 0
         page = self.page
         view = page.view()
         anchor = container_to_latlng(self.x, self.y, view)
@@ -113,9 +119,10 @@ class _FakePage:
         self.center_lat = 50.0
         self.center_lng = 40.0
         self.mouse = _FakeMouse(self)
+        self.waits: list[int] = []
 
-    def wait_for_timeout(self, _milliseconds: int) -> None:
-        pass
+    def wait_for_timeout(self, milliseconds: int) -> None:
+        self.waits.append(milliseconds)
 
     def view(self) -> MapView:
         return MapView(

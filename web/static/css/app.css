@@ -319,10 +319,12 @@ select {
 .history-filter-panel { padding: 16px; overflow: visible; }
 .history-filters {
   display: grid;
-  grid-template-columns: minmax(220px, 1.5fr) repeat(2, minmax(145px, 0.8fr)) minmax(160px, 0.8fr) minmax(200px, 1fr) auto auto;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 12px;
   align-items: end;
 }
+.history-filters > label { min-width: 0; }
+.history-filters input, .history-filters select { box-sizing: border-box; min-width: 0; width: 100%; }
 .history-submit { min-height: 40px; }
 #btn-regenerate-fake { min-height: 40px; white-space: nowrap; }
 #btn-export-history { min-height: 40px; white-space: nowrap; }

@@ -43,10 +43,12 @@ def build_history_workbook(
     *,
     date_from: str,
     date_to: str,
-    static_index: int,
+    static_index: int | None,
     max_distance_km: float,
     dynamic_query: str,
     source: str,
+    time_from: str | None = None,
+    time_to: str | None = None,
 ) -> bytes:
     """Возвращает XLSX с метаданными фильтра и табличной выборкой."""
     row_list = list(rows)
@@ -58,7 +60,9 @@ def build_history_workbook(
     sheet["A2"] = "Хронология сближений"
     sheet["A2"].font = Font(name="Arial", size=14, bold=True, color="1F1F1F")
     sheet["A3"] = "Период"
-    sheet["B3"] = f"{date_from} — {date_to}"
+    start_label = f"{date_from} {time_from}" if time_from else date_from
+    end_label = f"{date_to} {time_to}" if time_to else date_to
+    sheet["B3"] = f"{start_label} — {end_label}"
     sheet["D3"] = "Стационарный объект"
     sheet["E3"] = _static_label(row_list, static_index)
     sheet["A4"] = "Радиус, км"
@@ -153,8 +157,10 @@ def _excel_datetime(value: Any) -> datetime | None:
     return parsed.replace(tzinfo=None)
 
 
-def _static_label(rows: list[dict[str, Any]], static_index: int) -> str:
+def _static_label(rows: list[dict[str, Any]], static_index: int | None) -> str:
     """Формирует подпись выбранной стационарной точки для шапки отчёта."""
+    if static_index is None:
+        return "Все стационарные объекты"
     if rows:
         return f"#{static_index} {rows[0].get('static_name') or ''}".strip()
     return f"#{static_index}"

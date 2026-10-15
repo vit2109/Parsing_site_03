@@ -400,6 +400,7 @@ async (opts) => {
     const usedNumbers = new Set(dynamics.filter((item) => item.index > 0).map((item) => item.index));
     const moveTo = async (lat, lng, z) => {
       scan.views++;
+      const zoomingIn = z > map.getZoom();
       await new Promise((resolve) => {
         let done = false;
         const finish = () => {
@@ -416,7 +417,7 @@ async (opts) => {
         if (typeof map.on !== "function") finish();
       });
       // Vue может перерисовать маркеры после moveend и ответа API.
-      await new Promise((resolve) => setTimeout(resolve, 600));
+      await new Promise((resolve) => setTimeout(resolve, zoomingIn ? 1000 : 600));
     };
     const matchVisible = () => {
       const visible = collect(opts.dynamic, "D", true).filter((item) => item.index > 0);
@@ -701,7 +702,7 @@ def extract_scene_with_mouse_scan(
     def scene_after_wheel(x: float, y: float, delta: int) -> dict[str, Any]:
         page.mouse.move(x, y)
         page.mouse.wheel(0, delta)
-        page.wait_for_timeout(650)
+        page.wait_for_timeout(1000 if delta < 0 else 650)
         scene = extract_scene_from_page(page, tracking, scan_numbers=False)
         zoom_after = _maybe_float(scene.get("map_zoom"))
         if delta < 0 and zoom_after is not None and zoom_after >= base_zoom + 2:
