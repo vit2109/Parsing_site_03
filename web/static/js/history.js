@@ -370,7 +370,7 @@ async function openDynamicTrajectory(dynamicIndex, objectDate) {
     params.set("object_date", objectDate);
     const data = await getJson(`/api/history/trajectory/${dynamicIndex}?${params}`);
     els.trajectoryTitle.textContent = `${dynamicNumberLabel(data.dynamic_index)} ${data.dynamic_name} · ${data.object_date}`;
-    els.trajectoryMeta.textContent = `${data.total} ${pluralPoints(data.total)} за сутки${data.truncated ? ` · показаны первые ${data.total} точек` : ""}`;
+    els.trajectoryMeta.textContent = `${data.total} ${pluralPoints(data.total)} за выбранный период · повторные координаты скрыты${data.truncated ? ` · показаны первые ${data.total} точек` : ""}`;
     if (!els.trajectoryModal.open) return;
     renderDynamicMap(data);
   } catch (error) {
@@ -430,7 +430,7 @@ async function openStaticZones(staticIndex) {
   try {
     const data = await getJson(`/api/history/static-zones/${staticIndex}?${periodParams()}`);
     els.staticTitle.textContent = `#${data.static_index} ${data.static_name}`;
-    els.staticZoneMeta.textContent = `Красная зона: ${formatKm(data.alert_radius_km)} · жёлтая зона: ${formatKm(data.warning_radius_km)} · синяя зона: ${formatKm(data.blue_radius_km)} · объектов: ${data.objects_total}${data.truncated ? ` · показаны первые ${data.points_total} точек; уточните период для остальных` : ""}`;
+    els.staticZoneMeta.textContent = `Красная зона: ${formatKm(data.alert_radius_km)} · жёлтая зона: ${formatKm(data.warning_radius_km)} · синяя зона: ${formatKm(data.blue_radius_km)} · объектов: ${data.objects_total} · повторные координаты скрыты${data.truncated ? ` · показаны первые ${data.points_total} точек; уточните период для остальных` : ""}`;
     if (!els.staticModal.open) return;
     renderStaticZoneMap(data);
   } catch (error) {

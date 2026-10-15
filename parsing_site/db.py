@@ -754,7 +754,7 @@ class Database:
         data_source: str = "real",
         limit: int = 20_000,
     ) -> list[dict[str, Any]]:
-        """Положения объекта; при указанной дате — только его суточная траектория."""
+        """Первые положения каждой серии одинаковых координат в траектории."""
         day_filter = " AND substr(p.ts, 1, 10) = ?" if object_date else ""
         params: list[Any] = [
             dynamic_index,
@@ -767,15 +767,24 @@ class Database:
         params.append(max(1, min(limit, 20_001)))
         with closing(self._open_read_connection()) as read_conn:
             rows = read_conn.execute(
-                "SELECT d.id, p.id AS poll_id, p.ts, substr(p.ts, 1, 10) AS "
-                "object_date, d.dynamic_index, d.name AS "
-                "dynamic_name, d.lat, d.lng, d.color FROM dynamic_observations d "
+                "WITH positions AS (SELECT d.id, p.id AS poll_id, p.ts, "
+                "substr(p.ts, 1, 10) AS object_date, d.dynamic_index, "
+                "d.name AS dynamic_name, d.lat, d.lng, d.color, "
+                "LAG(d.lat) OVER (PARTITION BY substr(p.ts, 1, 10), d.dynamic_index "
+                "ORDER BY p.ts, d.id) AS previous_lat, "
+                "LAG(d.lng) OVER (PARTITION BY substr(p.ts, 1, 10), d.dynamic_index "
+                "ORDER BY p.ts, d.id) AS previous_lng "
+                "FROM dynamic_observations d "
                 "JOIN polls p ON p.id = d.poll_id WHERE d.dynamic_index = ? "
                 "AND p.ts >= ? AND p.ts <= ? AND p.data_source = ? "
                 + day_filter
                 + " "
                 "AND d.lat IS NOT NULL AND d.lng IS NOT NULL "
-                "ORDER BY p.ts ASC, d.id ASC LIMIT ?",
+                ") SELECT id, poll_id, ts, object_date, dynamic_index, "
+                "dynamic_name, lat, lng, color FROM positions WHERE previous_lat IS NULL "
+                "OR ROUND(lat, 6) != ROUND(previous_lat, 6) "
+                "OR ROUND(lng, 6) != ROUND(previous_lng, 6) "
+                "ORDER BY ts ASC, id ASC LIMIT ?",
                 params,
             ).fetchall()
         return [dict(row) for row in rows]
@@ -789,8 +798,10 @@ class Database:
         data_source: str = "real",
         limit: int = 20_000,
     ) -> dict[str, Any] | None:
-        """Траектории объектов, хотя бы раз вошедших в одну из зон объекта."""
+        """Траектории вошедших в зоны объектов без повторов соседних координат."""
         source = _normalize_source(data_source)
+        point_limit = max(1, min(limit, 20_001))
+        groups: dict[tuple[str, int], dict[str, Any]] = {}
         with closing(self._open_read_connection()) as read_conn:
             static = read_conn.execute(
                 "SELECT s.static_index, s.name AS static_name, s.lat, s.lng, "
@@ -806,57 +817,61 @@ class Database:
             if static is None:
                 return None
             rows = read_conn.execute(
-                "WITH entered AS ("
-                "SELECT DISTINCT substr(p.ts, 1, 10) AS object_date, "
-                "d.dynamic_index FROM static_observations s "
-                "JOIN dynamic_observations d ON d.poll_id = s.poll_id "
-                "JOIN polls p ON p.id = s.poll_id WHERE s.static_index = ? "
-                "AND p.ts >= ? AND p.ts <= ? AND p.data_source = ? "
-                "AND p.distance_unit = 'km' AND s.lat IS NOT NULL "
-                "AND s.lng IS NOT NULL AND d.lat IS NOT NULL AND d.lng IS NOT NULL "
-                "AND haversine_km(s.lat, s.lng, d.lat, d.lng) <= p.blue_limit"
-                ") SELECT d.id, p.id AS poll_id, p.ts, "
+                "SELECT d.id, p.id AS poll_id, p.ts, "
                 "substr(p.ts, 1, 10) AS object_date, d.dynamic_index, "
                 "d.name AS dynamic_name, d.lat, d.lng, d.color, "
-                "haversine_km(s.lat, s.lng, d.lat, d.lng) AS distance, "
+                "s.lat AS static_lat, s.lng AS static_lng, "
                 "p.distance_unit, p.threshold, p.warning_limit, p.blue_limit "
-                "FROM dynamic_observations d JOIN polls p ON p.id = d.poll_id "
+                "FROM polls p INDEXED BY idx_polls_source_ts "
                 "JOIN static_observations s ON s.poll_id = p.id AND s.static_index = ? "
-                "JOIN entered e ON e.dynamic_index = d.dynamic_index "
-                "AND e.object_date = substr(p.ts, 1, 10) "
-                "WHERE p.ts >= ? AND p.ts <= ? AND p.data_source = ? "
-                "AND d.lat IS NOT NULL AND d.lng IS NOT NULL "
+                "JOIN dynamic_observations d ON d.poll_id = p.id "
+                "WHERE p.data_source = ? AND p.ts >= ? AND p.ts <= ? "
                 "AND s.lat IS NOT NULL AND s.lng IS NOT NULL "
-                "ORDER BY object_date, d.dynamic_index, p.ts ASC, d.id ASC LIMIT ?",
-                (
-                    static_index,
-                    date_from,
-                    date_to,
-                    source,
-                    static_index,
-                    date_from,
-                    date_to,
-                    source,
-                    max(1, min(limit, 20_001)),
-                ),
-            ).fetchall()
+                "AND d.lat IS NOT NULL AND d.lng IS NOT NULL "
+                "ORDER BY p.ts, d.id",
+                (static_index, source, date_from, date_to),
+            )
+            for row in rows:
+                distance = _geo_distance_values(
+                    row["static_lat"], row["static_lng"], row["lat"], row["lng"]
+                )
+                if distance is None:
+                    continue
+                key = (str(row["object_date"]), int(row["dynamic_index"]))
+                group = groups.setdefault(key, {"entered": False, "previous": None, "points": []})
+                blue = row["blue_limit"]
+                if row["distance_unit"] == "km" and blue is not None and distance <= blue:
+                    group["entered"] = True
+                coordinates = (round(float(row["lat"]), 6), round(float(row["lng"]), 6))
+                if coordinates == group["previous"]:
+                    continue
+                group["previous"] = coordinates
+                if len(group["points"]) >= point_limit:
+                    continue
+                alert = row["threshold"]
+                warning = row["warning_limit"]
+                point = {
+                    "id": row["id"], "poll_id": row["poll_id"], "ts": row["ts"],
+                    "object_date": row["object_date"], "dynamic_index": row["dynamic_index"],
+                    "dynamic_name": row["dynamic_name"], "lat": row["lat"],
+                    "lng": row["lng"], "color": row["color"],
+                    "distance": round(distance, 3),
+                    "status": (
+                        "alert" if row["distance_unit"] == "km" and alert is not None and distance <= alert
+                        else "warning" if row["distance_unit"] == "km" and warning is not None and distance <= warning
+                        else "blue" if row["distance_unit"] == "km" and blue is not None and distance <= blue
+                        else "outside"
+                    ),
+                }
+                group["points"].append(point)
         result = dict(static)
         result["points"] = []
-        for row in rows:
-            point = dict(row)
-            distance = float(point["distance"])
-            unit = point.pop("distance_unit")
-            alert = point.pop("threshold")
-            warning = point.pop("warning_limit")
-            blue = point.pop("blue_limit")
-            point["status"] = (
-                "alert" if unit == "km" and alert is not None and distance <= alert
-                else "warning" if unit == "km" and warning is not None and distance <= warning
-                else "blue" if unit == "km" and blue is not None and distance <= blue
-                else "outside"
-            )
-            point["distance"] = round(distance, 3)
-            result["points"].append(point)
+        for key in sorted(groups):
+            if groups[key]["entered"]:
+                result["points"].extend(groups[key]["points"])
+                if len(result["points"]) >= point_limit:
+                    result["points"] = result["points"][:point_limit]
+                    break
         return result
 
     def count_legacy_history(

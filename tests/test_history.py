@@ -22,6 +22,42 @@ from parsing_site.tracking import (
 
 
 class HistoryDatabaseTest(unittest.TestCase):
+    def test_trajectory_keeps_first_timestamp_until_coordinates_change(self) -> None:
+        with TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "tracking.db")
+            samples = [
+                ("2026-10-15T10:00:00+03:00", 55.76),
+                ("2026-10-15T10:01:00+03:00", 55.76),
+                ("2026-10-15T10:02:00+03:00", 55.77),
+                ("2026-10-15T10:03:00+03:00", 55.77),
+                ("2026-10-15T10:04:00+03:00", 55.76),
+                ("2026-10-16T09:00:00+03:00", 55.76),
+            ]
+            for timestamp, lat in samples:
+                snapshot = TrackingSnapshot(
+                    url="test", title="test", viewport=(800, 600),
+                    dynamics=[SceneObject(index=62, name="БПЛА", x=0, y=0, lat=lat, lng=37.62)],
+                    statics=[SceneObject(index=1, name="Склад", x=0, y=0, lat=55.75, lng=37.61)],
+                    rows=[], threshold=50, warning_limit=150,
+                    coordinate_mode="latlng", distance_unit="km",
+                )
+                poll_id = db.save_snapshot(snapshot)
+                db._conn.execute("UPDATE polls SET ts = ? WHERE id = ?", (timestamp, poll_id))
+            db._conn.commit()
+            period = {
+                "date_from": "2026-10-15T00:00:00",
+                "date_to": "2026-10-16T23:59:59.999999",
+            }
+            expected = [samples[index][0] for index in (0, 2, 4, 5)]
+            trajectory = db.list_dynamic_trajectory(dynamic_index=62, **period)
+            self.assertEqual([point["ts"] for point in trajectory], expected)
+            zones = db.get_static_zone_trajectories(static_index=1, **period)
+            self.assertIsNotNone(zones)
+            self.assertEqual([point["ts"] for point in zones["points"]], expected)
+            limited = db.get_static_zone_trajectories(static_index=1, limit=2, **period)
+            self.assertEqual([point["ts"] for point in limited["points"]], expected[:2])
+            db.close()
+
     def test_number_search_spans_all_static_objects_and_respects_time(self) -> None:
         with TemporaryDirectory() as directory:
             db = Database(Path(directory) / "tracking.db")
@@ -41,12 +77,12 @@ class HistoryDatabaseTest(unittest.TestCase):
                 ("2026-10-15T10:15:30+03:00", poll_id),
             )
             db._conn.commit()
-            search = dict(
-                date_from="2026-10-15T10:15:00",
-                date_to="2026-10-15T10:15:59.999999",
-                max_distance_km=10,
-                dynamic_query="62",
-            )
+            search = {
+                "date_from": "2026-10-15T10:15:00",
+                "date_to": "2026-10-15T10:15:59.999999",
+                "max_distance_km": 10,
+                "dynamic_query": "62",
+            }
             self.assertEqual(
                 {row["static_index"] for row in db.list_distance_history(static_index=None, **search)},
                 {1, 2},
