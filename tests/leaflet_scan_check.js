@@ -6,7 +6,7 @@ const nativeSetTimeout = global.setTimeout;
 global.setTimeout = (callback, delay, ...args) =>
   nativeSetTimeout(callback, Math.min(delay, 1), ...args);
 
-async function check(initialZoom, mapDiscoverable = true) {
+async function check(initialZoom, mapDiscoverable = true, crowded = false) {
   const points = Array.from({length: 12}, (_, i) => ({lat: 50, lng: i * 0.5, number: 101 + i}));
   const listeners = new Set();
   const map = {
@@ -63,7 +63,9 @@ async function check(initialZoom, mapDiscoverable = true) {
       });
       if (selector === '.leaflet-marker-icon.map-incident') return visible.map((p) => element(p, false));
       if (selector === '.leaflet-marker-icon.map-incident-operator-number')
-        return map.zoom >= 8 ? visible.map((p) => element(p, true)) : [];
+        return map.zoom >= 8
+          ? visible.filter((p) => !crowded || map.zoom >= 10 || p.number % 2 === 0)
+              .map((p) => element(p, true)) : [];
       return [];
     },
   };
@@ -90,6 +92,7 @@ async function check(initialZoom, mapDiscoverable = true) {
 (async () => {
   await check(6); // все маркеры видны, номера скрыты
   await check(8); // номера видны, часть маркеров за пределами окна
+  await check(6, true, true); // скопление: часть подписей появится лишь на следующем масштабе
   await check(6, false); // диагностика, когда карта не найдена
   console.log('Leaflet scan: both zoom cases passed');
 })().catch((error) => {console.error(error); process.exitCode = 1;});

@@ -22,6 +22,35 @@ from parsing_site.tracking import (
 
 
 class HistoryDatabaseTest(unittest.TestCase):
+    def test_discovered_number_replaces_temporary_id_in_history(self) -> None:
+        with TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "tracking.db")
+            static = SceneObject(index=1, name="Склад", x=0, y=0, lat=55.75, lng=37.61)
+
+            def snapshot(index: int) -> TrackingSnapshot:
+                return TrackingSnapshot(
+                    url="https://example.test/map", title="Карта", viewport=(800, 600),
+                    dynamics=[SceneObject(
+                        index=index, name="БПЛА", x=1, y=1,
+                        lat=55.751, lng=37.611, fallback_id=-12345,
+                    )],
+                    statics=[static], rows=[], threshold=1, warning_limit=2,
+                    coordinate_mode="latlng", distance_unit="km",
+                )
+
+            db.save_snapshot(snapshot(-12345))
+            db._conn.execute(
+                "UPDATE dynamic_observations SET fallback_id = NULL WHERE dynamic_index = -12345"
+            )
+            db._conn.commit()
+            db.save_snapshot(snapshot(72))
+            db.save_snapshot(snapshot(-12345))
+            indices = [row[0] for row in db._conn.execute(
+                "SELECT dynamic_index FROM dynamic_observations ORDER BY id"
+            )]
+            self.assertEqual(indices, [72, 72, 72])
+            db.close()
+
     def test_history_reads_do_not_wait_for_worker_connection_lock(self) -> None:
         with TemporaryDirectory() as directory:
             db = Database(Path(directory) / "tracking.db")

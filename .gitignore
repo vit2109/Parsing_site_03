@@ -18,5 +18,6 @@ dist/
 # Browser debug profile and parsed data
 .chrome-profile/
 data/
+artifacts/
 *.xlsx
 *__*

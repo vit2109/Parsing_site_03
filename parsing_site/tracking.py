@@ -397,7 +397,6 @@ async (opts) => {
     const targetZoom = Math.min(
       dynamics.some((item) => item.index > 0) ? zoom : zoom + 2, maxZoom
     );
-    const attempted = new Set();
     const usedNumbers = new Set(dynamics.filter((item) => item.index > 0).map((item) => item.index));
     const moveTo = async (lat, lng, z) => {
       scan.views++;
@@ -421,6 +420,7 @@ async (opts) => {
     };
     const matchVisible = () => {
       const visible = collect(opts.dynamic, "D", true).filter((item) => item.index > 0);
+      let matched = 0;
       for (const item of visible) {
         if (usedNumbers.has(item.index) || !Number.isFinite(item.lat) || !Number.isFinite(item.lng)) continue;
         let best = null;
@@ -439,9 +439,10 @@ async (opts) => {
         if (best) {
           best.candidate.index = item.index;
           usedNumbers.add(item.index);
+          matched++;
         }
       }
-      return visible.length;
+      return matched;
     };
     try {
       for (let step = 1; step <= 4 && zoom - step >= minZoom; step++) {
@@ -454,23 +455,23 @@ async (opts) => {
       }
       dynamics.filter((item) => item.index > 0).forEach((item) => usedNumbers.add(item.index));
       scan.overview_count = dynamics.length;
-      if (targetZoom > zoom) {
-        let scans = 0;
+      // Каждый уровень покрываем сеткой видимых областей. Неподписанные маркеры
+      // повторно проверяем на следующем уровне: в скоплении сайт скрывает часть
+      // подписей даже после того, как показал номера соседних объектов.
+      const zoomLevels = [...new Set([
+        targetZoom, Math.min(targetZoom + 2, maxZoom),
+        Math.min(targetZoom + 4, maxZoom), Math.min(zoom + 6, maxZoom),
+      ])].filter((level) => level >= targetZoom && Number.isFinite(level));
+      for (const level of zoomLevels) {
+        if (!dynamics.some((item) => item.index < 0)) break;
+        const covered = new Set();
         for (const target of dynamics) {
           if (target.index >= 0 || !Number.isFinite(target.lat) || !Number.isFinite(target.lng) ||
-              attempted.has(target.fallback_id) || scans >= 200) continue;
-          await moveTo(target.lat, target.lng, targetZoom);
-          scans++;
-          let found = matchVisible();
-          // На некоторых картах номера появляются только ещё на один-два уровня выше.
-          if (!found && targetZoom < maxZoom) {
-            await moveTo(target.lat, target.lng, Math.min(zoom + 6, maxZoom));
-            scans++;
-            found = matchVisible();
-          }
-          if (!found && Math.min(zoom + 6, maxZoom) < maxZoom) {
-            await moveTo(target.lat, target.lng, maxZoom);
-            scans++;
+              covered.has(target.fallback_id)) continue;
+          await moveTo(target.lat, target.lng, level);
+          const matched = matchVisible();
+          if (!matched) {
+            await new Promise((resolve) => setTimeout(resolve, 600));
             matchVisible();
           }
           for (const candidate of dynamics) {
@@ -478,27 +479,10 @@ async (opts) => {
             const p = map.latLngToContainerPoint([candidate.lat, candidate.lng]);
             if (p && p.x >= mapRect.width * 0.1 && p.x <= mapRect.width * 0.9 &&
                 p.y >= mapRect.height * 0.1 && p.y <= mapRect.height * 0.9) {
-              attempted.add(candidate.fallback_id);
+              covered.add(candidate.fallback_id);
             }
           }
-        }
-      } else if (dynamics.some((item) => item.index < 0)) {
-        // Текущий масштаб уже показывает номера; обходим остальные области на нём.
-        let scans = 0;
-        for (const target of dynamics) {
-          if (target.index >= 0 || !Number.isFinite(target.lat) || !Number.isFinite(target.lng) ||
-              attempted.has(target.fallback_id) || scans >= 200) continue;
-          await moveTo(target.lat, target.lng, targetZoom);
-          scans++;
-          matchVisible();
-          for (const candidate of dynamics) {
-            if (candidate.index >= 0 || !Number.isFinite(candidate.lat) || !Number.isFinite(candidate.lng)) continue;
-            const p = map.latLngToContainerPoint([candidate.lat, candidate.lng]);
-            if (p && p.x >= mapRect.width * 0.1 && p.x <= mapRect.width * 0.9 &&
-                p.y >= mapRect.height * 0.1 && p.y <= mapRect.height * 0.9) {
-              attempted.add(candidate.fallback_id);
-            }
-          }
+          covered.add(target.fallback_id);
         }
       }
     } finally {
@@ -560,6 +544,7 @@ class SceneObject:
     lng: float | None = None
     translate3d: tuple[float, float] | None = None
     object_type: str = ""
+    fallback_id: int | None = None
 
 
 @dataclass(slots=True)
@@ -728,7 +713,7 @@ def extract_scene_with_mouse_scan(
         return scene
 
     for target in targets:
-        if target["index"] > 0 or target["index"] in attempted:
+        if target["index"] > 0 or target.get("fallback_id") in attempted:
             continue
         point = latlng_to_container(target["lat"], target["lng"], base_view)
         if point is None:
@@ -759,15 +744,20 @@ def extract_scene_with_mouse_scan(
                 break
             views += 1
             _merge_numbered_scene(raw, current, used_numbers)
-            current_view = map_view_from_raw(current.get("map"))
-            if current_view:
-                for candidate in targets:
-                    if candidate["index"] > 0:
-                        continue
-                    p = latlng_to_container(candidate["lat"], candidate["lng"], current_view)
-                    if p and 0.1 * current_view.width <= p[0] <= 0.9 * current_view.width \
-                            and 0.1 * current_view.height <= p[1] <= 0.9 * current_view.height:
-                        attempted.add(candidate["index"])
+            # Появление номеров соседей не означает, что подписан сам target:
+            # плотные группы сайт раскрывает только при следующем приближении.
+            max_ticks = min(10, (wheel_ticks or 6) + 4)
+            while target["index"] < 0 and ticks < max_ticks:
+                previous_zoom = _maybe_float(current.get("map_zoom"))
+                current = scene_after_wheel(screen_x, screen_y, -120)
+                ticks += 1
+                _merge_numbered_scene(raw, current, used_numbers)
+                current_zoom = _maybe_float(current.get("map_zoom"))
+                if current_zoom is not None and previous_zoom is not None \
+                        and current_zoom <= previous_zoom:
+                    break
+            if target["index"] < 0:
+                attempted.add(target.get("fallback_id"))
         finally:
             for _ in range(ticks + 4):
                 current_zoom = _maybe_float(current.get("map_zoom"))
@@ -890,6 +880,10 @@ def objects_from_raw(items: list[dict[str, Any]] | None) -> list[SceneObject]:
                 lng=_maybe_float(item.get("lng")),
                 translate3d=t3d,
                 object_type=str(item.get("object_type") or ""),
+                fallback_id=(
+                    int(item["fallback_id"])
+                    if item.get("fallback_id") is not None else None
+                ),
             )
         )
     return result

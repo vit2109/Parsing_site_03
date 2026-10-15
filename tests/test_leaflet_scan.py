@@ -69,6 +69,19 @@ class LeafletScanTest(unittest.TestCase):
         self.assertEqual(page.zoom, 5)
         self.assertAlmostEqual(page.center_lng, 40, places=5)
 
+    def test_browser_wheel_retries_unlabelled_object_in_crowd(self) -> None:
+        page = _FakePage(crowded=True)
+        with patch(
+            "parsing_site.tracking.extract_scene_from_page",
+            side_effect=lambda _p, _t, **_kw: page.scene(),
+        ):
+            result = extract_scene_with_mouse_scan(page, TrackingConfig())
+        self.assertEqual(
+            [item["index"] for item in result["dynamics"]], [101, 102, 103]
+        )
+        self.assertEqual(result["scan"]["status"], "complete")
+        self.assertEqual(page.zoom, 5)
+
 
 class _FakeMouse:
     def __init__(self, page: _FakePage) -> None:
@@ -94,8 +107,9 @@ class _FakeMouse:
 
 
 class _FakePage:
-    def __init__(self) -> None:
+    def __init__(self, crowded: bool = False) -> None:
         self.zoom = 5
+        self.crowded = crowded
         self.center_lat = 50.0
         self.center_lng = 40.0
         self.mouse = _FakeMouse(self)
@@ -116,8 +130,11 @@ class _FakePage:
             point = latlng_to_container(50.0, lng, view)
             assert point is not None
             if 0 <= point[0] <= 800 and 0 <= point[1] <= 600:
+                number_visible = self.zoom >= (
+                    9 if self.crowded and i == 1 else 7
+                )
                 dynamics.append({
-                    "index": 101 + i if self.zoom >= 7 else -101 - i,
+                    "index": 101 + i if number_visible else -101 - i,
                     "fallback_id": -101 - i,
                     "lat": 50.0, "lng": lng,
                     "x": point[0], "y": point[1],

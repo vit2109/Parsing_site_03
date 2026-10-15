@@ -171,6 +171,7 @@ class Database:
                     dy REAL,
                     distance_moved REAL,
                     color TEXT,
+                    fallback_id INTEGER,
                     UNIQUE(poll_id, dynamic_index),
                     FOREIGN KEY(poll_id) REFERENCES polls(id) ON DELETE CASCADE
                 );
@@ -184,6 +185,7 @@ class Database:
                 """
             )
             self._ensure_poll_columns()
+            self._ensure_dynamic_columns()
             self._ensure_legacy_columns()
             self._conn.commit()
             compact = self._migrate_legacy_storage()
@@ -216,6 +218,21 @@ class Database:
                 self._conn.execute(
                     f"ALTER TABLE polls ADD COLUMN {column} {declaration}"
                 )
+
+    def _ensure_dynamic_columns(self) -> None:
+        """Сохраняет устойчивый ID маркера для связывания с найденным номером."""
+        existing = {
+            str(row[1])
+            for row in self._conn.execute("PRAGMA table_info(dynamic_observations)")
+        }
+        if "fallback_id" not in existing:
+            self._conn.execute(
+                "ALTER TABLE dynamic_observations ADD COLUMN fallback_id INTEGER"
+            )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dynamic_observations_fallback "
+            "ON dynamic_observations(fallback_id, poll_id)"
+        )
 
     def _table_exists(self, name: str) -> bool:
         """Проверяет наличие таблицы в текущей SQLite-схеме."""
@@ -425,7 +442,25 @@ class Database:
                     for item in snapshot.statics
                 ],
             )
+            unresolved_ids = {
+                item.fallback_id for item in snapshot.dynamics
+                if item.index < 0 and item.fallback_id is not None
+            }
+            known_numbers: dict[int, int] = {}
+            if unresolved_ids:
+                placeholders = ",".join("?" for _ in unresolved_ids)
+                known_rows = self._conn.execute(
+                    "SELECT d.fallback_id, d.dynamic_index FROM dynamic_observations d "
+                    "JOIN polls p ON p.id = d.poll_id "
+                    f"WHERE d.fallback_id IN ({placeholders}) "
+                    "AND d.dynamic_index > 0 AND p.data_source = 'real' "
+                    "AND substr(p.ts, 1, 10) = ? ORDER BY p.id DESC",
+                    (*unresolved_ids, ts[:10]),
+                ).fetchall()
+                for known in known_rows:
+                    known_numbers.setdefault(int(known[0]), int(known[1]))
             for item in snapshot.dynamics:
+                object_number = known_numbers.get(item.fallback_id, item.index)
                 dx = dy = moved = None
                 if item.index in prev:
                     prior = prev[item.index]
@@ -456,10 +491,11 @@ class Database:
                 self._conn.execute(
                     "INSERT INTO dynamic_observations("
                     "poll_id, dynamic_index, name, x, y, lat, lng, dx, dy, "
-                    "distance_moved, color) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "distance_moved, color, fallback_id) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         poll_id,
-                        item.index,
+                        object_number,
                         item.name,
                         item.x,
                         item.y,
@@ -469,8 +505,24 @@ class Database:
                         dy,
                         moved,
                         item.color,
+                        item.fallback_id,
                     ),
                 )
+                if item.index > 0 and item.fallback_id is not None:
+                    self._conn.execute(
+                        "UPDATE dynamic_observations AS d "
+                        "SET dynamic_index = ?, fallback_id = ? "
+                        "WHERE d.dynamic_index < 0 AND "
+                        "(d.dynamic_index = ? OR d.fallback_id = ?) "
+                        "AND d.poll_id IN (SELECT id FROM polls WHERE "
+                        "data_source = 'real' AND substr(ts, 1, 10) = ?) "
+                        "AND NOT EXISTS (SELECT 1 FROM dynamic_observations n "
+                        "WHERE n.poll_id = d.poll_id AND n.dynamic_index = ?)",
+                        (
+                            item.index, item.fallback_id, item.fallback_id,
+                            item.fallback_id, ts[:10], item.index,
+                        ),
+                    )
             self._conn.commit()
         return poll_id
 

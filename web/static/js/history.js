@@ -326,7 +326,8 @@ function renderHistory(data) {
 function renderOverviewMap() {
   els.staticCount.textContent = `${staticObjects.length} ${pluralObjects(staticObjects.length)}`;
   const valid = staticObjects.filter((item) => item.static_lat != null && item.static_lng != null);
-  renderOfflineMap(els.overviewMap, {
+  renderHistoryMap(els.overviewMap, {
+    onStaticSelect: openStaticZones,
     points: valid.map((item) => ({
       ...item,
       lat: item.static_lat,
@@ -336,9 +337,6 @@ function renderOverviewMap() {
       staticIndex: item.static_index,
     })),
     emptyText: "Нет стационарных объектов с географическими координатами.",
-  });
-  els.overviewMap.querySelectorAll("[data-static-index]").forEach((marker) => {
-    marker.addEventListener("click", () => openStaticZones(Number(marker.dataset.staticIndex)));
   });
 }
 
@@ -372,7 +370,7 @@ async function openDynamicTrajectory(dynamicIndex, objectDate) {
 /** Готовит слои офлайн-карты для одной динамической траектории. */
 function renderDynamicMap(data) {
   const color = safeColor(data.color);
-  trajectoryMap = renderOfflineMap(els.trajectoryMap, {
+  trajectoryMap = renderHistoryMap(els.trajectoryMap, {
     points: data.points.map((point, index) => ({
       ...point,
       key: String(index),
@@ -421,7 +419,7 @@ async function openStaticZones(staticIndex) {
 function renderStaticZoneMap(data) {
   const allPoints = data.trajectories.flatMap((trajectory) => trajectory.points);
   const blueColor = safeColor(data.blue_color || "#2878b8");
-  staticZoneMap = renderOfflineMap(els.staticZoneMap, {
+  staticZoneMap = renderHistoryMap(els.staticZoneMap, {
     points: allPoints.map((point) => ({
       ...point,
       color: point.status === "alert" ? "#ff6b6b" : point.status === "warning" ? "#f1c232" : point.status === "blue" ? blueColor : "#8794a8",
@@ -484,6 +482,60 @@ function renderStaticZoneMap(data) {
       );
     });
   });
+}
+
+/** Переключает подложку, сохраняя выбранную точку и маршрут. */
+function renderHistoryMap(container, options = {}) {
+  container.historyMap?.destroy();
+  container.innerHTML = `
+    <div class="history-map-toolbar">
+      <label>Карта <select aria-label="Тип карты">
+        <option value="geographic">Географическая · OpenStreetMap</option>
+        <option value="offline">Схема · без интернета</option>
+      </select></label>
+      <span class="muted">Географическая подложка загружается через интернет</span>
+    </div>
+    <div class="history-map-surface"></div>`;
+  const select = container.querySelector("select");
+  const surface = container.querySelector(".history-map-surface");
+  let mode = "geographic";
+  try { mode = localStorage.getItem("history-map-mode") || mode; } catch (_) {}
+  select.value = mode === "offline" ? "offline" : "geographic";
+  if (typeof L === "undefined") {
+    select.value = "offline";
+    select.querySelector('[value="geographic"]').disabled = true;
+  }
+  let current;
+  let selection;
+  let highlighted;
+  const draw = () => {
+    current?.destroy?.();
+    surface.innerHTML = "";
+    const geographic = select.value === "geographic";
+    surface.classList.toggle("geographic-map", geographic);
+    current = geographic
+      ? renderGeographicMap(surface, options)
+      : renderOfflineMap(surface, options);
+    if (!geographic && options.onStaticSelect) {
+      surface.querySelectorAll("[data-static-index]").forEach((marker) => {
+        marker.addEventListener("click", () => options.onStaticSelect(Number(marker.dataset.staticIndex)));
+      });
+    }
+    if (highlighted != null) current.highlightTrajectory(highlighted);
+    if (selection) current.selectPoint(...selection);
+  };
+  select.addEventListener("change", () => {
+    try { localStorage.setItem("history-map-mode", select.value); } catch (_) {}
+    draw();
+  });
+  draw();
+  const controller = {
+    selectPoint(...args) { selection = args; current.selectPoint(...args); },
+    highlightTrajectory(id) { highlighted = id; current.highlightTrajectory(id); },
+    destroy() { current?.destroy?.(); },
+  };
+  container.historyMap = controller;
+  return controller;
 }
 
 /** Рисует автономную SVG-карту России, зоны, линии и интерактивную подсказку. */
