@@ -622,6 +622,7 @@ function fillForm(settings) {
   setFormValue("site", settings.site);
   setFormValue("dynamic_selector", settings.dynamic_selector);
   setFormValue("coordinate_mode", settings.coordinate_mode);
+  setFormValue("map_coordinate_precision", settings.map_coordinate_precision ?? 4);
   setFormValue("map_container_selector", settings.map_container_selector);
   setFormValue("interval_seconds", settings.interval_seconds);
   setFormValue("threshold", settings.threshold);
@@ -759,6 +760,7 @@ async function saveSettings(event) {
   data.warning_distance = Number(data.warning_distance);
   data.blue_distance = Number(data.blue_distance);
   data.reference_zoom = Number(data.reference_zoom || 0);
+  data.map_coordinate_precision = Number(data.map_coordinate_precision);
   data.lock_scale = Boolean(els.form.elements.namedItem("lock_scale")?.checked);
   data.wait_for_selector = data.dynamic_selector;
   

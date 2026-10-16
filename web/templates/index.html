@@ -134,6 +134,14 @@
             <input name="map_container_selector" type="text" value="{{ settings.map_container_selector }}" />
           </label>
           <label>
+            Точность точек на карте истории
+            <select name="map_coordinate_precision">
+              {% for digits in [3, 4, 5, 6] %}
+              <option value="{{ digits }}" {% if settings.map_coordinate_precision == digits %}selected{% endif %}>{{ digits }} {{ 'знака' if digits < 5 else 'знаков' }} после запятой</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
             Время парсинга, сек
             <input name="interval_seconds" type="number" min="0.4" step="0.1" required value="{{ settings.interval_seconds }}" />
           </label>

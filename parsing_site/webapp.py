@@ -65,6 +65,7 @@ class SettingsIn(BaseModel):
     wait_for_selector: str = ".leaflet-marker-icon.map-incident"
     dynamic_selector: str = ".leaflet-marker-icon.map-incident"
     coordinate_mode: str = "latlng"
+    map_coordinate_precision: int = Field(default=4, ge=3, le=6)
     map_container_selector: str = ".leaflet-container"
     reference_zoom: float = 0.0
     lock_scale: bool = False
@@ -358,6 +359,7 @@ def api_history_trajectory(
         raise HTTPException(
             status_code=400, detail="Начало периода позже его окончания."
         )
+    coordinate_precision = store.current().map_coordinate_precision
     points = db.list_dynamic_trajectory(
         dynamic_index=dynamic_index,
         date_from=start.isoformat(timespec="seconds"),
@@ -365,6 +367,7 @@ def api_history_trajectory(
         object_date=object_date,
         data_source=source,
         limit=limit + 1,
+        coordinate_precision=coordinate_precision,
     )
     if not points:
         raise HTTPException(
@@ -380,6 +383,7 @@ def api_history_trajectory(
         "color": points[-1].get("color") or "#3d8bfd",
         "points": points,
         "total": len(points),
+        "coordinate_precision": coordinate_precision,
         "truncated": truncated,
     }
 
@@ -400,15 +404,17 @@ def api_history_static_zones(
         raise HTTPException(
             status_code=400, detail="Начало периода позже его окончания."
         )
+    settings = store.current()
+    coordinate_precision = settings.map_coordinate_precision
     result = db.get_static_zone_trajectories(
         static_index=static_index,
         date_from=start.isoformat(timespec="seconds"),
         date_to=end.isoformat(),
         data_source=source,
         limit=limit + 1,
+        coordinate_precision=coordinate_precision,
     )
     if result is None:
-        settings = store.current()
         configured = next(
             (item for item in settings.static_objects if item.id == static_index), None
         ) if source == "real" else None
@@ -429,7 +435,7 @@ def api_history_static_zones(
         }
     points = result.pop("points")
     truncated = len(points) > limit
-    result["blue_color"] = store.current().blue_color
+    result["blue_color"] = settings.blue_color
     grouped: dict[tuple[str, int], dict[str, Any]] = {}
     for point in points[:limit]:
         object_date = str(point["object_date"])
@@ -460,6 +466,7 @@ def api_history_static_zones(
         "trajectories": list(grouped.values()),
         "objects_total": len(grouped),
         "points_total": sum(len(item["points"]) for item in grouped.values()),
+        "coordinate_precision": coordinate_precision,
         "truncated": truncated,
     }
 

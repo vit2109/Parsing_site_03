@@ -32,6 +32,7 @@ class RuntimeSettings:
     wait_for_selector: str = ".leaflet-marker-icon.map-incident"
     dynamic_selector: str = ".leaflet-marker-icon.map-incident"
     coordinate_mode: str = "latlng"
+    map_coordinate_precision: int = 4
     map_container_selector: str = ".leaflet-container"
     reference_zoom: float = 0.0
     lock_scale: bool = False
@@ -181,6 +182,7 @@ def from_dict(data: dict[str, Any]) -> RuntimeSettings:
             data.get("dynamic_selector", ".leaflet-marker-icon.map-incident")
         ),
         coordinate_mode=str(data.get("coordinate_mode", "latlng")),
+        map_coordinate_precision=int(data.get("map_coordinate_precision", 4)),
         map_container_selector=str(
             data.get("map_container_selector", ".leaflet-container")
         ),
@@ -206,6 +208,8 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
     warning = max(settings.warning_distance, settings.threshold)
     blue = max(settings.blue_distance, warning)
     mode = normalize_mode(settings.coordinate_mode)
+    if settings.map_coordinate_precision not in {3, 4, 5, 6}:
+        raise ValueError("Точность координат на карте должна быть от 3 до 6 знаков.")
     for item in settings.static_objects:
         # x/y пересчитаются в lat/lng по текущему виду карты при опросе.
         if (
@@ -239,6 +243,7 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
         dynamic_selector=settings.dynamic_selector.strip()
         or ".leaflet-marker-icon.map-incident",
         coordinate_mode=mode,
+        map_coordinate_precision=settings.map_coordinate_precision,
         map_container_selector=settings.map_container_selector.strip()
         or ".leaflet-container",
         reference_zoom=float(settings.reference_zoom),

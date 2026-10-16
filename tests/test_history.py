@@ -13,6 +13,7 @@ from parsing_site.config import TrackingConfig
 from parsing_site.coordinates import MapView, container_to_latlng, latlng_to_container
 from parsing_site.db import Database
 from parsing_site.html_probe import extract_scene_from_html
+from parsing_site.settings_store import SettingsStore, from_dict, validate_settings
 from parsing_site.tracking import (
     SceneObject,
     TrackingSnapshot,
@@ -22,15 +23,70 @@ from parsing_site.tracking import (
 
 
 class HistoryDatabaseTest(unittest.TestCase):
+    def test_map_coordinate_precision_groups_nearby_points_without_changing_storage(self) -> None:
+        with TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "tracking.db")
+            samples = [55.7, 55.71004, 55.71011, 55.71049, 55.7111]
+            for minute, lat in enumerate(samples):
+                snapshot = TrackingSnapshot(
+                    url="test", title="test", viewport=(800, 600),
+                    dynamics=[SceneObject(index=62, name="БПЛА", x=0, y=0, lat=lat, lng=37.62)],
+                    statics=[SceneObject(index=1, name="Склад", x=0, y=0, lat=55.7, lng=37.62)],
+                    rows=[], threshold=50, warning_limit=150,
+                    coordinate_mode="latlng", distance_unit="km",
+                )
+                poll_id = db.save_snapshot(snapshot)
+                db._conn.execute(
+                    "UPDATE polls SET ts = ? WHERE id = ?",
+                    (f"2026-10-15T10:0{minute}:00+03:00", poll_id),
+                )
+            db._conn.commit()
+            period = {
+                "date_from": "2026-10-15T00:00:00",
+                "date_to": "2026-10-15T23:59:59",
+            }
+            four = db.list_dynamic_trajectory(
+                dynamic_index=62, coordinate_precision=4, **period
+            )
+            three = db.list_dynamic_trajectory(
+                dynamic_index=62, coordinate_precision=3, **period
+            )
+            self.assertEqual([point["lat"] for point in four], [55.7, 55.71, 55.7105, 55.7111])
+            self.assertEqual([point["lat"] for point in three], [55.7, 55.71, 55.711])
+            self.assertEqual(four[1]["ts"], "2026-10-15T10:01:00+03:00")
+            zones = db.get_static_zone_trajectories(
+                static_index=1, coordinate_precision=3, **period
+            )
+            self.assertIsNotNone(zones)
+            self.assertEqual([point["lat"] for point in zones["points"]], [55.7, 55.71, 55.711])
+            self.assertEqual(
+                db._conn.execute("SELECT lat FROM dynamic_observations ORDER BY id LIMIT 1 OFFSET 2").fetchone()[0],
+                55.71011,
+            )
+            db.close()
+
+    def test_map_coordinate_precision_setting_defaults_and_validates(self) -> None:
+        self.assertEqual(from_dict({}).map_coordinate_precision, 4)
+        self.assertEqual(validate_settings(from_dict({"map_coordinate_precision": 3})).map_coordinate_precision, 3)
+        with self.assertRaises(ValueError):
+            validate_settings(from_dict({"map_coordinate_precision": 2}))
+        with TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "settings.db")
+            store = SettingsStore(db)
+            store.save(from_dict({"map_coordinate_precision": 3}))
+            self.assertEqual(store.load().map_coordinate_precision, 3)
+            db.close()
+
     def test_trajectory_keeps_first_timestamp_until_coordinates_change(self) -> None:
         with TemporaryDirectory() as directory:
             db = Database(Path(directory) / "tracking.db")
             samples = [
                 ("2026-10-15T10:00:00+03:00", 55.76),
-                ("2026-10-15T10:01:00+03:00", 55.76),
+                ("2026-10-15T10:01:00+03:00", 55.76005),
                 ("2026-10-15T10:02:00+03:00", 55.77),
                 ("2026-10-15T10:03:00+03:00", 55.77),
-                ("2026-10-15T10:04:00+03:00", 55.76),
+                ("2026-10-15T10:04:00+03:00", 55.76005),
+                ("2026-10-15T10:04:30+03:00", 55.76),
                 ("2026-10-15T10:05:00+03:00", 55.77),
                 ("2026-10-15T10:06:00+03:00", 55.78),
                 ("2026-10-16T09:00:00+03:00", 55.76),
@@ -50,7 +106,7 @@ class HistoryDatabaseTest(unittest.TestCase):
                 "date_from": "2026-10-15T00:00:00",
                 "date_to": "2026-10-16T23:59:59.999999",
             }
-            expected = [samples[index][0] for index in (0, 2, 6, 7)]
+            expected = [samples[index][0] for index in (0, 2, 7, 8)]
             trajectory = db.list_dynamic_trajectory(dynamic_index=62, **period)
             self.assertEqual([point["ts"] for point in trajectory], expected)
             limited_trajectory = db.list_dynamic_trajectory(dynamic_index=62, limit=3, **period)
@@ -60,6 +116,24 @@ class HistoryDatabaseTest(unittest.TestCase):
             self.assertEqual([point["ts"] for point in zones["points"]], expected)
             limited = db.get_static_zone_trajectories(static_index=1, limit=2, **period)
             self.assertEqual([point["ts"] for point in limited["points"]], expected[:2])
+            later_period = {
+                "date_from": "2026-10-15T10:04:00",
+                "date_to": "2026-10-15T10:06:59",
+            }
+            self.assertEqual(
+                [point["ts"] for point in db.list_dynamic_trajectory(
+                    dynamic_index=62, **later_period
+                )],
+                [samples[6][0], samples[7][0]],
+            )
+            later_zones = db.get_static_zone_trajectories(
+                static_index=1, **later_period
+            )
+            self.assertIsNotNone(later_zones)
+            self.assertEqual(
+                [point["ts"] for point in later_zones["points"]],
+                [samples[6][0], samples[7][0]],
+            )
             db.close()
 
     def test_number_search_spans_all_static_objects_and_respects_time(self) -> None:

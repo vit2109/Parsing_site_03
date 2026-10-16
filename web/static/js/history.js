@@ -370,7 +370,8 @@ async function openDynamicTrajectory(dynamicIndex, objectDate) {
     params.set("object_date", objectDate);
     const data = await getJson(`/api/history/trajectory/${dynamicIndex}?${params}`);
     els.trajectoryTitle.textContent = `${dynamicNumberLabel(data.dynamic_index)} ${data.dynamic_name} · ${data.object_date}`;
-    els.trajectoryMeta.textContent = `${data.total} ${pluralPoints(data.total)} за выбранный период · повторные координаты скрыты${data.truncated ? ` · показаны первые ${data.total} точек` : ""}`;
+    const precision = Number(data.coordinate_precision || 4);
+    els.trajectoryMeta.textContent = `${data.total} ${pluralPoints(data.total)} на карте · точность координат: ${precision}${data.truncated ? ` · показаны первые ${data.total} точек` : ""}`;
     if (!els.trajectoryModal.open) return;
     renderDynamicMap(data);
   } catch (error) {
@@ -382,6 +383,7 @@ async function openDynamicTrajectory(dynamicIndex, objectDate) {
 /** Готовит слои офлайн-карты для одной динамической траектории. */
 function renderDynamicMap(data) {
   const color = safeColor(data.color);
+  const precision = Number(data.coordinate_precision || 4);
   trajectoryMap = renderHistoryMap(els.trajectoryMap, {
     points: data.points.map((point, index) => ({
       ...point,
@@ -394,7 +396,7 @@ function renderDynamicMap(data) {
   els.trajectoryPoints.innerHTML = data.points.map((point, index) => `
     <button type="button" class="history-point" data-point-index="${index}">
       <strong>${index + 1}. ${escapeHtml(formatDateTime(point.ts))}</strong>
-      <span>${escapeHtml(coordsText(point.lat, point.lng))}</span>
+      <span>${escapeHtml(coordsText(point.lat, point.lng, precision))}</span>
     </button>
   `).join("");
   els.trajectoryPoints.querySelectorAll("[data-point-index]").forEach((button) => {
@@ -403,7 +405,7 @@ function renderDynamicMap(data) {
       els.trajectoryPoints.querySelectorAll(".selected").forEach((item) => item.classList.remove("selected"));
       button.classList.add("selected");
       const point = data.points[index];
-      trajectoryMap.selectPoint(point, `${formatDateTime(point.ts)} · ${coordsText(point.lat, point.lng)}`, color);
+      trajectoryMap.selectPoint(point, `${formatDateTime(point.ts)} · ${coordsText(point.lat, point.lng, precision)}`, color);
     });
   });
 }
@@ -430,7 +432,7 @@ async function openStaticZones(staticIndex) {
   try {
     const data = await getJson(`/api/history/static-zones/${staticIndex}?${periodParams()}`);
     els.staticTitle.textContent = `#${data.static_index} ${data.static_name}`;
-    els.staticZoneMeta.textContent = `Красная зона: ${formatKm(data.alert_radius_km)} · жёлтая зона: ${formatKm(data.warning_radius_km)} · синяя зона: ${formatKm(data.blue_radius_km)} · объектов: ${data.objects_total} · повторные координаты скрыты${data.truncated ? ` · показаны первые ${data.points_total} точек; уточните период для остальных` : ""}`;
+    els.staticZoneMeta.textContent = `Красная зона: ${formatKm(data.alert_radius_km)} · жёлтая зона: ${formatKm(data.warning_radius_km)} · синяя зона: ${formatKm(data.blue_radius_km)} · объектов: ${data.objects_total} · точность координат: ${Number(data.coordinate_precision || 4)}${data.truncated ? ` · показаны первые ${data.points_total} точек; уточните период для остальных` : ""}`;
     if (!els.staticModal.open) return;
     renderStaticZoneMap(data);
   } catch (error) {
@@ -442,6 +444,7 @@ async function openStaticZones(staticIndex) {
 /** Готовит карту радиусов и связанных траекторий для статичной точки. */
 function renderStaticZoneMap(data) {
   const allPoints = data.trajectories.flatMap((trajectory) => trajectory.points);
+  const precision = Number(data.coordinate_precision || 4);
   const blueColor = safeColor(data.blue_color || "#2878b8");
   staticZoneMap = renderHistoryMap(els.staticZoneMap, {
     points: allPoints.map((point) => ({
@@ -473,7 +476,7 @@ function renderStaticZoneMap(data) {
         ${trajectory.points.map((point, index) => `
           <button type="button" class="history-point history-point--nested" data-zone-point="${trajectoryIndex}:${index}">
             <strong><i class="zone-status-dot zone-status-${escapeAttr(point.status)}"></i>${index + 1}. ${escapeHtml(formatDateTime(point.ts))}</strong>
-            <span>${escapeHtml(coordsText(point.lat, point.lng))} · ${Number(point.distance).toFixed(3)} км · ${zoneStatusLabel(point.status)}</span>
+            <span>${escapeHtml(coordsText(point.lat, point.lng, precision))} · ${Number(point.distance).toFixed(3)} км · ${zoneStatusLabel(point.status)}</span>
           </button>
         `).join("")}
       </div>
@@ -1125,9 +1128,9 @@ function formatCoords(lat, lng) {
 }
 
 /** Возвращает текстовое представление пары координат или тире. */
-function coordsText(lat, lng) {
+function coordsText(lat, lng, precision = 6) {
   if (lat == null || lng == null) return "нет данных";
-  return `${Number(lat).toFixed(6)}°, ${Number(lng).toFixed(6)}°`;
+  return `${Number(lat).toFixed(precision)}°, ${Number(lng).toFixed(precision)}°`;
 }
 
 /** Выбирает русскую форму слова «запись». */

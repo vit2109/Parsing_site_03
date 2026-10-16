@@ -15,6 +15,7 @@ from parsing_site.coordinates import haversine_km
 from parsing_site.tracking import BLUE_ZONE_KM, TrackingSnapshot
 
 DEFAULT_DB_PATH = ROOT / "data" / "tracking.db"
+ORIGIN_TOLERANCE_KM = 0.05
 
 
 class Database:
@@ -753,21 +754,23 @@ class Database:
         object_date: str | None = None,
         data_source: str = "real",
         limit: int = 20_000,
+        coordinate_precision: int = 6,
     ) -> list[dict[str, Any]]:
         """Первые положения серий без повторных возвратов в точку появления."""
+        precision = max(3, min(6, int(coordinate_precision)))
+        source = _normalize_source(data_source)
         day_filter = " AND substr(p.ts, 1, 10) = ?" if object_date else ""
         params: list[Any] = [
             dynamic_index,
             date_from,
             date_to,
-            _normalize_source(data_source),
+            source,
         ]
         if object_date:
             params.append(object_date)
         point_limit = max(1, min(limit, 20_001))
-        origins: dict[str, tuple[float, float]] = {}
+        origins: dict[str, tuple[int, tuple[float, float]]] = {}
         previous: dict[str, tuple[float, float]] = {}
-        departed: set[str] = set()
         points: list[dict[str, Any]] = []
         with closing(self._open_read_connection()) as read_conn:
             rows = read_conn.execute(
@@ -793,17 +796,24 @@ class Database:
             )
             for row in rows:
                 day = str(row["object_date"])
-                coordinates = (round(float(row["lat"]), 6), round(float(row["lng"]), 6))
+                raw_coordinates = (float(row["lat"]), float(row["lng"]))
+                coordinates = tuple(round(value, precision) for value in raw_coordinates)
                 if day not in origins:
-                    origins[day] = coordinates
-                elif coordinates != origins[day]:
-                    departed.add(day)
-                elif day in departed:
+                    origins[day] = _first_dynamic_position(
+                        read_conn, day, dynamic_index, source
+                    ) or (int(row["id"]), raw_coordinates)
+                origin_id, origin = origins[day]
+                if (
+                    int(row["id"]) != origin_id
+                    and haversine_km(*origin, *raw_coordinates) <= ORIGIN_TOLERANCE_KM
+                ):
                     continue
-                if coordinates == previous.get(day):
+                if _same_map_position(previous.get(day), raw_coordinates, precision):
                     continue
-                previous[day] = coordinates
-                points.append(dict(row))
+                previous[day] = raw_coordinates
+                point = dict(row)
+                point["lat"], point["lng"] = coordinates
+                points.append(point)
                 if len(points) >= point_limit:
                     break
         return points
@@ -816,9 +826,11 @@ class Database:
         date_to: str,
         data_source: str = "real",
         limit: int = 20_000,
+        coordinate_precision: int = 6,
     ) -> dict[str, Any] | None:
         """Траектории вошедших в зоны объектов без повторов соседних координат."""
         source = _normalize_source(data_source)
+        precision = max(3, min(6, int(coordinate_precision)))
         point_limit = max(1, min(limit, 20_001))
         groups: dict[tuple[str, int], dict[str, Any]] = {}
         with closing(self._open_read_connection()) as read_conn:
@@ -859,22 +871,26 @@ class Database:
                 key = (str(row["object_date"]), int(row["dynamic_index"]))
                 group = groups.setdefault(
                     key,
-                    {"entered": False, "origin": None, "departed": False,
-                     "previous": None, "points": []},
+                    {"entered": False, "origin": None, "previous": None, "points": []},
                 )
+                raw_coordinates = (float(row["lat"]), float(row["lng"]))
+                coordinates = tuple(round(value, precision) for value in raw_coordinates)
+                if group["origin"] is None:
+                    group["origin"] = _first_dynamic_position(
+                        read_conn, key[0], key[1], source
+                    ) or (int(row["id"]), raw_coordinates)
+                origin_id, origin = group["origin"]
+                if (
+                    int(row["id"]) != origin_id
+                    and haversine_km(*origin, *raw_coordinates) <= ORIGIN_TOLERANCE_KM
+                ):
+                    continue
                 blue = row["blue_limit"]
                 if row["distance_unit"] == "km" and blue is not None and distance <= blue:
                     group["entered"] = True
-                coordinates = (round(float(row["lat"]), 6), round(float(row["lng"]), 6))
-                if group["origin"] is None:
-                    group["origin"] = coordinates
-                elif coordinates != group["origin"]:
-                    group["departed"] = True
-                elif group["departed"]:
+                if _same_map_position(group["previous"], raw_coordinates, precision):
                     continue
-                if coordinates == group["previous"]:
-                    continue
-                group["previous"] = coordinates
+                group["previous"] = raw_coordinates
                 if len(group["points"]) >= point_limit:
                     continue
                 alert = row["threshold"]
@@ -882,8 +898,8 @@ class Database:
                 point = {
                     "id": row["id"], "poll_id": row["poll_id"], "ts": row["ts"],
                     "object_date": row["object_date"], "dynamic_index": row["dynamic_index"],
-                    "dynamic_name": row["dynamic_name"], "lat": row["lat"],
-                    "lng": row["lng"], "color": row["color"],
+                    "dynamic_name": row["dynamic_name"], "lat": coordinates[0],
+                    "lng": coordinates[1], "color": row["color"],
                     "distance": round(distance, 3),
                     "status": (
                         "alert" if row["distance_unit"] == "km" and alert is not None and distance <= alert
@@ -1055,6 +1071,41 @@ def _salvage_corrupt_database(
         if sidecar.exists():
             sidecar.replace(backup.with_name(backup.name + suffix))
     return settings, logs, backup
+
+
+def _first_dynamic_position(
+    connection: sqlite3.Connection,
+    day: str,
+    dynamic_index: int,
+    source: str,
+) -> tuple[int, tuple[float, float]] | None:
+    """Находит первую географическую запись объекта за сутки независимо от фильтра времени."""
+    next_day = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+    row = connection.execute(
+        "SELECT d.id, d.lat, d.lng FROM polls p INDEXED BY idx_polls_source_ts "
+        "JOIN dynamic_observations d ON d.poll_id = p.id AND d.dynamic_index = ? "
+        "WHERE p.data_source = ? AND p.ts >= ? AND p.ts < ? "
+        "AND d.lat IS NOT NULL AND d.lng IS NOT NULL "
+        "ORDER BY p.ts, d.id LIMIT 1",
+        (dynamic_index, source, day, next_day),
+    ).fetchone()
+    if row is None:
+        return None
+    return int(row["id"]), (round(float(row["lat"]), 6), round(float(row["lng"]), 6))
+
+
+def _same_map_position(
+    previous: tuple[float, float] | None,
+    current: tuple[float, float],
+    precision: int,
+) -> bool:
+    """Группирует близкие точки даже по разные стороны границы округления."""
+    if previous is None:
+        return False
+    if precision == 6:
+        return all(round(a, 6) == round(b, 6) for a, b in zip(previous, current))
+    step = 10 ** -precision
+    return all(abs(a - b) <= step for a, b in zip(previous, current))
 
 
 def _geo_distance_values(
