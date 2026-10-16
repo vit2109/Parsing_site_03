@@ -31,6 +31,8 @@ class HistoryDatabaseTest(unittest.TestCase):
                 ("2026-10-15T10:02:00+03:00", 55.77),
                 ("2026-10-15T10:03:00+03:00", 55.77),
                 ("2026-10-15T10:04:00+03:00", 55.76),
+                ("2026-10-15T10:05:00+03:00", 55.77),
+                ("2026-10-15T10:06:00+03:00", 55.78),
                 ("2026-10-16T09:00:00+03:00", 55.76),
             ]
             for timestamp, lat in samples:
@@ -48,9 +50,11 @@ class HistoryDatabaseTest(unittest.TestCase):
                 "date_from": "2026-10-15T00:00:00",
                 "date_to": "2026-10-16T23:59:59.999999",
             }
-            expected = [samples[index][0] for index in (0, 2, 4, 5)]
+            expected = [samples[index][0] for index in (0, 2, 6, 7)]
             trajectory = db.list_dynamic_trajectory(dynamic_index=62, **period)
             self.assertEqual([point["ts"] for point in trajectory], expected)
+            limited_trajectory = db.list_dynamic_trajectory(dynamic_index=62, limit=3, **period)
+            self.assertEqual([point["ts"] for point in limited_trajectory], expected[:3])
             zones = db.get_static_zone_trajectories(static_index=1, **period)
             self.assertIsNotNone(zones)
             self.assertEqual([point["ts"] for point in zones["points"]], expected)
@@ -173,6 +177,24 @@ class HistoryDatabaseTest(unittest.TestCase):
             {801, 802, 803, 804, 805, 806, 807, 809, 810},
         )
         self.assertEqual(next(item["name"] for item in scene["dynamics"] if item["index"] == 805), "МВШ")
+
+    def test_origin_labels_are_not_used_as_current_object_numbers(self) -> None:
+        html = """
+        <div class="leaflet-marker-icon map-incident map-incident_aircraft-drone"
+             style="transform: translate3d(0px, 0px, 0px)"></div>
+        <div class="leaflet-marker-icon map-incident map-incident_aircraft-drone"
+             style="transform: translate3d(100px, 100px, 0px)"></div>
+        <div class="leaflet-marker-icon map-incident-operator-number"
+             style="margin-top: -9px; transform: translate3d(0px, 0px, 0px)">10</div>
+        <div class="leaflet-marker-icon map-incident-operator-number"
+             style="margin-top: -19px; transform: translate3d(100px, 100px, 0px)">11</div>
+        """
+        scene = extract_scene_from_html(
+            html, TrackingConfig(dynamic_selector=".leaflet-marker-icon.map-incident")
+        )
+        self.assertEqual(len(scene["dynamics"]), 2)
+        self.assertLess(scene["dynamics"][0]["index"], 0)
+        self.assertEqual(scene["dynamics"][1]["index"], 11)
 
     def test_distance_table_uses_object_type_instead_of_generic_name(self) -> None:
         rows = build_distance_rows(

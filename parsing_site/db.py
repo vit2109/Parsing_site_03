@@ -754,7 +754,7 @@ class Database:
         data_source: str = "real",
         limit: int = 20_000,
     ) -> list[dict[str, Any]]:
-        """Первые положения каждой серии одинаковых координат в траектории."""
+        """Первые положения серий без повторных возвратов в точку появления."""
         day_filter = " AND substr(p.ts, 1, 10) = ?" if object_date else ""
         params: list[Any] = [
             dynamic_index,
@@ -764,7 +764,11 @@ class Database:
         ]
         if object_date:
             params.append(object_date)
-        params.append(max(1, min(limit, 20_001)))
+        point_limit = max(1, min(limit, 20_001))
+        origins: dict[str, tuple[float, float]] = {}
+        previous: dict[str, tuple[float, float]] = {}
+        departed: set[str] = set()
+        points: list[dict[str, Any]] = []
         with closing(self._open_read_connection()) as read_conn:
             rows = read_conn.execute(
                 "WITH positions AS (SELECT d.id, p.id AS poll_id, p.ts, "
@@ -784,10 +788,25 @@ class Database:
                 "dynamic_name, lat, lng, color FROM positions WHERE previous_lat IS NULL "
                 "OR ROUND(lat, 6) != ROUND(previous_lat, 6) "
                 "OR ROUND(lng, 6) != ROUND(previous_lng, 6) "
-                "ORDER BY ts ASC, id ASC LIMIT ?",
+                "ORDER BY ts ASC, id ASC",
                 params,
-            ).fetchall()
-        return [dict(row) for row in rows]
+            )
+            for row in rows:
+                day = str(row["object_date"])
+                coordinates = (round(float(row["lat"]), 6), round(float(row["lng"]), 6))
+                if day not in origins:
+                    origins[day] = coordinates
+                elif coordinates != origins[day]:
+                    departed.add(day)
+                elif day in departed:
+                    continue
+                if coordinates == previous.get(day):
+                    continue
+                previous[day] = coordinates
+                points.append(dict(row))
+                if len(points) >= point_limit:
+                    break
+        return points
 
     def get_static_zone_trajectories(
         self,
@@ -838,11 +857,21 @@ class Database:
                 if distance is None:
                     continue
                 key = (str(row["object_date"]), int(row["dynamic_index"]))
-                group = groups.setdefault(key, {"entered": False, "previous": None, "points": []})
+                group = groups.setdefault(
+                    key,
+                    {"entered": False, "origin": None, "departed": False,
+                     "previous": None, "points": []},
+                )
                 blue = row["blue_limit"]
                 if row["distance_unit"] == "km" and blue is not None and distance <= blue:
                     group["entered"] = True
                 coordinates = (round(float(row["lat"]), 6), round(float(row["lng"]), 6))
+                if group["origin"] is None:
+                    group["origin"] = coordinates
+                elif coordinates != group["origin"]:
+                    group["departed"] = True
+                elif group["departed"]:
+                    continue
                 if coordinates == group["previous"]:
                     continue
                 group["previous"] = coordinates

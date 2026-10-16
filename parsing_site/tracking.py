@@ -273,15 +273,22 @@ async (opts) => {
   // В новых версиях страницы суточный номер рисуется отдельным Leaflet-маркером.
   // Подписей может быть две на объект, поэтому связываем номер с инцидентом по
   // одинаковому translate3d, а не по порядку элементов в DOM.
-  const operatorNumbers = () => [...document.querySelectorAll(".leaflet-marker-icon.map-incident-operator-number")]
+  const operatorNumbers = () => {
+    const labels = [...document.querySelectorAll(".leaflet-marker-icon.map-incident-operator-number")]
     .map((el) => {
       const match = String(el.textContent || "").trim().match(/^№?\\s*(\\d+)$/);
       const transform = parseTransform(el.getAttribute("style") || "");
+      // Начальная подпись центрирована (-9px), текущая поднята над значком (-19px).
+      const marginTop = Number.parseFloat(el.style?.marginTop ?? "");
       return match && transform
-        ? { number: Number(match[1]), x: transform.x, y: transform.y }
+        ? { number: Number(match[1]), x: transform.x, y: transform.y,
+            current: Number.isFinite(marginTop) && marginTop <= -15 }
         : null;
     })
     .filter((item) => item && Number.isInteger(item.number) && item.number > 0);
+    return labels.some((item) => item.current)
+      ? labels.filter((item) => item.current) : labels;
+  };
 
   const numberAtMarker = (box) => {
     const numbers = operatorNumbers();

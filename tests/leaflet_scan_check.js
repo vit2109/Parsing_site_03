@@ -52,14 +52,15 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false) {
     getBoundingClientRect: () => ({left: 0, top: 0, width: 800, height: 600}),
     querySelector: () => null,
   };
-  function element(point, number) {
+  function element(point, number, origin = false) {
     const p = map.latLngToContainerPoint([point.lat, point.lng]);
     const type = 'map-incident_aircraft-drone';
     return {
       classList: number ? ['leaflet-marker-icon', 'map-incident-operator-number']
         : ['leaflet-marker-icon', 'map-incident', type],
       dataset: {incidentId: String(point.number)},
-      id: '', textContent: number ? String(point.number) : '',
+      id: '', textContent: number ? String(origin ? point.number + 1000 : point.number) : '',
+      style: {marginTop: number ? (origin ? '-9px' : '-19px') : '-10px'},
       getBoundingClientRect: () => ({left: p.x - 10, top: p.y - 10, width: 20, height: 20}),
       getAttribute: (name) => name === 'style'
         ? `transform: translate3d(${p.x}px, ${p.y}px, 0px)` : '',
@@ -78,7 +79,7 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false) {
       if (selector === '.leaflet-marker-icon.map-incident-operator-number')
         return map.zoom >= 8
           ? visible.filter((p) => !crowded || map.zoom >= 10 || p.number % 2 === 0)
-              .map((p) => element(p, true)) : [];
+              .flatMap((p) => [element(p, true, true), element(p, true)]) : [];
       return [];
     },
   };
