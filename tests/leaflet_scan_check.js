@@ -4,10 +4,12 @@ const fs = require('node:fs');
 const extract = eval(fs.readFileSync(process.argv[2], 'utf8'));
 const nativeSetTimeout = global.setTimeout;
 
-async function check(initialZoom, mapDiscoverable = true, crowded = false) {
+async function check(initialZoom, mapDiscoverable = true, crowded = false, overlapping = false) {
   let zoomInMoves = 0;
   let zoomInWaits = 0;
   let awaitingZoomInPause = false;
+  let minimumVisitedZoom = initialZoom;
+  let offRowMoves = 0;
   global.setTimeout = (callback, delay, ...args) => {
     if (awaitingZoomInPause && delay !== 1500) {
       assert.equal(delay, 1000, 'pause after zooming in');
@@ -16,9 +18,11 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false) {
     }
     return nativeSetTimeout(callback, Math.min(delay, 1), ...args);
   };
-  const points = [
+  const points = overlapping ? Array.from({length: 9}, (_, i) => (
+    {lat: 50, lng: 0, number: 101 + i}
+  )) : [
     ...Array.from({length: 12}, (_, i) => ({lat: 50, lng: i * 0.5, number: 101 + i})),
-    {lat: 50, lng: 40, number: 113}, // В исходном HTML и центральном обзорном окне отсутствует.
+    {lat: 50, lng: 12, number: 113}, // В исходном HTML и центральном обзорном окне отсутствует.
   ];
   const listeners = new Set();
   const map = {
@@ -30,6 +34,8 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false) {
     on(_event, callback) { listeners.add(callback); },
     off(_event, callback) { listeners.delete(callback); },
     setView([lat, lng], zoom) {
+      minimumVisitedZoom = Math.min(minimumVisitedZoom, zoom);
+      if (Math.abs(lat - 50) > 0.01) offRowMoves++;
       if (zoom > this.zoom) {
         zoomInMoves++;
         awaitingZoomInPause = true;
@@ -61,7 +67,7 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false) {
     return {
       classList: number ? ['leaflet-marker-icon', 'map-incident-operator-number']
         : ['leaflet-marker-icon', 'map-incident', type],
-      dataset: {incidentId: String(point.number)},
+      dataset: overlapping ? {} : {incidentId: String(point.number)},
       id: '', textContent: number ? String(origin ? point.number + 1000 : point.number) : '',
       style: {marginTop: number ? (origin ? '-9px' : '-19px') : '-10px'},
       getBoundingClientRect: () => ({left: p.x - 10, top: p.y - 10, width: 20, height: 20}),
@@ -87,6 +93,16 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false) {
     },
   };
   global.getComputedStyle = () => ({backgroundColor: 'red'});
+  if (overlapping) {
+    const raw = await extract({
+      mode: 'latlng', mapContainer: '.leaflet-container',
+      dynamic: '.leaflet-marker-icon.map-incident', static: '.static',
+      staticObjects: [], scanNumbers: false,
+    });
+    assert.equal(raw.dynamics.length, 9);
+    assert.equal(new Set(raw.dynamics.map((item) => item.fallback_id)).size, 9);
+    return;
+  }
   const result = await extract({
     mode: 'latlng', mapContainer: '.leaflet-container',
     dynamic: '.leaflet-marker-icon.map-incident', static: '.static',
@@ -104,6 +120,8 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false) {
   assert.equal(result.scan.status, 'complete');
   assert.deepEqual(map.center, {lat: 50, lng: 0});
   assert.equal(map.zoom, initialZoom);
+  assert.ok(minimumVisitedZoom >= 4, 'overview should stay at a scale used by the selected tab');
+  assert.equal(offRowMoves, 0, 'scan should follow populated areas, not empty corners');
   assert.ok(zoomInMoves > 0);
   assert.equal(zoomInWaits, zoomInMoves);
 }
@@ -113,5 +131,6 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false) {
   await check(8); // номера видны, часть маркеров за пределами окна
   await check(6, true, true); // скопление: часть подписей появится лишь на следующем масштабе
   await check(6, false); // диагностика, когда карта не найдена
+  await check(4, true, false, true); // девять значков с совпадающими координатами
   console.log('Leaflet scan: both zoom cases passed');
 })().catch((error) => {console.error(error); process.exitCode = 1;});

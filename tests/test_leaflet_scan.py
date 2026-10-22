@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from bs4 import BeautifulSoup
+
 from parsing_site.config import TrackingConfig
 from parsing_site.coordinates import (
     MapView,
@@ -20,6 +22,24 @@ from parsing_site.tracking import _EXTRACT_SCRIPT, extract_scene_with_mouse_scan
 
 
 class LeafletScanTest(unittest.TestCase):
+    def test_zoom_four_saved_page_has_nine_markers_on_right_tab(self) -> None:
+        page = Path(__file__).resolve().parent.parent / "html_test" / "44.html"
+        if not page.exists():
+            self.skipTest("снимок 44.html отсутствует")
+        html = page.read_text(encoding="utf-8")
+        scene = extract_scene_from_html(
+            html, TrackingConfig(dynamic_selector=".leaflet-marker-icon.map-incident")
+        )
+        soup = BeautifulSoup(html, "lxml")
+        strategy_tabs = soup.select('[role="tab"]._strategyTab_1g0am_94')
+        self.assertEqual(scene["map_zoom"], 4)
+        self.assertEqual(len(strategy_tabs), 2)
+        self.assertEqual(strategy_tabs[0].get("aria-selected"), "false")
+        self.assertEqual(strategy_tabs[1].get("aria-selected"), "true")
+        self.assertEqual(len(soup.select(".map-incident.map-incident_new")), 9)
+        self.assertEqual(len(scene["dynamics"]), 9)
+        self.assertEqual(len({item["index"] for item in scene["dynamics"]}), 9)
+
     def test_saved_zoom_views_have_objects_and_then_numbers(self) -> None:
         root = Path(__file__).resolve().parent.parent / "html_test"
         overview = root / "1.html"
@@ -204,9 +224,9 @@ class _FakePage:
         dynamics = []
         longitudes = (36.0, 40.0, 44.0)
         if self.offscreen:
-            longitudes += (80.0,)
+            longitudes += (55.0,)
         if self.far:
-            longitudes += (160.0,)
+            longitudes += (70.0,)
         for i, lng in enumerate(longitudes):
             point = latlng_to_container(50.0, lng, view)
             assert point is not None

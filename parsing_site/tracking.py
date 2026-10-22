@@ -308,7 +308,7 @@ async (opts) => {
     for (const char of String(value)) hash = ((hash * 33) ^ char.charCodeAt(0)) >>> 0;
     return -(hash % 1000000000 + 1);
   };
-  const fallbackIndex = (el, box, objectType) => {
+  const fallbackIndex = (el, box, objectType, occurrences) => {
     const layer = map?._layers && Object.values(map._layers).find((item) => item?._icon === el);
     const sourceId = el.dataset.incidentId || el.dataset.objectId || el.dataset.id ||
       layer?.options?.incidentId || layer?.options?.objectId || layer?.options?.id ||
@@ -317,12 +317,17 @@ async (opts) => {
     const point = Number.isFinite(box.lat) && Number.isFinite(box.lng)
       ? `${box.lat.toFixed(4)}:${box.lng.toFixed(4)}`
       : `${box.translate3d?.x ?? box.x}:${box.translate3d?.y ?? box.y}`;
-    return hashIdentity(`geo:${objectType}:${point}`);
+    const identity = `geo:${objectType}:${point}`;
+    const occurrence = occurrences.get(identity) || 0;
+    occurrences.set(identity, occurrence + 1);
+    return hashIdentity(occurrence ? `${identity}:copy:${occurrence + 1}` : identity);
   };
 
-  const collect = (selector, prefix, requireNumber = false) =>
-    selector
-      ? [...document.querySelectorAll(selector)].map((el, index) => {
+  const collect = (selector, prefix, requireNumber = false) => {
+    if (!selector) return [];
+    const occurrences = new Map();
+    const seenNumbers = new Set();
+    return [...document.querySelectorAll(selector)].map((el, index) => {
           const box = centerOf(el);
           const positionedNumber = numberAtMarker(box);
           const markerType = objectTypeFrom([...el.classList].join(" "));
@@ -332,12 +337,17 @@ async (opts) => {
           const objectType = markerType !== "Объект"
             ? markerType
             : displayedObject?.type || "Объект";
-          const objectIndex = Number.isInteger(displayedObject?.number)
-            ? displayedObject.number
-            : requireNumber ? fallbackIndex(el, box, objectType) : index + 1;
+          const fallback = requireNumber ? fallbackIndex(el, box, objectType, occurrences) : null;
+          const displayedNumber = displayedObject?.number;
+          if (requireNumber && Number.isInteger(displayedNumber) && seenNumbers.has(displayedNumber)) {
+            return null;
+          }
+          const objectIndex = Number.isInteger(displayedNumber)
+            ? displayedNumber : requireNumber ? fallback : index + 1;
+          if (objectIndex > 0) seenNumbers.add(objectIndex);
           return {
             index: objectIndex,
-            fallback_id: requireNumber ? fallbackIndex(el, box, objectType) : null,
+            fallback_id: fallback,
             name: requireNumber ? objectType : String(pickName(el, index, prefix)),
             object_type: requireNumber ? objectType : objectTypeFrom(pickName(el, index, prefix)),
             color: getComputedStyle(el).backgroundColor,
@@ -349,8 +359,8 @@ async (opts) => {
             height: box.height,
             translate3d: box.translate3d,
           };
-        }).filter((item, index, all) => item && (!requireNumber || all.findIndex((other) => other?.index === item.index) === index))
-      : [];
+        }).filter((item, index, all) => item && (!requireNumber || all.findIndex((other) => other?.index === item.index) === index));
+  };
 
   const configStatics = (opts.staticObjects || []).map((item, index) => {
     let lat = item.lat == null || item.lat === "" ? null : Number(item.lat);
@@ -467,8 +477,8 @@ async (opts) => {
       return matched;
     };
     try {
-      const rememberVisible = () => {
-        for (const item of collect(opts.dynamic, "D", true)) {
+      const rememberVisible = (visible = collect(opts.dynamic, "D", true)) => {
+        for (const item of visible) {
           if (!Number.isFinite(item.lat) || !Number.isFinite(item.lng)) continue;
           const existing = dynamics.find((candidate) => candidate.fallback_id === item.fallback_id);
           if (!existing) {
@@ -481,38 +491,55 @@ async (opts) => {
           }
         }
       };
-      const overviewZoom = Math.max(minZoom, zoom - 4);
+      // В html_test/44.html правая вкладка показывает 9 нужных маркеров при zoom 4.
+      const incidentMap = String(opts.dynamic || "").includes("map-incident");
+      const overviewZoom = Math.min(maxZoom, Math.max(minZoom, zoom - 4, incidentMap ? 4 : -Infinity));
       for (let level = zoom - 1; level >= overviewZoom; level--) {
         await moveTo(originalCenter.lat, originalCenter.lng, level);
         rememberVisible();
       }
-      // Маркеры создаются сайтом только для загруженной области. Покрываем
-      // обзорную область сеткой, включая соседние экраны вокруг известных точек.
-      const points = [
-        { x: 0, y: 0 }, { x: mapRect.width, y: mapRect.height },
-        ...dynamics.filter((item) => Number.isFinite(item.lat) && Number.isFinite(item.lng))
-          .map((item) => map.latLngToContainerPoint([item.lat, item.lng])),
-      ].filter((point) => Number.isFinite(point?.x) && Number.isFinite(point?.y));
-      const padX = mapRect.width * 0.9;
-      const padY = mapRect.height * 0.9;
-      const minX = Math.min(...points.map((p) => p.x)) - padX;
-      const maxX = Math.max(...points.map((p) => p.x)) + padX;
-      const minY = Math.min(...points.map((p) => p.y)) - padY;
-      const maxY = Math.max(...points.map((p) => p.y)) + padY;
-      const stepX = mapRect.width * 0.8;
-      const stepY = mapRect.height * 0.8;
-      const centers = [];
-      for (let y = minY; y <= maxY; y += stepY) {
-        for (let x = minX; x <= maxX; x += stepX) {
-          const center = map.containerPointToLatLng([x, y]);
-          if (!center || !Number.isFinite(center.lat) || !Number.isFinite(center.lng) ||
-              Math.abs(center.lat) > 85.0511287798 || Math.abs(center.lng) > 180) continue;
-          centers.push(center);
+      if (map.getZoom() !== overviewZoom) {
+        await moveTo(originalCenter.lat, originalCenter.lng, overviewZoom);
+        rememberVisible();
+      }
+      // Идём к соседней области только при наличии инцидента у соответствующего
+      // края. Пустые углы карты и области без маркеров не просматриваем.
+      const centers = new Map();
+      for (let row = -4; row <= 4; row++) {
+        for (let col = -4; col <= 4; col++) {
+          const center = map.containerPointToLatLng([
+            mapRect.width * (0.5 + col * 0.75),
+            mapRect.height * (0.5 + row * 0.75),
+          ]);
+          centers.set(`${col},${row}`, center);
         }
       }
-      for (const center of centers) {
-          await moveTo(center.lat, center.lng, overviewZoom);
-          rememberVisible();
+      const queue = [[0, 0]];
+      const seen = new Set();
+      while (queue.length && seen.size < 16) {
+        const [col, row] = queue.shift();
+        const key = `${col},${row}`;
+        if (seen.has(key) || !centers.has(key)) continue;
+        const center = centers.get(key);
+        if (!center || !Number.isFinite(center.lat) || !Number.isFinite(center.lng) ||
+            Math.abs(center.lat) > 85.0511287798 || Math.abs(center.lng) > 180) continue;
+        seen.add(key);
+        if (col || row) await moveTo(center.lat, center.lng, overviewZoom);
+        const visible = collect(opts.dynamic, "D", true);
+        rememberVisible(visible);
+        const edges = new Set();
+        for (const item of visible) {
+          if (!Number.isFinite(item.lat) || !Number.isFinite(item.lng)) continue;
+          const p = map.latLngToContainerPoint([item.lat, item.lng]);
+          if (!p || p.x < 0 || p.x > mapRect.width || p.y < 0 || p.y > mapRect.height) continue;
+          if (p.x < mapRect.width * 0.2) edges.add(`${col - 1},${row}`);
+          if (p.x > mapRect.width * 0.8) edges.add(`${col + 1},${row}`);
+          if (p.y < mapRect.height * 0.2) edges.add(`${col},${row - 1}`);
+          if (p.y > mapRect.height * 0.8) edges.add(`${col},${row + 1}`);
+        }
+        edges.forEach((next) => {
+          if (!seen.has(next) && centers.has(next)) queue.push(next.split(",").map(Number));
+        });
       }
       dynamics.filter((item) => item.index > 0).forEach((item) => usedNumbers.add(item.index));
       scan.overview_count = dynamics.length;
@@ -761,36 +788,65 @@ def extract_scene_with_mouse_scan(
     center_x = map_left + base_view.width / 2
     center_y = map_top + base_view.height / 2
     overview = raw
-    overview_ticks = 0
+    overview_moves: list[int] = []
     overview_views = 0
+    target_overview = 4.0 if "map-incident" in tracking.dynamic_selector else base_zoom - 4
     for _ in range(4):
         previous_zoom = _maybe_float(overview.get("map_zoom"))
+        if previous_zoom is None or abs(previous_zoom - target_overview) < 0.01:
+            break
+        delta = 120 if previous_zoom > target_overview else -120
         page.mouse.move(center_x, center_y)
-        page.mouse.wheel(0, 120)
-        page.wait_for_timeout(650)
+        page.mouse.wheel(0, delta)
+        page.wait_for_timeout(650 if delta > 0 else 1000)
         candidate = extract_scene_from_page(page, tracking, scan_numbers=False)
         current_zoom = _maybe_float(candidate.get("map_zoom"))
-        if current_zoom is None or previous_zoom is None or current_zoom >= previous_zoom:
+        if current_zoom is None or (current_zoom - previous_zoom) * delta >= 0:
             break
-        overview_ticks += 1
+        overview_moves.append(delta)
         overview_views += 1
         overview = candidate
         _merge_overview_scene(raw, candidate, base_view)
     overview_view = map_view_from_raw(overview.get("map"))
     if overview_view is not None and overview_view.can_unproject:
         if callable(getattr(page.mouse, "down", None)) and callable(getattr(page.mouse, "up", None)):
-            for row in (-0.8, 0, 0.8):
-                for column in (-0.8, 0, 0.8):
-                    position = container_to_latlng(
-                        overview_view.width * (0.5 + column),
-                        overview_view.height * (0.5 + row),
-                        overview_view,
-                    )
-                    if position is None or abs(position[0]) > 85 or abs(position[1]) > 180:
-                        continue
+            queue = [(0, 0)]
+            seen: set[tuple[int, int]] = set()
+            while queue and len(seen) < 16:
+                column, row = queue.pop(0)
+                if (column, row) in seen or abs(column) > 4 or abs(row) > 4:
+                    continue
+                position = container_to_latlng(
+                    overview_view.width * (0.5 + column * 0.75),
+                    overview_view.height * (0.5 + row * 0.75),
+                    overview_view,
+                )
+                if position is None or abs(position[0]) > 85 or abs(position[1]) > 180:
+                    continue
+                seen.add((column, row))
+                if column or row:
                     overview = _pan_mouse_to(page, tracking, overview, *position)
-                    _merge_overview_scene(raw, overview, base_view)
                     overview_views += 1
+                _merge_overview_scene(raw, overview, base_view)
+                current_view = map_view_from_raw(overview.get("map"))
+                if current_view is None:
+                    continue
+                for item in overview.get("dynamics") or []:
+                    lat = _maybe_float(item.get("lat"))
+                    lng = _maybe_float(item.get("lng"))
+                    point = latlng_to_container(lat, lng, current_view) \
+                        if lat is not None and lng is not None else None
+                    if point is None or not (0 <= point[0] <= current_view.width \
+                            and 0 <= point[1] <= current_view.height):
+                        continue
+                    if point[0] < current_view.width * 0.3:
+                        queue.append((column - 1, row))
+                    if point[0] > current_view.width * 0.7:
+                        queue.append((column + 1, row))
+                    if point[1] < current_view.height * 0.3:
+                        queue.append((column, row - 1))
+                    if point[1] > current_view.height * 0.7:
+                        queue.append((column, row + 1))
             overview = _pan_mouse_to(
                 page, tracking, overview, overview_view.center_lat, overview_view.center_lng
             )
@@ -843,10 +899,10 @@ def extract_scene_with_mouse_scan(
                 overview = _pan_mouse_to(
                     page, tracking, overview, overview_view.center_lat, overview_view.center_lng
                 )
-    for _ in range(overview_ticks):
+    for delta in reversed(overview_moves):
         page.mouse.move(center_x, center_y)
-        page.mouse.wheel(0, -120)
-        page.wait_for_timeout(1000)
+        page.mouse.wheel(0, -delta)
+        page.wait_for_timeout(1000 if delta > 0 else 650)
         overview = extract_scene_from_page(page, tracking, scan_numbers=False)
     restored_zoom = _maybe_float(overview.get("map_zoom"))
     if restored_zoom is None or abs(restored_zoom - base_zoom) > 0.01:

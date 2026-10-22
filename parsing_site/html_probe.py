@@ -176,6 +176,7 @@ def _collect_markers(
         return []
     items: list[dict[str, object]] = []
     seen_numbers: set[int] = set()
+    occurrences: dict[str, int] = {}
     for index, el in enumerate(soup.select(selector), start=1):
         style = el.get("style") or ""
         translate = parse_translate3d(style)
@@ -204,6 +205,13 @@ def _collect_markers(
                 else f"{translate[0]}:{translate[1]}"
             )
             identity = f"id:{source_id}" if source_id else f"geo:{object_type}:{point}"
+            if not source_id:
+                occurrence = occurrences.get(identity, 0)
+                occurrences[identity] = occurrence + 1
+                if occurrence:
+                    identity = f"{identity}:copy:{occurrence + 1}"
+            if displayed_number is not None and displayed_number in seen_numbers:
+                continue
             object_index = displayed_number or _fallback_index(identity)
             if object_index in seen_numbers:
                 continue
