@@ -168,7 +168,7 @@ async (opts) => {
 
   const containerToLatLng = (cx, cy) => {
     if (map && map.containerPointToLatLng) {
-      const ll = map.containerPointToLatLng({ x: cx, y: cy });
+      const ll = map.containerPointToLatLng([cx, cy]);
       if (ll && Number.isFinite(ll.lat) && Number.isFinite(ll.lng)) {
         return { lat: ll.lat, lng: ll.lng };
       }
@@ -388,6 +388,21 @@ async (opts) => {
 
   const dynamics = collect(opts.dynamic, "D", true);
   const statics = collect(opts.static, "S");
+  const usedNumbers = new Set(dynamics.filter((item) => item.index > 0).map((item) => item.index));
+  const applyKnownNumber = (item) => {
+    if (item.index > 0 || !Number.isFinite(item.lat) || !Number.isFinite(item.lng)) return;
+    const known = (opts.knownNumbers || {})[item.fallback_id];
+    if (!known || usedNumbers.has(known.number)) return;
+    const dLat = (item.lat - known.lat) * Math.PI / 180;
+    const dLng = (item.lng - known.lng) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(item.lat * Math.PI / 180) *
+      Math.cos(known.lat * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+    if (6371 * 2 * Math.asin(Math.min(1, Math.sqrt(a))) <= 20) {
+      item.index = known.number;
+      usedNumbers.add(item.index);
+    }
+  };
+  dynamics.forEach(applyKnownNumber);
   const scan = { status: map ? "ready" : "no_leaflet_instance", views: 0, overview_count: dynamics.length };
 
   // Сначала собираем маркеры при отдалении, затем читаем подписи в увеличенном виде.
@@ -404,7 +419,6 @@ async (opts) => {
     const targetZoom = Math.min(
       dynamics.some((item) => item.index > 0) ? zoom : zoom + 2, maxZoom
     );
-    const usedNumbers = new Set(dynamics.filter((item) => item.index > 0).map((item) => item.index));
     const moveTo = async (lat, lng, z) => {
       scan.views++;
       const zoomingIn = z > map.getZoom();
@@ -453,13 +467,52 @@ async (opts) => {
       return matched;
     };
     try {
-      for (let step = 1; step <= 4 && zoom - step >= minZoom; step++) {
-        await moveTo(originalCenter.lat, originalCenter.lng, zoom - step);
+      const rememberVisible = () => {
         for (const item of collect(opts.dynamic, "D", true)) {
           if (!Number.isFinite(item.lat) || !Number.isFinite(item.lng)) continue;
-          const duplicate = dynamics.some((existing) => existing.fallback_id === item.fallback_id);
-          if (!duplicate) dynamics.push(item);
+          const existing = dynamics.find((candidate) => candidate.fallback_id === item.fallback_id);
+          if (!existing) {
+            applyKnownNumber(item);
+            dynamics.push(item);
+          }
+          else if (existing.index < 0 && item.index > 0 && !usedNumbers.has(item.index)) {
+            existing.index = item.index;
+            usedNumbers.add(item.index);
+          }
         }
+      };
+      const overviewZoom = Math.max(minZoom, zoom - 4);
+      for (let level = zoom - 1; level >= overviewZoom; level--) {
+        await moveTo(originalCenter.lat, originalCenter.lng, level);
+        rememberVisible();
+      }
+      // Маркеры создаются сайтом только для загруженной области. Покрываем
+      // обзорную область сеткой, включая соседние экраны вокруг известных точек.
+      const points = [
+        { x: 0, y: 0 }, { x: mapRect.width, y: mapRect.height },
+        ...dynamics.filter((item) => Number.isFinite(item.lat) && Number.isFinite(item.lng))
+          .map((item) => map.latLngToContainerPoint([item.lat, item.lng])),
+      ].filter((point) => Number.isFinite(point?.x) && Number.isFinite(point?.y));
+      const padX = mapRect.width * 0.9;
+      const padY = mapRect.height * 0.9;
+      const minX = Math.min(...points.map((p) => p.x)) - padX;
+      const maxX = Math.max(...points.map((p) => p.x)) + padX;
+      const minY = Math.min(...points.map((p) => p.y)) - padY;
+      const maxY = Math.max(...points.map((p) => p.y)) + padY;
+      const stepX = mapRect.width * 0.8;
+      const stepY = mapRect.height * 0.8;
+      const centers = [];
+      for (let y = minY; y <= maxY; y += stepY) {
+        for (let x = minX; x <= maxX; x += stepX) {
+          const center = map.containerPointToLatLng([x, y]);
+          if (!center || !Number.isFinite(center.lat) || !Number.isFinite(center.lng) ||
+              Math.abs(center.lat) > 85.0511287798 || Math.abs(center.lng) > 180) continue;
+          centers.push(center);
+        }
+      }
+      for (const center of centers) {
+          await moveTo(center.lat, center.lng, overviewZoom);
+          rememberVisible();
       }
       dynamics.filter((item) => item.index > 0).forEach((item) => usedNumbers.add(item.index));
       scan.overview_count = dynamics.length;
@@ -635,7 +688,8 @@ class TrackingSnapshot:
 
 
 def extract_scene_from_page(
-    page: Any, tracking: TrackingConfig, *, scan_numbers: bool = True
+    page: Any, tracking: TrackingConfig, *, scan_numbers: bool = True,
+    known_numbers: dict[int, tuple[int, float, float]] | None = None,
 ) -> dict[str, Any]:
     """Снимает маркеры и вид карты из живой вкладки (JS _EXTRACT_SCRIPT)."""
     return page.evaluate(
@@ -646,6 +700,10 @@ def extract_scene_from_page(
             "mode": tracking.coordinate_mode,
             "mapContainer": tracking.map_container_selector,
             "scanNumbers": scan_numbers,
+            "knownNumbers": {
+                str(identity): {"number": number, "lat": lat, "lng": lng}
+                for identity, (number, lat, lng) in (known_numbers or {}).items()
+            },
             "staticObjects": [
                 {
                     "id": item.id,
@@ -670,15 +728,16 @@ def extract_scene_with_mouse_scan(
     raw = extract_scene_from_page(page, tracking, scan_numbers=False)
     _apply_number_cache(raw, number_cache)
     scan = raw.get("scan") or {}
-    if not raw.get("unnumbered_dynamics"):
-        if scan.get("status") == "no_leaflet_instance":
-            scan["status"] = "cached" if number_cache else "complete"
-        elif scan.get("status") == "ready":
-            scan["status"] = "complete"
-        _remember_numbers(raw, number_cache)
-        return raw
     if scan.get("status") == "ready":
-        raw = extract_scene_from_page(page, tracking, scan_numbers=True)
+        now = monotonic()
+        recent_numbers = {
+            identity: (number, lat, lng)
+            for identity, (number, lat, lng, captured_at) in (number_cache or {}).items()
+            if now - captured_at <= 60
+        }
+        raw = extract_scene_from_page(
+            page, tracking, scan_numbers=True, known_numbers=recent_numbers
+        )
         _apply_number_cache(raw, number_cache)
         _remember_numbers(raw, number_cache)
         return raw
@@ -692,6 +751,118 @@ def extract_scene_with_mouse_scan(
         scan["status"] = "mouse_scan_unavailable"
         raw["scan"] = scan
         return raw
+    original_lat = base_view.center_lat
+    original_lng = base_view.center_lng
+
+    # Даже если все видимые объекты уже подписаны, за границей исходного окна
+    # могут быть ещё не созданные сайтом маркеры. Сначала отдаляем карту.
+    map_left = float(base_map.get("left") or 0)
+    map_top = float(base_map.get("top") or 0)
+    center_x = map_left + base_view.width / 2
+    center_y = map_top + base_view.height / 2
+    overview = raw
+    overview_ticks = 0
+    overview_views = 0
+    for _ in range(4):
+        previous_zoom = _maybe_float(overview.get("map_zoom"))
+        page.mouse.move(center_x, center_y)
+        page.mouse.wheel(0, 120)
+        page.wait_for_timeout(650)
+        candidate = extract_scene_from_page(page, tracking, scan_numbers=False)
+        current_zoom = _maybe_float(candidate.get("map_zoom"))
+        if current_zoom is None or previous_zoom is None or current_zoom >= previous_zoom:
+            break
+        overview_ticks += 1
+        overview_views += 1
+        overview = candidate
+        _merge_overview_scene(raw, candidate, base_view)
+    overview_view = map_view_from_raw(overview.get("map"))
+    if overview_view is not None and overview_view.can_unproject:
+        if callable(getattr(page.mouse, "down", None)) and callable(getattr(page.mouse, "up", None)):
+            for row in (-0.8, 0, 0.8):
+                for column in (-0.8, 0, 0.8):
+                    position = container_to_latlng(
+                        overview_view.width * (0.5 + column),
+                        overview_view.height * (0.5 + row),
+                        overview_view,
+                    )
+                    if position is None or abs(position[0]) > 85 or abs(position[1]) > 180:
+                        continue
+                    overview = _pan_mouse_to(page, tracking, overview, *position)
+                    _merge_overview_scene(raw, overview, base_view)
+                    overview_views += 1
+            overview = _pan_mouse_to(
+                page, tracking, overview, overview_view.center_lat, overview_view.center_lng
+            )
+        used = {item["index"] for item in raw["dynamics"] if item["index"] > 0}
+        for target in raw["dynamics"]:
+            if target["index"] > 0:
+                continue
+            original_point = latlng_to_container(target["lat"], target["lng"], base_view)
+            if original_point is not None and 0 <= original_point[0] <= base_view.width \
+                    and 0 <= original_point[1] <= base_view.height:
+                continue
+            current_view = map_view_from_raw(overview.get("map"))
+            point = latlng_to_container(target["lat"], target["lng"], current_view) \
+                if current_view is not None else None
+            if point is None:
+                continue
+            if not (0 <= point[0] <= current_view.width and 0 <= point[1] <= current_view.height):
+                if not callable(getattr(page.mouse, "down", None)):
+                    continue
+                overview = _pan_mouse_to(page, tracking, overview, target["lat"], target["lng"])
+                current_view = map_view_from_raw(overview.get("map"))
+                if current_view is None:
+                    continue
+                point = latlng_to_container(target["lat"], target["lng"], current_view)
+                if point is None or not (0 <= point[0] <= current_view.width \
+                        and 0 <= point[1] <= current_view.height):
+                    continue
+            anchor_x, anchor_y = map_left + point[0], map_top + point[1]
+            ticks = 0
+            current = overview
+            while target["index"] < 0 and ticks < 6:
+                previous_zoom = _maybe_float(current.get("map_zoom"))
+                page.mouse.move(anchor_x, anchor_y)
+                page.mouse.wheel(0, -120)
+                page.wait_for_timeout(1000)
+                current = extract_scene_from_page(page, tracking, scan_numbers=False)
+                current_zoom = _maybe_float(current.get("map_zoom"))
+                if current_zoom is None or previous_zoom is None or current_zoom <= previous_zoom:
+                    break
+                ticks += 1
+                _merge_numbered_scene(raw, current, used)
+            overview_views += 1
+            for _ in range(ticks):
+                page.mouse.move(anchor_x, anchor_y)
+                page.mouse.wheel(0, 120)
+                page.wait_for_timeout(650)
+                current = extract_scene_from_page(page, tracking, scan_numbers=False)
+            overview = current
+            if callable(getattr(page.mouse, "down", None)):
+                overview = _pan_mouse_to(
+                    page, tracking, overview, overview_view.center_lat, overview_view.center_lng
+                )
+    for _ in range(overview_ticks):
+        page.mouse.move(center_x, center_y)
+        page.mouse.wheel(0, -120)
+        page.wait_for_timeout(1000)
+        overview = extract_scene_from_page(page, tracking, scan_numbers=False)
+    restored_zoom = _maybe_float(overview.get("map_zoom"))
+    if restored_zoom is None or abs(restored_zoom - base_zoom) > 0.01:
+        scan["status"] = "mouse_restore_failed"
+        raw["scan"] = scan
+        return raw
+    _apply_number_cache(raw, number_cache)
+    if not raw.get("unnumbered_dynamics"):
+        if callable(getattr(page.mouse, "down", None)) and original_lat is not None \
+                and original_lng is not None:
+            _pan_mouse_to(page, tracking, overview, original_lat, original_lng)
+        scan["status"] = "complete"
+        scan["views"] = overview_views
+        scan["overview_count"] = len(raw.get("dynamics") or [])
+        _remember_numbers(raw, number_cache)
+        return raw
 
     targets = [
         item for item in raw.get("dynamics") or []
@@ -700,8 +871,6 @@ def extract_scene_with_mouse_scan(
     ]
     used_numbers = {item["index"] for item in raw["dynamics"] if item["index"] > 0}
     attempted: set[int] = set()
-    map_left = float(base_map.get("left") or 0)
-    map_top = float(base_map.get("top") or 0)
     wheel_ticks: int | None = None
     views = 0
     wheel_worked = False
@@ -786,7 +955,13 @@ def extract_scene_with_mouse_scan(
     else:
         scan["status"] = "complete" if all(item["index"] > 0 for item in raw["dynamics"]) else "partial"
 
-    scan["views"] = views
+    if callable(getattr(page.mouse, "down", None)) and original_lat is not None \
+            and original_lng is not None:
+        current = extract_scene_from_page(page, tracking, scan_numbers=False)
+        _pan_mouse_to(page, tracking, current, original_lat, original_lng)
+
+    scan["views"] = overview_views + views
+    scan["overview_count"] = len(raw.get("dynamics") or [])
     raw["scan"] = scan
     raw["unnumbered_dynamics"] = sum(item["index"] < 0 for item in raw["dynamics"])
     _remember_numbers(raw, number_cache)
@@ -826,6 +1001,86 @@ def _remember_numbers(
         lng = _maybe_float(item.get("lng"))
         if isinstance(identity, int) and item["index"] > 0 and lat is not None and lng is not None:
             cache[identity] = (item["index"], lat, lng, now)
+
+
+def _pan_mouse_to(
+    page: Any, tracking: TrackingConfig, scene: dict[str, Any], lat: float, lng: float
+) -> dict[str, Any]:
+    """Перетаскивает карту к центру, ограничивая каждый жест размером окна."""
+    current = scene
+    for _ in range(8):
+        map_raw = current.get("map") or {}
+        view = map_view_from_raw(map_raw)
+        if view is None or not view.can_unproject:
+            break
+        point = latlng_to_container(lat, lng, view)
+        if point is None:
+            break
+        dx = max(-view.width * 0.4, min(view.width * 0.4, view.width / 2 - point[0]))
+        dy = max(-view.height * 0.4, min(view.height * 0.4, view.height / 2 - point[1]))
+        if abs(dx) < 0.5 and abs(dy) < 0.5:
+            break
+        start_x = float(map_raw.get("left") or 0) + view.width / 2
+        start_y = float(map_raw.get("top") or 0) + view.height / 2
+        page.mouse.move(start_x, start_y)
+        page.mouse.down()
+        try:
+            page.mouse.move(start_x + dx, start_y + dy, steps=5)
+        finally:
+            page.mouse.up()
+        page.wait_for_timeout(650)
+        candidate = extract_scene_from_page(page, tracking, scan_numbers=False)
+        next_view = map_view_from_raw(candidate.get("map"))
+        current = candidate
+        if next_view is None or next_view.center_lat is None or next_view.center_lng is None:
+            break
+        if view.center_lat is not None and view.center_lng is not None \
+                and haversine_km(view.center_lat, view.center_lng,
+                                 next_view.center_lat, next_view.center_lng) < 0.01:
+            break
+    return current
+
+
+def _merge_overview_scene(
+    overview: dict[str, Any], detailed: dict[str, Any], base_view: MapView
+) -> None:
+    """Добавляет найденные при отдалении маркеры в координатах исходного вида."""
+    items = overview.setdefault("dynamics", [])
+    known = {item.get("fallback_id"): item for item in items}
+    used_numbers = {item["index"] for item in items if item.get("index", 0) > 0}
+    map_raw = overview.get("map") or {}
+    mode = overview.get("coordinate_mode") or "latlng"
+    for item in detailed.get("dynamics") or []:
+        identity = item.get("fallback_id")
+        lat = _maybe_float(item.get("lat"))
+        lng = _maybe_float(item.get("lng"))
+        if identity is None or lat is None or lng is None:
+            continue
+        existing = known.get(identity)
+        if existing is not None:
+            if existing.get("index", 0) < 0 and item.get("index", 0) > 0 \
+                    and item["index"] not in used_numbers:
+                existing["index"] = item["index"]
+                used_numbers.add(item["index"])
+            continue
+        point = latlng_to_container(lat, lng, base_view)
+        if point is None:
+            continue
+        x, y = point
+        if mode == "screen":
+            x += float(map_raw.get("left") or 0)
+            y += float(map_raw.get("top") or 0)
+        elif mode == "percent":
+            x = x / base_view.width * 100
+            y = y / base_view.height * 100
+        found = dict(item, x=round(x, 2), y=round(y, 2))
+        if found.get("index", 0) > 0 and found["index"] in used_numbers:
+            continue
+        items.append(found)
+        known[identity] = found
+        if found.get("index", 0) > 0:
+            used_numbers.add(found["index"])
+    overview["unnumbered_dynamics"] = sum(item["index"] < 0 for item in items)
 
 
 def _merge_numbered_scene(

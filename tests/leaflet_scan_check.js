@@ -16,7 +16,10 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false) {
     }
     return nativeSetTimeout(callback, Math.min(delay, 1), ...args);
   };
-  const points = Array.from({length: 12}, (_, i) => ({lat: 50, lng: i * 0.5, number: 101 + i}));
+  const points = [
+    ...Array.from({length: 12}, (_, i) => ({lat: 50, lng: i * 0.5, number: 101 + i})),
+    {lat: 50, lng: 40, number: 113}, // В исходном HTML и центральном обзорном окне отсутствует.
+  ];
   const listeners = new Set();
   const map = {
     zoom: initialZoom, center: {lat: 50, lng: 0},
@@ -38,7 +41,7 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false) {
       const scale = 100 * 2 ** (this.zoom - 6);
       return {x: 400 + (lng - this.center.lng) * scale, y: 300 + (this.center.lat - lat) * scale};
     },
-    containerPointToLatLng({x, y}) {
+    containerPointToLatLng([x, y]) {
       const scale = 100 * 2 ** (this.zoom - 6);
       return {lat: this.center.lat - (y - 300) / scale, lng: this.center.lng + (x - 400) / scale};
     },

@@ -63,9 +63,9 @@ class LeafletScanTest(unittest.TestCase):
         self.assertEqual(result["scan"]["status"], "complete")
         self.assertEqual([item["index"] for item in result["dynamics"]], [101, 102, 103])
         self.assertEqual(result["unnumbered_dynamics"], 0)
-        self.assertEqual(cached_result["scan"]["status"], "cached")
+        self.assertEqual(cached_result["scan"]["status"], "complete")
         self.assertEqual(cached_result["unnumbered_dynamics"], 0)
-        self.assertEqual(page.mouse.wheel_calls, moves)
+        self.assertGreater(page.mouse.wheel_calls, moves)
         self.assertEqual(page.zoom, 5)
         self.assertAlmostEqual(page.center_lng, 40, places=5)
         self.assertGreater(page.mouse.zoom_in_calls, 0)
@@ -85,6 +85,50 @@ class LeafletScanTest(unittest.TestCase):
         self.assertEqual(page.zoom, 5)
         self.assertGreater(page.mouse.zoom_in_calls, 0)
         self.assertEqual(page.waits.count(1000), page.mouse.zoom_in_calls)
+
+    def test_browser_wheel_finds_marker_outside_initial_html(self) -> None:
+        page = _FakePage(offscreen=True, zoom=7)
+        self.assertEqual([item["index"] for item in page.scene()["dynamics"]], [101, 102, 103])
+        with patch(
+            "parsing_site.tracking.extract_scene_from_page",
+            side_effect=lambda _p, _t, **_kw: page.scene(),
+        ):
+            result = extract_scene_with_mouse_scan(page, TrackingConfig())
+        self.assertEqual([item["index"] for item in result["dynamics"]], [101, 102, 103, 104])
+        self.assertEqual(result["scan"]["status"], "complete")
+        self.assertEqual(page.zoom, 7)
+        self.assertAlmostEqual(page.center_lng, 40, places=5)
+
+    def test_leaflet_scans_even_when_initial_markers_are_numbered(self) -> None:
+        page = object()
+        calls: list[bool] = []
+
+        def scene(_page: object, _tracking: TrackingConfig, *, scan_numbers: bool,
+                  **_kwargs: object) -> dict:
+            calls.append(scan_numbers)
+            return {
+                "dynamics": [{"index": 101, "fallback_id": -101}],
+                "unnumbered_dynamics": 0,
+                "scan": {"status": "complete" if scan_numbers else "ready"},
+            }
+
+        with patch("parsing_site.tracking.extract_scene_from_page", side_effect=scene):
+            extract_scene_with_mouse_scan(page, TrackingConfig())
+        self.assertEqual(calls, [False, True])
+
+    def test_browser_drag_discovers_distant_marker(self) -> None:
+        page = _FakePage(offscreen=True, far=True, zoom=7)
+        with patch(
+            "parsing_site.tracking.extract_scene_from_page",
+            side_effect=lambda _p, _t, **_kw: page.scene(),
+        ):
+            result = extract_scene_with_mouse_scan(page, TrackingConfig())
+        self.assertEqual(
+            [item["index"] for item in result["dynamics"]],
+            [101, 102, 103, 104, 105],
+        )
+        self.assertEqual(page.zoom, 7)
+        self.assertAlmostEqual(page.center_lng, 40, places=3)
 
 
 class _FakeMouse:
@@ -112,13 +156,38 @@ class _FakeMouse:
         )
 
 
+class _FakeDragMouse(_FakeMouse):
+    def __init__(self, page: _FakePage) -> None:
+        super().__init__(page)
+        self.drag_start: tuple[float, float] | None = None
+
+    def move(self, x: float, y: float, steps: int = 1) -> None:
+        super().move(x, y)
+
+    def down(self) -> None:
+        self.drag_start = self.x, self.y
+
+    def up(self) -> None:
+        assert self.drag_start is not None
+        world_x, world_y = project_3857(self.page.center_lat, self.page.center_lng, self.page.zoom)
+        self.page.center_lat, self.page.center_lng = unproject_3857(
+            world_x - (self.x - self.drag_start[0]),
+            world_y - (self.y - self.drag_start[1]),
+            self.page.zoom,
+        )
+        self.drag_start = None
+
+
 class _FakePage:
-    def __init__(self, crowded: bool = False) -> None:
-        self.zoom = 5
+    def __init__(self, crowded: bool = False, offscreen: bool = False,
+                 far: bool = False, zoom: int = 5) -> None:
+        self.zoom = zoom
         self.crowded = crowded
+        self.offscreen = offscreen
+        self.far = far
         self.center_lat = 50.0
         self.center_lng = 40.0
-        self.mouse = _FakeMouse(self)
+        self.mouse = _FakeDragMouse(self) if far else _FakeMouse(self)
         self.waits: list[int] = []
 
     def wait_for_timeout(self, milliseconds: int) -> None:
@@ -133,7 +202,12 @@ class _FakePage:
     def scene(self) -> dict:
         view = self.view()
         dynamics = []
-        for i, lng in enumerate((36.0, 40.0, 44.0)):
+        longitudes = (36.0, 40.0, 44.0)
+        if self.offscreen:
+            longitudes += (80.0,)
+        if self.far:
+            longitudes += (160.0,)
+        for i, lng in enumerate(longitudes):
             point = latlng_to_container(50.0, lng, view)
             assert point is not None
             if 0 <= point[0] <= 800 and 0 <= point[1] <= 600:
