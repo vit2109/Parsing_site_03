@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import threading
-from datetime import date
+from datetime import datetime
 from time import monotonic
 from typing import Any
 
 from parsing_site.browser import BrowserNotConnectedError, BrowserSession
+from parsing_site.capture_archive import capture_due
 from parsing_site.config import load_config
 from parsing_site.db import Database
 from parsing_site.settings_store import SettingsStore
@@ -156,7 +157,7 @@ class ParseWorker:
                         cfg = settings.to_app_config(load_config())
                         interval = max(0.4, settings.interval_seconds)
                         snapshot = capture_snapshot(session, cfg.tracking)
-                        current_day = date.today().isoformat()
+                        current_day = datetime.now().astimezone().date().isoformat()
                         if current_day != previous_day:
                             previous = {}
                             previous_day = current_day
@@ -164,6 +165,13 @@ class ParseWorker:
                             self._table_history.prune_dynamic_history()
                         poll_id = self._db.save_snapshot(snapshot, previous)
                         self._table_history.save_snapshot(snapshot)
+                        saved, archive_errors = capture_due(
+                            session, settings, snapshot.map_zoom
+                        )
+                        for path in saved:
+                            self._db.add_log("INFO", "archive", f"Сохранён файл: {path}")
+                        for error in archive_errors:
+                            self._db.add_log("WARNING", "archive", error)
                         previous = {
                             item.index: (item.x, item.y, item.lat, item.lng)
                             for item in snapshot.dynamics

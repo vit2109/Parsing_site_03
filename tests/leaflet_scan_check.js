@@ -8,13 +8,15 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
   let zoomInMoves = 0;
   let zoomInWaits = 0;
   let awaitingZoomInPause = false;
+  let zoomInTimers = 0;
   let minimumVisitedZoom = initialZoom;
   let offRowMoves = 0;
   global.setTimeout = (callback, delay, ...args) => {
-    if (awaitingZoomInPause && delay !== 1500) {
-      assert.equal(delay, 1000, 'pause after zooming in');
+    if (awaitingZoomInPause && ++zoomInTimers >= 2) {
+      assert.equal(delay, 1500, 'pause after zooming in');
       zoomInWaits++;
       awaitingZoomInPause = false;
+      zoomInTimers = 0;
     }
     return nativeSetTimeout(callback, Math.min(delay, 1), ...args);
   };

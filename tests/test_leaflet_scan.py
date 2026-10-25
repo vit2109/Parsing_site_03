@@ -89,7 +89,7 @@ class LeafletScanTest(unittest.TestCase):
         self.assertEqual(page.zoom, 5)
         self.assertAlmostEqual(page.center_lng, 40, places=5)
         self.assertGreater(page.mouse.zoom_in_calls, 0)
-        self.assertEqual(page.waits.count(1000), page.mouse.zoom_in_calls)
+        self.assertEqual(page.waits.count(1500), len(page.waits))
 
     def test_browser_wheel_retries_unlabelled_object_in_crowd(self) -> None:
         page = _FakePage(crowded=True)
@@ -104,7 +104,7 @@ class LeafletScanTest(unittest.TestCase):
         self.assertEqual(result["scan"]["status"], "complete")
         self.assertEqual(page.zoom, 5)
         self.assertGreater(page.mouse.zoom_in_calls, 0)
-        self.assertEqual(page.waits.count(1000), page.mouse.zoom_in_calls)
+        self.assertEqual(page.waits.count(1500), len(page.waits))
 
     def test_browser_wheel_finds_marker_outside_initial_html(self) -> None:
         page = _FakePage(offscreen=True, zoom=7)

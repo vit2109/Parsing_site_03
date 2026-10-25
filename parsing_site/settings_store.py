@@ -35,6 +35,15 @@ class RuntimeSettings:
     map_coordinate_precision: int = 4
     map_container_selector: str = ".leaflet-container"
     reference_zoom: float = 0.0
+    scan_wait_seconds: float = 1.5
+    screenshot_enabled: bool = False
+    screenshot_dir: str = "data/screenshots"
+    screenshot_period_hours: int = 1
+    screenshot_width: int = 1280
+    screenshot_height: int = 720
+    archive_html_enabled: bool = False
+    archive_html_dir: str = "data/html"
+    archive_html_period_hours: int = 1
     lock_scale: bool = False
     static_source: str = "config"
     static_objects: list[StaticObjectConfig] = field(default_factory=list)
@@ -74,6 +83,7 @@ class RuntimeSettings:
                 coordinate_mode=self.coordinate_mode,
                 map_container_selector=self.map_container_selector,
                 reference_zoom=self.reference_zoom,
+                scan_wait_seconds=self.scan_wait_seconds,
                 lock_scale=self.lock_scale,
                 static_objects=list(self.static_objects),
             ),
@@ -141,6 +151,7 @@ def from_app_config(cfg: AppConfig) -> RuntimeSettings:
         coordinate_mode=cfg.tracking.coordinate_mode,
         map_container_selector=cfg.tracking.map_container_selector,
         reference_zoom=cfg.tracking.reference_zoom,
+        scan_wait_seconds=cfg.tracking.scan_wait_seconds,
         lock_scale=cfg.tracking.lock_scale,
         static_source=cfg.tracking.static_source,
         static_objects=list(cfg.tracking.static_objects),
@@ -187,6 +198,15 @@ def from_dict(data: dict[str, Any]) -> RuntimeSettings:
             data.get("map_container_selector", ".leaflet-container")
         ),
         reference_zoom=float(data.get("reference_zoom", 0)),
+        scan_wait_seconds=float(data.get("scan_wait_seconds", 1.5)),
+        screenshot_enabled=bool(data.get("screenshot_enabled", False)),
+        screenshot_dir=str(data.get("screenshot_dir", "data/screenshots")),
+        screenshot_period_hours=int(data.get("screenshot_period_hours", 1)),
+        screenshot_width=int(data.get("screenshot_width", 1280)),
+        screenshot_height=int(data.get("screenshot_height", 720)),
+        archive_html_enabled=bool(data.get("archive_html_enabled", False)),
+        archive_html_dir=str(data.get("archive_html_dir", "data/html")),
+        archive_html_period_hours=int(data.get("archive_html_period_hours", 1)),
         lock_scale=bool(data.get("lock_scale", False)),
         static_source=str(data.get("static_source", "config")),
         static_objects=objects,
@@ -203,6 +223,18 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
         raise ValueError("Укажите адрес CDP браузера.")
     if settings.interval_seconds < 0.4:
         raise ValueError("Интервал парсинга должен быть не меньше 0.4 с.")
+    if not 0.2 <= settings.scan_wait_seconds <= 10:
+        raise ValueError("Задержка на точке должна быть от 0.2 до 10 с.")
+    if settings.screenshot_period_hours not in {1, 3, 6, 12, 24} \
+            or settings.archive_html_period_hours not in {1, 3, 6, 12, 24}:
+        raise ValueError("Период сохранения должен быть 1, 3, 6, 12 или 24 часа.")
+    if not 320 <= settings.screenshot_width <= 3840 \
+            or not 240 <= settings.screenshot_height <= 2160:
+        raise ValueError("Размер снимка: ширина 320–3840, высота 240–2160 пикселей.")
+    if settings.screenshot_enabled and not settings.screenshot_dir.strip():
+        raise ValueError("Укажите каталог для снимков карты.")
+    if settings.archive_html_enabled and not settings.archive_html_dir.strip():
+        raise ValueError("Укажите каталог для HTML-страниц.")
     if settings.threshold <= 0:
         raise ValueError("Порог красного выделения должен быть больше 0.")
     warning = max(settings.warning_distance, settings.threshold)
@@ -247,6 +279,15 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
         map_container_selector=settings.map_container_selector.strip()
         or ".leaflet-container",
         reference_zoom=float(settings.reference_zoom),
+        scan_wait_seconds=float(settings.scan_wait_seconds),
+        screenshot_enabled=bool(settings.screenshot_enabled),
+        screenshot_dir=settings.screenshot_dir.strip(),
+        screenshot_period_hours=settings.screenshot_period_hours,
+        screenshot_width=settings.screenshot_width,
+        screenshot_height=settings.screenshot_height,
+        archive_html_enabled=bool(settings.archive_html_enabled),
+        archive_html_dir=settings.archive_html_dir.strip(),
+        archive_html_period_hours=settings.archive_html_period_hours,
         lock_scale=bool(settings.lock_scale),
         static_source=source,
         static_objects=list(settings.static_objects),

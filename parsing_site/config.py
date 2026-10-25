@@ -111,6 +111,7 @@ class TrackingConfig:
     coordinate_mode: str = "screen"
     map_container_selector: str = ".leaflet-container"
     reference_zoom: float = 0.0
+    scan_wait_seconds: float = 1.5
     lock_scale: bool = False
     threshold: float = 140.0
     warning_ratio: float = 1.4
@@ -224,6 +225,7 @@ def load_config(path: Path | None = None) -> AppConfig:
                 tracking_raw.get("map_container_selector", ".leaflet-container")
             ),
             reference_zoom=float(tracking_raw.get("reference_zoom", 0.0)),
+            scan_wait_seconds=float(tracking_raw.get("scan_wait_seconds", 1.5)),
             lock_scale=bool(tracking_raw.get("lock_scale", False)),
             threshold=float(tracking_raw.get("threshold", 140.0)),
             warning_ratio=float(tracking_raw.get("warning_ratio", 1.4)),

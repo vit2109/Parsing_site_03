@@ -818,6 +818,30 @@ class Database:
                     break
         return points
 
+    def get_poll_map_context(self, poll_id: int, data_source: str = "real") -> dict[str, Any] | None:
+        """Положения всех объектов из одного опроса для карты хронологии."""
+        with closing(self._open_read_connection()) as read_conn:
+            poll = read_conn.execute(
+                "SELECT id, ts FROM polls WHERE id = ? AND data_source = ?",
+                (poll_id, _normalize_source(data_source)),
+            ).fetchone()
+            if poll is None:
+                return None
+            dynamics = read_conn.execute(
+                "SELECT dynamic_index, name AS dynamic_name, lat, lng, color "
+                "FROM dynamic_observations WHERE poll_id = ? "
+                "AND lat IS NOT NULL AND lng IS NOT NULL ORDER BY dynamic_index LIMIT 2000",
+                (poll_id,),
+            ).fetchall()
+            statics = read_conn.execute(
+                "SELECT static_index, name AS static_name, lat, lng "
+                "FROM static_observations WHERE poll_id = ? "
+                "AND lat IS NOT NULL AND lng IS NOT NULL ORDER BY static_index LIMIT 2000",
+                (poll_id,),
+            ).fetchall()
+        return {"ts": poll["ts"], "dynamics": [dict(row) for row in dynamics],
+                "statics": [dict(row) for row in statics]}
+
     def get_static_zone_trajectories(
         self,
         *,
@@ -827,6 +851,7 @@ class Database:
         data_source: str = "real",
         limit: int = 20_000,
         coordinate_precision: int = 6,
+        include_outside: bool = False,
     ) -> dict[str, Any] | None:
         """Траектории вошедших в зоны объектов без повторов соседних координат."""
         source = _normalize_source(data_source)
@@ -911,8 +936,9 @@ class Database:
                 group["points"].append(point)
         result = dict(static)
         result["points"] = []
-        for key in sorted(groups):
-            if groups[key]["entered"]:
+        ordered_keys = sorted(groups, key=lambda key: (not groups[key]["entered"], key))
+        for key in ordered_keys:
+            if groups[key]["entered"] or include_outside:
                 result["points"].extend(groups[key]["points"])
                 if len(result["points"]) >= point_limit:
                     result["points"] = result["points"][:point_limit]

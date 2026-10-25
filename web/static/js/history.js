@@ -59,6 +59,13 @@ let trajectoryMap;
  * @type {Object|null}
  */
 let staticZoneMap;
+let currentDynamicData;
+let currentDynamicContext;
+let currentStaticData;
+const dynamicFilters = document.getElementById("trajectory-filters");
+const staticFilters = document.getElementById("static-filters");
+const filterChecked = (container, name) => container.elements?.namedItem(name)?.checked
+  ?? container.querySelector(`[name="${name}"]`)?.checked;
 
 /**
  * Кэшированный набор контуров регионов России из топологии карты.
@@ -118,6 +125,12 @@ loadStaticObjects();
  * @param {Event} event - событие submit
  */
 els.form.addEventListener("submit", loadHistory);
+dynamicFilters.addEventListener("change", () => {
+  if (currentDynamicData) renderDynamicMap(currentDynamicData);
+});
+staticFilters.addEventListener("input", () => {
+  if (currentStaticData) renderStaticZoneMap(currentStaticData);
+});
 
 /**
  * Обработчик изменения выбора стационарного объекта.
@@ -178,6 +191,8 @@ async function loadStaticObjects() {
     ]);
     if (request !== staticLoadRequest || selectedSource !== els.source.value) return;
     staticObjects = objects;
+    document.documentElement.style.setProperty("--alert", settings.alert_color || "#9b1c1c");
+    document.documentElement.style.setProperty("--warning", settings.warning_color || "#d4a017");
     document.documentElement.style.setProperty("--blue", settings.blue_color || "#2878b8");
     if (!staticObjects.length) {
       els.staticSelect.innerHTML = '<option value="">Нет стационарных объектов</option>';
@@ -361,6 +376,8 @@ function dynamicNumberLabel(index) {
 /** Загружает и открывает диалог траектории динамического объекта. */
 async function openDynamicTrajectory(dynamicIndex, objectDate) {
   hideError();
+  currentDynamicData = null;
+  currentDynamicContext = null;
   els.trajectoryTitle.textContent = `Объект ${dynamicNumberLabel(dynamicIndex)} · ${objectDate}`;
   els.trajectoryMeta.textContent = "Загрузка точек…";
   els.trajectoryPoints.innerHTML = '<p class="muted">Загрузка…</p>';
@@ -373,7 +390,15 @@ async function openDynamicTrajectory(dynamicIndex, objectDate) {
     const precision = Number(data.coordinate_precision || 4);
     els.trajectoryMeta.textContent = `${data.total} ${pluralPoints(data.total)} на карте · точность координат: ${precision}${data.truncated ? ` · показаны первые ${data.total} точек` : ""}`;
     if (!els.trajectoryModal.open) return;
+    currentDynamicData = data;
     renderDynamicMap(data);
+    const pollId = data.points[data.points.length - 1]?.poll_id;
+    if (pollId != null) {
+      try {
+        currentDynamicContext = await getJson(`/api/history/context/${pollId}?source=${encodeURIComponent(els.source.value)}`);
+        if (els.trajectoryModal.open && currentDynamicData === data) renderDynamicMap(data);
+      } catch (_) { /* Траектория остаётся доступной без соседнего опроса. */ }
+    }
   } catch (error) {
     els.trajectoryModal.close();
     showError(error.message);
@@ -384,14 +409,27 @@ async function openDynamicTrajectory(dynamicIndex, objectDate) {
 function renderDynamicMap(data) {
   const color = safeColor(data.color);
   const precision = Number(data.coordinate_precision || 4);
+  const showPoints = filterChecked(dynamicFilters, "points");
+  const showRoutes = filterChecked(dynamicFilters, "routes");
+  const showOthers = filterChecked(dynamicFilters, "others");
+  const showStatics = filterChecked(dynamicFilters, "statics");
+  const context = currentDynamicContext || { dynamics: [], statics: [], ts: "" };
+  const others = showOthers ? context.dynamics.filter((item) => Number(item.dynamic_index) !== Number(data.dynamic_index)).map((item) => ({
+    ...item, color: safeColor(item.color),
+    label: `${dynamicNumberLabel(item.dynamic_index)} ${item.dynamic_name} · ${formatDateTime(context.ts)}`,
+  })) : [];
+  const statics = showStatics ? context.statics.map((item) => ({
+    ...item, staticIndex: item.static_index, color: "#172c42",
+    label: `#${item.static_index} ${item.static_name} · ${formatDateTime(context.ts)}`,
+  })) : [];
   trajectoryMap = renderHistoryMap(els.trajectoryMap, {
-    points: data.points.map((point, index) => ({
+    points: [...(showPoints ? data.points.map((point, index) => ({
       ...point,
       key: String(index),
-      label: `${index + 1}. ${formatDateTime(point.ts)}`,
+      label: `${dynamicNumberLabel(data.dynamic_index)} ${data.dynamic_name} · ${formatDateTime(point.ts)}`,
       color,
-    })),
-    polylines: [{ id: `${data.object_date}:${data.dynamic_index}`, label: `${dynamicNumberLabel(data.dynamic_index)} · ${data.object_date}`, color, points: data.points }],
+    })) : []), ...others, ...statics],
+    polylines: showRoutes ? [{ id: `${data.object_date}:${data.dynamic_index}`, label: `${dynamicNumberLabel(data.dynamic_index)} · ${data.object_date}`, color, points: data.points }] : [],
   });
   els.trajectoryPoints.innerHTML = data.points.map((point, index) => `
     <button type="button" class="history-point" data-point-index="${index}">
@@ -405,7 +443,7 @@ function renderDynamicMap(data) {
       els.trajectoryPoints.querySelectorAll(".selected").forEach((item) => item.classList.remove("selected"));
       button.classList.add("selected");
       const point = data.points[index];
-      trajectoryMap.selectPoint(point, `${formatDateTime(point.ts)} · ${coordsText(point.lat, point.lng, precision)}`, color);
+      trajectoryMap.selectPoint(point, `${dynamicNumberLabel(data.dynamic_index)} ${data.dynamic_name} · ${formatDateTime(point.ts)} · ${coordsText(point.lat, point.lng, precision)}`, color);
     });
   });
 }
@@ -413,6 +451,7 @@ function renderDynamicMap(data) {
 /** Загружает зоны точки и траектории входивших в них объектов. */
 async function openStaticZones(staticIndex) {
   hideError();
+  currentStaticData = null;
   const selected = staticObjects.find((item) => Number(item.static_index) === staticIndex);
   els.staticTitle.textContent = selected ? `#${staticIndex} ${selected.static_name}` : `Объект #${staticIndex}`;
   els.staticZoneMeta.textContent = "Загрузка зон и траекторий…";
@@ -430,7 +469,7 @@ async function openStaticZones(staticIndex) {
     els.staticTrajectories.innerHTML = '<p class="muted">Загрузка объектов за выбранный период…</p>';
   }
   try {
-    const data = await getJson(`/api/history/static-zones/${staticIndex}?${periodParams()}`);
+    const data = await getJson(`/api/history/static-zones/${staticIndex}?${periodParams()}&include_outside=true`);
     els.staticTitle.textContent = `#${data.static_index} ${data.static_name}`;
     els.staticZoneMeta.textContent = `Красная зона: ${formatKm(data.alert_radius_km)} · жёлтая зона: ${formatKm(data.warning_radius_km)} · синяя зона: ${formatKm(data.blue_radius_km)} · объектов: ${data.objects_total} · точность координат: ${Number(data.coordinate_precision || 4)}${data.truncated ? ` · показаны первые ${data.points_total} точек; уточните период для остальных` : ""}`;
     if (!els.staticModal.open) return;
@@ -443,33 +482,61 @@ async function openStaticZones(staticIndex) {
 
 /** Готовит карту радиусов и связанных траекторий для статичной точки. */
 function renderStaticZoneMap(data) {
-  const allPoints = data.trajectories.flatMap((trajectory) => trajectory.points);
+  currentStaticData = data;
+  const query = staticFilters.querySelector('[name="object_query"]').value.trim().toLowerCase();
+  const zoneFilter = staticFilters.querySelector('[name="zone_filter"]').value;
+  const objectSort = staticFilters.querySelector('[name="object_sort"]').value;
+  const zoneOf = (item) => item.entered_alert ? "alert" : item.entered_warning ? "warning"
+    : item.entered_blue ? "blue" : item.points.some((point) => point.status === "alert") ? "alert"
+    : item.points.some((point) => point.status === "warning") ? "warning"
+    : item.points.some((point) => point.status === "blue") ? "blue" : "outside";
+  const zoneOrder = { alert: 0, warning: 1, blue: 2, outside: 3 };
+  const zoneTime = (item) => item.points.find((point) => point.status === zoneOf(item))?.ts
+    || item.points[0]?.ts || "";
+  const trajectories = data.trajectories.filter((item) =>
+    (item.entered_zone !== false || filterChecked(staticFilters, "others")) &&
+    (!query || `${dynamicNumberLabel(item.dynamic_index)} ${item.dynamic_name}`.toLowerCase().includes(query)) &&
+    (zoneFilter === "all" || zoneOf(item) === zoneFilter)
+  );
+  if (objectSort !== "default") {
+    trajectories.sort((a, b) => {
+      if (objectSort === "zone_time") {
+        const zones = zoneOrder[zoneOf(a)] - zoneOrder[zoneOf(b)];
+        if (zones) return zones;
+      }
+      return objectSort === "time_desc"
+        ? zoneTime(b).localeCompare(zoneTime(a))
+        : zoneTime(a).localeCompare(zoneTime(b));
+    });
+  }
+  const allPoints = trajectories.flatMap((trajectory) => trajectory.points);
   const precision = Number(data.coordinate_precision || 4);
   const blueColor = safeColor(data.blue_color || "#2878b8");
   staticZoneMap = renderHistoryMap(els.staticZoneMap, {
-    points: allPoints.map((point) => ({
+    points: (filterChecked(staticFilters, "points") ? allPoints : []).map((point) => ({
       ...point,
+      label: `${dynamicNumberLabel(point.dynamic_index)} ${point.dynamic_name} · ${formatDateTime(point.ts)}`,
       color: point.status === "alert" ? "#ff6b6b" : point.status === "warning" ? "#f1c232" : point.status === "blue" ? blueColor : "#8794a8",
       markerClass: point.status === "outside" ? "offline-marker--dim" : "",
     })),
-    polylines: data.trajectories.map((trajectory) => ({
+    polylines: (filterChecked(staticFilters, "routes") ? trajectories : []).map((trajectory) => ({
       id: trajectory.trajectory_key,
       label: `${dynamicNumberLabel(trajectory.dynamic_index)} · ${trajectory.object_date}`,
       color: safeColor(trajectory.color),
       points: trajectory.points,
     })),
-    zones: [
+    zones: filterChecked(staticFilters, "zones") ? [
       { center: { lat: data.lat, lng: data.lng }, radiusKm: Number(data.blue_radius_km), status: "blue" },
       { center: { lat: data.lat, lng: data.lng }, radiusKm: Number(data.warning_radius_km), status: "warning" },
       { center: { lat: data.lat, lng: data.lng }, radiusKm: Number(data.alert_radius_km), status: "alert" },
-    ],
+    ] : [],
     centerPoint: { lat: data.lat, lng: data.lng, label: `#${data.static_index} ${data.static_name}` },
   });
-  els.staticTrajectories.innerHTML = data.trajectories.length ? data.trajectories.map((trajectory, trajectoryIndex) => `
+  els.staticTrajectories.innerHTML = trajectories.length ? trajectories.map((trajectory, trajectoryIndex) => `
     <section class="history-trajectory-group" data-trajectory-group="${escapeAttr(trajectory.trajectory_key)}">
-      <button type="button" class="history-point history-trajectory-toggle" data-zone-trajectory="${trajectoryIndex}" aria-expanded="false">
+      <button type="button" class="history-point history-trajectory-toggle history-zone-${zoneOf(trajectory)}" data-zone-trajectory="${trajectoryIndex}" aria-expanded="false">
         <strong><i class="trajectory-swatch" style="background:${safeColor(trajectory.color)}"></i>${dynamicNumberLabel(trajectory.dynamic_index)} ${escapeHtml(trajectory.dynamic_name)}</strong>
-        <span>${escapeHtml(trajectory.object_date)} · ${trajectory.points.length} ${pluralPoints(trajectory.points.length)} · ${trajectory.entered_alert ? "входил в красную зону" : trajectory.entered_warning ? "входил в жёлтую зону" : "входил в синюю зону"}</span>
+        <span>${escapeHtml(trajectory.object_date)} · ${trajectory.points.length} ${pluralPoints(trajectory.points.length)} · ${trajectory.entered_alert ? "входил в красную зону" : trajectory.entered_warning ? "входил в жёлтую зону" : trajectory.entered_blue ? "входил в синюю зону" : "вне зон"}</span>
         <i class="trajectory-chevron" aria-hidden="true">⌄</i>
       </button>
       <div class="history-trajectory-points" hidden>
@@ -481,7 +548,7 @@ function renderStaticZoneMap(data) {
         `).join("")}
       </div>
     </section>
-  `).join("") : '<p class="muted history-empty-detail">За выбранный период никто не входил в зоны.</p>';
+  `).join("") : '<p class="muted history-empty-detail">Нет объектов для выбранных фильтров.</p>';
   els.staticTrajectories.querySelectorAll("[data-zone-trajectory]").forEach((button) => {
     button.addEventListener("click", () => {
       const group = button.closest(".history-trajectory-group");
@@ -489,14 +556,14 @@ function renderStaticZoneMap(data) {
       const expanded = button.getAttribute("aria-expanded") === "true";
       button.setAttribute("aria-expanded", String(!expanded));
       points.hidden = expanded;
-      const trajectory = data.trajectories[Number(button.dataset.zoneTrajectory)];
+      const trajectory = trajectories[Number(button.dataset.zoneTrajectory)];
       staticZoneMap.highlightTrajectory(trajectory.trajectory_key);
     });
   });
   els.staticTrajectories.querySelectorAll("[data-zone-point]").forEach((button) => {
     button.addEventListener("click", () => {
       const [trajectoryIndex, pointIndex] = button.dataset.zonePoint.split(":").map(Number);
-      const trajectory = data.trajectories[trajectoryIndex];
+      const trajectory = trajectories[trajectoryIndex];
       const point = trajectory?.points[pointIndex];
       if (!point) return;
       els.staticTrajectories.querySelectorAll("[data-zone-point].selected").forEach((item) => item.classList.remove("selected"));
@@ -504,7 +571,7 @@ function renderStaticZoneMap(data) {
       staticZoneMap.highlightTrajectory(trajectory.trajectory_key);
       staticZoneMap.selectPoint(
         point,
-        `${trajectory.dynamic_name} · ${formatDateTime(point.ts)} · ${Number(point.distance).toFixed(3)} км`,
+        `${dynamicNumberLabel(trajectory.dynamic_index)} ${trajectory.dynamic_name} · ${formatDateTime(point.ts)} · ${Number(point.distance).toFixed(3)} км`,
         safeColor(trajectory.color),
       );
     });

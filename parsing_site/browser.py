@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Self
@@ -84,6 +85,10 @@ class BrowserSession:
             html=page.content(),
         )
 
+    def capture_html(self) -> str:
+        """Сохраняет DOM выбранной вкладки без ожидания наличия маркеров."""
+        return self._find_page().content()
+
     def capture_scene(self, tracking: TrackingConfig) -> tuple[PageSnapshot, dict]:
         """HTML не качается целиком: в странице выполняется JS-съём маркеров и карты."""
         today = datetime.now().astimezone().date()
@@ -104,6 +109,27 @@ class BrowserSession:
             html="",
         )
         return snapshot, extract_scene_with_mouse_scan(page, tracking, self._number_cache)
+
+    def capture_map_image(self, selector: str, max_width: int, max_height: int) -> bytes:
+        """Снимок контейнера карты в JPEG, вписанный в заданный размер."""
+        page = self._find_page()
+        png = page.locator(selector).first.screenshot(type="png", animations="disabled")
+        encoded = base64.b64encode(png).decode("ascii")
+        result = page.evaluate(
+            """async ({encoded, maxWidth, maxHeight}) => {
+              const bytes = Uint8Array.from(atob(encoded), c => c.charCodeAt(0));
+              const image = await createImageBitmap(new Blob([bytes], {type: 'image/png'}));
+              const scale = Math.min(1, maxWidth / image.width, maxHeight / image.height);
+              const canvas = document.createElement('canvas');
+              canvas.width = Math.max(1, Math.round(image.width * scale));
+              canvas.height = Math.max(1, Math.round(image.height * scale));
+              canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+              image.close();
+              return canvas.toDataURL('image/jpeg', 0.78).split(',')[1];
+            }""",
+            {"encoded": encoded, "maxWidth": max_width, "maxHeight": max_height},
+        )
+        return base64.b64decode(result)
 
     def list_tabs(self) -> list[tuple[str, str]]:
         """Перечисляет URL и заголовки всех вкладок во всех контекстах."""

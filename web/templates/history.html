@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Хронология сближений</title>
     <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css?v=1.9.4" />
-    <link rel="stylesheet" href="/static/css/app.css?v=11" />
+    <link rel="stylesheet" href="/static/css/app.css?v=13" />
   </head>
   <body>
     <div class="app history-app">
@@ -143,6 +143,12 @@
           <button class="btn btn-ghost modal-close" type="button" aria-label="Закрыть">✕</button>
         </div>
       </div>
+      <div class="history-layer-filters" id="trajectory-filters" aria-label="Отображение объектов">
+        <label><input type="checkbox" name="points" checked /> Точки объекта</label>
+        <label><input type="checkbox" name="routes" checked /> Маршрут</label>
+        <label><input type="checkbox" name="others" /> Другие объекты в последнем опросе</label>
+        <label><input type="checkbox" name="statics" /> Стационарные объекты</label>
+      </div>
       <div class="history-modal__layout">
         <div id="trajectory-map" class="history-map history-detail-map"></div>
         <div class="history-point-panel">
@@ -164,6 +170,26 @@
           <button class="btn btn-ghost modal-close" type="button" aria-label="Закрыть">✕</button>
         </div>
       </div>
+      <div class="history-layer-filters" id="static-filters" aria-label="Отображение объектов">
+        <label><input type="checkbox" name="zones" checked /> Зоны</label>
+        <label><input type="checkbox" name="points" checked /> Точки</label>
+        <label><input type="checkbox" name="routes" checked /> Маршруты</label>
+        <label><input type="checkbox" name="others" /> Другие объекты вне зон</label>
+        <label>Номер или имя <input type="search" name="object_query" placeholder="Все объекты" /></label>
+        <label>Зона <select name="zone_filter">
+          <option value="all">Все</option>
+          <option value="alert">Красная</option>
+          <option value="warning">Жёлтая</option>
+          <option value="blue">Синяя</option>
+          <option value="outside">Вне зон</option>
+        </select></label>
+        <label>Порядок <select name="object_sort">
+          <option value="default">Как сейчас</option>
+          <option value="zone_time">По зонам и времени</option>
+          <option value="time_asc">Сначала ранние</option>
+          <option value="time_desc">Сначала поздние</option>
+        </select></label>
+      </div>
       <div class="history-modal__layout">
         <div id="static-zone-map" class="history-map history-detail-map"></div>
         <div class="history-point-panel">
@@ -178,6 +204,6 @@
     <script src="/static/js/russia-additional-regions-data.js?v=1"></script>
     <script src="/static/vendor/leaflet/leaflet.js?v=1.9.4"></script>
     <script src="/static/js/history-geographic-map.js?v=2"></script>
-    <script src="/static/js/history.js?v=18"></script>
+    <script src="/static/js/history.js?v=20"></script>
   </body>
 </html>

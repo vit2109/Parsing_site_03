@@ -23,6 +23,32 @@ from parsing_site.tracking import (
 
 
 class HistoryDatabaseTest(unittest.TestCase):
+    def test_map_context_and_optional_objects_outside_zones(self) -> None:
+        with TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "tracking.db")
+            snapshot = TrackingSnapshot(
+                url="test", title="test", viewport=(800, 600),
+                dynamics=[
+                    SceneObject(index=62, name="БПЛА", x=0, y=0, lat=55.71, lng=37.62),
+                    SceneObject(index=63, name="МВШ", x=0, y=0, lat=60.0, lng=40.0),
+                ],
+                statics=[SceneObject(index=1, name="Склад", x=0, y=0, lat=55.7, lng=37.62)],
+                rows=[], threshold=2, warning_limit=5, blue_limit=10,
+                coordinate_mode="latlng", distance_unit="km",
+            )
+            poll_id = db.save_snapshot(snapshot)
+            context = db.get_poll_map_context(poll_id)
+            self.assertEqual({item["dynamic_index"] for item in context["dynamics"]}, {62, 63})
+            self.assertEqual(context["statics"][0]["static_index"], 1)
+            period = {"date_from": "2000-01-01", "date_to": "2100-01-01"}
+            entered = db.get_static_zone_trajectories(static_index=1, **period)
+            all_objects = db.get_static_zone_trajectories(
+                static_index=1, include_outside=True, **period
+            )
+            self.assertEqual({point["dynamic_index"] for point in entered["points"]}, {62})
+            self.assertEqual({point["dynamic_index"] for point in all_objects["points"]}, {62, 63})
+            db.close()
+
     def test_map_coordinate_precision_groups_nearby_points_without_changing_storage(self) -> None:
         with TemporaryDirectory() as directory:
             db = Database(Path(directory) / "tracking.db")
@@ -70,6 +96,9 @@ class HistoryDatabaseTest(unittest.TestCase):
         self.assertEqual(validate_settings(from_dict({"map_coordinate_precision": 3})).map_coordinate_precision, 3)
         with self.assertRaises(ValueError):
             validate_settings(from_dict({"map_coordinate_precision": 2}))
+        self.assertEqual(from_dict({}).scan_wait_seconds, 1.5)
+        with self.assertRaises(ValueError):
+            validate_settings(from_dict({"scan_wait_seconds": 11}))
         with TemporaryDirectory() as directory:
             db = Database(Path(directory) / "settings.db")
             store = SettingsStore(db)

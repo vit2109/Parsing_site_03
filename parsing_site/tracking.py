@@ -422,6 +422,7 @@ async (opts) => {
       Number.isFinite(zoom) && mapRect?.width && mapRect?.height) {
     scan.status = "running";
     const originalCenter = map.getCenter();
+    const scanWaitMs = Math.max(200, Math.min(10000, Number(opts.scanWaitMs) || 1500));
     const reportedMaxZoom = typeof map.getMaxZoom === "function" ? map.getMaxZoom() : Infinity;
     const maxZoom = Number.isFinite(reportedMaxZoom) ? reportedMaxZoom : zoom + 6;
     const reportedMinZoom = typeof map.getMinZoom === "function" ? map.getMinZoom() : -Infinity;
@@ -448,7 +449,7 @@ async (opts) => {
         if (typeof map.on !== "function") finish();
       });
       // Vue может перерисовать маркеры после moveend и ответа API.
-      await new Promise((resolve) => setTimeout(resolve, zoomingIn ? 1000 : 600));
+      await new Promise((resolve) => setTimeout(resolve, scanWaitMs));
     };
     const matchVisible = () => {
       const visible = collect(opts.dynamic, "D", true).filter((item) => item.index > 0);
@@ -478,18 +479,21 @@ async (opts) => {
     };
     try {
       const rememberVisible = (visible = collect(opts.dynamic, "D", true)) => {
+        let added = 0;
         for (const item of visible) {
           if (!Number.isFinite(item.lat) || !Number.isFinite(item.lng)) continue;
           const existing = dynamics.find((candidate) => candidate.fallback_id === item.fallback_id);
           if (!existing) {
             applyKnownNumber(item);
             dynamics.push(item);
+            added++;
           }
           else if (existing.index < 0 && item.index > 0 && !usedNumbers.has(item.index)) {
             existing.index = item.index;
             usedNumbers.add(item.index);
           }
         }
+        return added;
       };
       // В html_test/44.html правая вкладка показывает 9 нужных маркеров при zoom 4.
       const incidentMap = String(opts.dynamic || "").includes("map-incident");
@@ -526,7 +530,9 @@ async (opts) => {
         seen.add(key);
         if (col || row) await moveTo(center.lat, center.lng, overviewZoom);
         const visible = collect(opts.dynamic, "D", true);
-        rememberVisible(visible);
+        const added = rememberVisible(visible);
+        // Расширяем обзор лишь там, где предыдущий шаг открыл новые объекты.
+        if ((col || row) && !added) continue;
         const edges = new Set();
         for (const item of visible) {
           if (!Number.isFinite(item.lat) || !Number.isFinite(item.lng)) continue;
@@ -559,7 +565,7 @@ async (opts) => {
           await moveTo(target.lat, target.lng, level);
           const matched = matchVisible();
           if (!matched) {
-            await new Promise((resolve) => setTimeout(resolve, 600));
+            await new Promise((resolve) => setTimeout(resolve, scanWaitMs));
             matchVisible();
           }
           for (const candidate of dynamics) {
@@ -575,6 +581,13 @@ async (opts) => {
       }
     } finally {
       await moveTo(originalCenter.lat, originalCenter.lng, zoom);
+      const restored = () => {
+        const actual = map.getCenter();
+        const point = map.latLngToContainerPoint([originalCenter.lat, originalCenter.lng]);
+        return map.getZoom() === zoom && actual && point &&
+          Math.hypot(point.x - mapRect.width / 2, point.y - mapRect.height / 2) < 2;
+      };
+      if (!restored()) await moveTo(originalCenter.lat, originalCenter.lng, zoom);
       for (const item of dynamics) {
         if (!Number.isFinite(item.lat) || !Number.isFinite(item.lng)) continue;
         const p = map.latLngToContainerPoint([item.lat, item.lng]);
@@ -583,7 +596,8 @@ async (opts) => {
         item.x = round2(xy.x);
         item.y = round2(xy.y);
       }
-      scan.status = dynamics.every((item) => item.index > 0) ? "complete" : "partial";
+      scan.status = !restored() ? "restore_failed" :
+        dynamics.every((item) => item.index > 0) ? "complete" : "partial";
     }
   } else if (map && opts.scanNumbers) {
     scan.status = "map_controls_unavailable";
@@ -727,6 +741,7 @@ def extract_scene_from_page(
             "mode": tracking.coordinate_mode,
             "mapContainer": tracking.map_container_selector,
             "scanNumbers": scan_numbers,
+            "scanWaitMs": round(tracking.scan_wait_seconds * 1000),
             "knownNumbers": {
                 str(identity): {"number": number, "lat": lat, "lng": lng}
                 for identity, (number, lat, lng) in (known_numbers or {}).items()
@@ -780,6 +795,7 @@ def extract_scene_with_mouse_scan(
         return raw
     original_lat = base_view.center_lat
     original_lng = base_view.center_lng
+    scan_wait_ms = round(tracking.scan_wait_seconds * 1000)
 
     # Даже если все видимые объекты уже подписаны, за границей исходного окна
     # могут быть ещё не созданные сайтом маркеры. Сначала отдаляем карту.
@@ -798,7 +814,7 @@ def extract_scene_with_mouse_scan(
         delta = 120 if previous_zoom > target_overview else -120
         page.mouse.move(center_x, center_y)
         page.mouse.wheel(0, delta)
-        page.wait_for_timeout(650 if delta > 0 else 1000)
+        page.wait_for_timeout(scan_wait_ms)
         candidate = extract_scene_from_page(page, tracking, scan_numbers=False)
         current_zoom = _maybe_float(candidate.get("map_zoom"))
         if current_zoom is None or (current_zoom - previous_zoom) * delta >= 0:
@@ -827,7 +843,9 @@ def extract_scene_with_mouse_scan(
                 if column or row:
                     overview = _pan_mouse_to(page, tracking, overview, *position)
                     overview_views += 1
-                _merge_overview_scene(raw, overview, base_view)
+                added = _merge_overview_scene(raw, overview, base_view)
+                if (column or row) and not added:
+                    continue
                 current_view = map_view_from_raw(overview.get("map"))
                 if current_view is None:
                     continue
@@ -848,7 +866,8 @@ def extract_scene_with_mouse_scan(
                     if point[1] > current_view.height * 0.7:
                         queue.append((column, row + 1))
             overview = _pan_mouse_to(
-                page, tracking, overview, overview_view.center_lat, overview_view.center_lng
+                page, tracking, overview, overview_view.center_lat, overview_view.center_lng,
+                max_gestures=24,
             )
         used = {item["index"] for item in raw["dynamics"] if item["index"] > 0}
         for target in raw["dynamics"]:
@@ -881,7 +900,7 @@ def extract_scene_with_mouse_scan(
                 previous_zoom = _maybe_float(current.get("map_zoom"))
                 page.mouse.move(anchor_x, anchor_y)
                 page.mouse.wheel(0, -120)
-                page.wait_for_timeout(1000)
+                page.wait_for_timeout(scan_wait_ms)
                 current = extract_scene_from_page(page, tracking, scan_numbers=False)
                 current_zoom = _maybe_float(current.get("map_zoom"))
                 if current_zoom is None or previous_zoom is None or current_zoom <= previous_zoom:
@@ -892,7 +911,7 @@ def extract_scene_with_mouse_scan(
             for _ in range(ticks):
                 page.mouse.move(anchor_x, anchor_y)
                 page.mouse.wheel(0, 120)
-                page.wait_for_timeout(650)
+                page.wait_for_timeout(scan_wait_ms)
                 current = extract_scene_from_page(page, tracking, scan_numbers=False)
             overview = current
             if callable(getattr(page.mouse, "down", None)):
@@ -902,7 +921,7 @@ def extract_scene_with_mouse_scan(
     for delta in reversed(overview_moves):
         page.mouse.move(center_x, center_y)
         page.mouse.wheel(0, -delta)
-        page.wait_for_timeout(1000 if delta > 0 else 650)
+        page.wait_for_timeout(scan_wait_ms)
         overview = extract_scene_from_page(page, tracking, scan_numbers=False)
     restored_zoom = _maybe_float(overview.get("map_zoom"))
     if restored_zoom is None or abs(restored_zoom - base_zoom) > 0.01:
@@ -913,8 +932,10 @@ def extract_scene_with_mouse_scan(
     if not raw.get("unnumbered_dynamics"):
         if callable(getattr(page.mouse, "down", None)) and original_lat is not None \
                 and original_lng is not None:
-            _pan_mouse_to(page, tracking, overview, original_lat, original_lng)
-        scan["status"] = "complete"
+            overview = _pan_mouse_to(page, tracking, overview, original_lat, original_lng,
+                                     max_gestures=24)
+        scan["status"] = "complete" if _scene_at_origin(overview, base_zoom, original_lat,
+                                                          original_lng) else "mouse_restore_failed"
         scan["views"] = overview_views
         scan["overview_count"] = len(raw.get("dynamics") or [])
         _remember_numbers(raw, number_cache)
@@ -934,14 +955,14 @@ def extract_scene_with_mouse_scan(
     def scene_after_wheel(x: float, y: float, delta: int) -> dict[str, Any]:
         page.mouse.move(x, y)
         page.mouse.wheel(0, delta)
-        page.wait_for_timeout(1000 if delta < 0 else 650)
+        page.wait_for_timeout(scan_wait_ms)
         scene = extract_scene_from_page(page, tracking, scan_numbers=False)
         zoom_after = _maybe_float(scene.get("map_zoom"))
         if delta < 0 and zoom_after is not None and zoom_after >= base_zoom + 2:
             for _ in range(3):
                 if any(item["index"] > 0 for item in scene.get("dynamics") or []):
                     break
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(scan_wait_ms)
                 scene = extract_scene_from_page(page, tracking, scan_numbers=False)
         return scene
 
@@ -1014,7 +1035,10 @@ def extract_scene_with_mouse_scan(
     if callable(getattr(page.mouse, "down", None)) and original_lat is not None \
             and original_lng is not None:
         current = extract_scene_from_page(page, tracking, scan_numbers=False)
-        _pan_mouse_to(page, tracking, current, original_lat, original_lng)
+        current = _pan_mouse_to(page, tracking, current, original_lat, original_lng,
+                                max_gestures=24)
+        if not _scene_at_origin(current, base_zoom, original_lat, original_lng):
+            scan["status"] = "mouse_restore_failed"
 
     scan["views"] = overview_views + views
     scan["overview_count"] = len(raw.get("dynamics") or [])
@@ -1060,11 +1084,12 @@ def _remember_numbers(
 
 
 def _pan_mouse_to(
-    page: Any, tracking: TrackingConfig, scene: dict[str, Any], lat: float, lng: float
+    page: Any, tracking: TrackingConfig, scene: dict[str, Any], lat: float, lng: float,
+    max_gestures: int = 8,
 ) -> dict[str, Any]:
     """Перетаскивает карту к центру, ограничивая каждый жест размером окна."""
     current = scene
-    for _ in range(8):
+    for _ in range(max_gestures):
         map_raw = current.get("map") or {}
         view = map_view_from_raw(map_raw)
         if view is None or not view.can_unproject:
@@ -1084,7 +1109,7 @@ def _pan_mouse_to(
             page.mouse.move(start_x + dx, start_y + dy, steps=5)
         finally:
             page.mouse.up()
-        page.wait_for_timeout(650)
+        page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
         candidate = extract_scene_from_page(page, tracking, scan_numbers=False)
         next_view = map_view_from_raw(candidate.get("map"))
         current = candidate
@@ -1097,15 +1122,27 @@ def _pan_mouse_to(
     return current
 
 
+def _scene_at_origin(scene: dict[str, Any], zoom: float, lat: float, lng: float) -> bool:
+    """Проверяет масштаб и центр карты с допуском два экранных пикселя."""
+    current_zoom = _maybe_float(scene.get("map_zoom"))
+    view = map_view_from_raw(scene.get("map"))
+    if current_zoom is None or abs(current_zoom - zoom) > 0.01 or view is None:
+        return False
+    point = latlng_to_container(lat, lng, view)
+    return point is not None and abs(point[0] - view.width / 2) < 2 \
+        and abs(point[1] - view.height / 2) < 2
+
+
 def _merge_overview_scene(
     overview: dict[str, Any], detailed: dict[str, Any], base_view: MapView
-) -> None:
+) -> int:
     """Добавляет найденные при отдалении маркеры в координатах исходного вида."""
     items = overview.setdefault("dynamics", [])
     known = {item.get("fallback_id"): item for item in items}
     used_numbers = {item["index"] for item in items if item.get("index", 0) > 0}
     map_raw = overview.get("map") or {}
     mode = overview.get("coordinate_mode") or "latlng"
+    added = 0
     for item in detailed.get("dynamics") or []:
         identity = item.get("fallback_id")
         lat = _maybe_float(item.get("lat"))
@@ -1133,10 +1170,12 @@ def _merge_overview_scene(
         if found.get("index", 0) > 0 and found["index"] in used_numbers:
             continue
         items.append(found)
+        added += 1
         known[identity] = found
         if found.get("index", 0) > 0:
             used_numbers.add(found["index"])
     overview["unnumbered_dynamics"] = sum(item["index"] < 0 for item in items)
+    return added
 
 
 def _merge_numbered_scene(
@@ -1401,6 +1440,11 @@ def build_tracking_snapshot(
     )
     unnumbered_dynamics = int(raw.get("unnumbered_dynamics") or 0)
     scan_status = str((raw.get("scan") or {}).get("status") or "")
+    if scan_status in {"restore_failed", "mouse_restore_failed"}:
+        scale_warning = (
+            f"{scale_warning} После обхода не удалось подтвердить возврат карты "
+            "к исходному центру и масштабу."
+        ).strip()
     if unnumbered_dynamics:
         detail = {
             "no_leaflet_instance": "Экземпляр Leaflet не найден; обход карты не выполнен.",
@@ -1408,7 +1452,8 @@ def build_tracking_snapshot(
             "partial": "Обход выполнен, но сайт не показал номера всех объектов.",
             "mouse_scan_unavailable": "У карты нет данных для обхода колесом браузера.",
             "mouse_wheel_unavailable": "Карта не меняет масштаб от колеса браузера.",
-            "mouse_restore_failed": "После обхода не удалось восстановить исходный масштаб карты.",
+            "mouse_restore_failed": "После обхода не удалось восстановить исходный вид карты.",
+            "restore_failed": "После обхода не удалось восстановить исходный вид карты.",
         }.get(scan_status, "")
         number_warning = (
             f"Номера {unnumbered_dynamics} объектов не определены. {detail} "

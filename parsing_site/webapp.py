@@ -55,6 +55,15 @@ class SettingsIn(BaseModel):
     site: str = Field(min_length=1)
     cdp_url: str = "http://127.0.0.1:9222"
     interval_seconds: float = Field(ge=0.4, le=600)
+    scan_wait_seconds: float = Field(default=1.5, ge=0.2, le=10)
+    screenshot_enabled: bool = False
+    screenshot_dir: str = "data/screenshots"
+    screenshot_period_hours: int = 1
+    screenshot_width: int = Field(default=1280, ge=320, le=3840)
+    screenshot_height: int = Field(default=720, ge=240, le=2160)
+    archive_html_enabled: bool = False
+    archive_html_dir: str = "data/html"
+    archive_html_period_hours: int = 1
     threshold: float = Field(gt=0)
     warning_distance: float = Field(gt=0)
     blue_distance: float = Field(default=350.0, gt=0)
@@ -388,6 +397,17 @@ def api_history_trajectory(
     }
 
 
+@app.get("/api/history/context/{poll_id}")
+def api_history_context(
+    poll_id: int, source: str = Query(default="real", pattern="^(real|fake)$")
+) -> dict[str, Any]:
+    """Возвращает соседние объекты из того же опроса."""
+    result = db.get_poll_map_context(poll_id, source)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Опрос не найден.")
+    return result
+
+
 @app.get("/api/history/static-zones/{static_index}")
 def api_history_static_zones(
     static_index: int,
@@ -397,6 +417,7 @@ def api_history_static_zones(
     time_to: str = Query(default="23:59", pattern=r"^\d{2}:\d{2}$"),
     source: str = Query(default="real", pattern="^(real|fake)$"),
     limit: int = Query(default=1_500, ge=1, le=20_000),
+    include_outside: bool = False,
 ) -> dict[str, Any]:
     """Возвращает траектории объектов, входивших в зоны выбранной точки."""
     start, end = _history_bounds(date_from, date_to, time_from, time_to)
@@ -413,6 +434,7 @@ def api_history_static_zones(
         data_source=source,
         limit=limit + 1,
         coordinate_precision=coordinate_precision,
+        include_outside=include_outside,
     )
     if result is None:
         configured = next(
@@ -453,6 +475,7 @@ def api_history_static_zones(
                 "entered_alert": False,
                 "entered_warning": False,
                 "entered_blue": False,
+                "entered_zone": False,
             },
         )
         item["points"].append(point)
@@ -461,6 +484,7 @@ def api_history_static_zones(
             item["entered_warning"] or point["status"] == "warning"
         )
         item["entered_blue"] = item["entered_blue"] or point["status"] == "blue"
+        item["entered_zone"] = item["entered_zone"] or point["status"] != "outside"
     return {
         **result,
         "trajectories": list(grouped.values()),
@@ -578,6 +602,10 @@ def _history_search_scope(
     """Ищет введённый номер объекта по всем стационарным точкам."""
     query = dynamic_query.strip()
     number = query.removeprefix("№").strip()
+    if number.lower().startswith("id"):
+        identity = number[2:].lstrip(" :#-№")
+        if identity.isdecimal():
+            return None, f"-{identity}"
     if number.isdecimal():
         return None, number
     return static_index, query

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import threading
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -39,6 +40,12 @@ def run() -> None:
             )
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
+            tile = base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lXcAAAAASUVORK5CYII="
+            )
+            page.route("https://tile.openstreetmap.org/**", lambda route: route.fulfill(
+                body=tile, content_type="image/png"
+            ))
 
             def api(route):
                 path = route.request.url.split("/api/", 1)[1].split("?", 1)[0]
