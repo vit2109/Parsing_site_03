@@ -15,6 +15,27 @@ if TYPE_CHECKING:
     from playwright.sync_api import Browser, Page, Playwright
 
 
+_VISIBLE_NUMBERS_SCRIPT = """selector => {
+  const map = document.querySelector(selector);
+  if (!map) return 0;
+  const box = map.getBoundingClientRect();
+  return [...map.querySelectorAll('.leaflet-marker-icon.map-incident-operator-number')]
+    .filter(el => {
+      if (!/^№?\\s*\\d+$/.test(el.textContent.trim())) return false;
+      for (let node = el; node && node !== map; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (style.display === 'none' || style.visibility === 'hidden' ||
+            Number(style.opacity) === 0) return false;
+      }
+      const rect = el.getBoundingClientRect();
+      if (!rect.width || !rect.height) return false;
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+    }).length;
+}"""
+
+
 class BrowserNotConnectedError(RuntimeError):
     """Не удалось подключиться к уже запущенному браузеру по CDP."""
 
@@ -39,6 +60,21 @@ class BrowserSession:
         self._number_cache: dict[int, tuple[int, float, float, float]] = {}
         self._cache_day = datetime.now().astimezone().date()
         self._cache_url = ""
+        self._numbered_size: tuple[int, int] | None = None
+        self._numbered_image: tuple[bytes, float] | None = None
+        self.numbered_capture_error = ""
+
+    def prepare_numbered_capture(self, size: tuple[int, int] | None) -> None:
+        """Запрашивает снимок только для периода, в котором его ещё нет."""
+        self._numbered_size = size
+        self._numbered_image = None
+        self.numbered_capture_error = ""
+
+    def take_numbered_image(self) -> tuple[bytes, float] | None:
+        """Возвращает снимок с видимыми номерами, если сканирование его получило."""
+        image = self._numbered_image
+        self._numbered_image = None
+        return image
 
     def __enter__(self) -> Self:
         """Открывает CDP-сессию для использования класса как контекстного менеджера."""
@@ -108,7 +144,86 @@ class BrowserSession:
             title=page.title(),
             html="",
         )
-        return snapshot, extract_scene_with_mouse_scan(page, tracking, self._number_cache)
+        raw = extract_scene_with_mouse_scan(
+            page, tracking, self._number_cache,
+            on_numbered_view=(
+                lambda scene: self._capture_mouse_numbered(
+                    page, scene, tracking.map_container_selector
+                )
+            ) if self._numbered_size else None,
+        )
+        best = (raw.get("scan") or {}).get("best_numbered_view")
+        if self._numbered_size and self._numbered_image is None and best:
+            self._capture_best_numbered_view(page, tracking, best)
+        return snapshot, raw
+
+    def _capture_mouse_numbered(self, page: Page, scene: dict, selector: str) -> bool:
+        """Делает снимок прямо во время приближения мышью."""
+        if self._numbered_size is None or self._numbered_image is not None:
+            return self._numbered_image is not None
+        zoom = scene.get("map_zoom")
+        if zoom is None:
+            return False
+        try:
+            if not page.evaluate(_VISIBLE_NUMBERS_SCRIPT, selector):
+                return False
+            self._numbered_image = (
+                self.capture_map_image(
+                    selector, *self._numbered_size
+                ),
+                float(zoom),
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001 — ошибка архива не прерывает обход.
+            self.numbered_capture_error = str(exc)
+            return False
+
+    def _capture_best_numbered_view(self, page: Page, tracking: TrackingConfig, best: dict) -> None:
+        """Возвращается к подписанному виду Leaflet, снимает карту и восстанавливает центр."""
+        if self._numbered_size is None:
+            return
+        original = None
+        try:
+            original = page.evaluate(
+                """view => {
+                  const map = window.__parsingSiteMap;
+                  if (!map || typeof map.setView !== 'function') return null;
+                  const center = map.getCenter();
+                  const original = {lat: center.lat, lng: center.lng, zoom: map.getZoom()};
+                  map.setView([view.lat, view.lng], view.zoom, {animate: false});
+                  return original;
+                }""",
+                best,
+            )
+            if original is None:
+                return
+            for _ in range(2):
+                page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
+                visible = page.evaluate(
+                    _VISIBLE_NUMBERS_SCRIPT, tracking.map_container_selector
+                )
+                if visible:
+                    self._numbered_image = (
+                        self.capture_map_image(
+                            tracking.map_container_selector, *self._numbered_size
+                        ),
+                        float(best["zoom"]),
+                    )
+                    break
+        except Exception as exc:  # noqa: BLE001 — ошибка архива не прерывает обход.
+            self.numbered_capture_error = str(exc)
+        finally:
+            if original is not None:
+                try:
+                    page.evaluate(
+                        """view => window.__parsingSiteMap.setView(
+                          [view.lat, view.lng], view.zoom, {animate: false}
+                        )""",
+                        original,
+                    )
+                    page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
+                except Exception as exc:  # noqa: BLE001 — исходный вид важнее снимка.
+                    self.numbered_capture_error = f"Не удалось восстановить карту: {exc}"
 
     def capture_map_image(self, selector: str, max_width: int, max_height: int) -> bytes:
         """Снимок контейнера карты в JPEG, вписанный в заданный размер."""

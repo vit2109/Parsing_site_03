@@ -106,6 +106,29 @@ class LeafletScanTest(unittest.TestCase):
         self.assertGreater(page.mouse.zoom_in_calls, 0)
         self.assertEqual(page.waits.count(1500), len(page.waits))
 
+    def test_mouse_capture_waits_for_visible_numbers_even_with_cache(self) -> None:
+        page = _FakePage()
+        cache: dict[int, tuple[int, float, float, float]] = {}
+        seen: list[tuple[int, list[int]]] = []
+
+        def capture(scene: dict) -> bool:
+            seen.append((page.zoom, [item["index"] for item in scene["dynamics"]]))
+            return True
+
+        with patch(
+            "parsing_site.tracking.extract_scene_from_page",
+            side_effect=lambda _p, _t, **_kw: page.scene(),
+        ):
+            extract_scene_with_mouse_scan(page, TrackingConfig(), cache)
+            result = extract_scene_with_mouse_scan(
+                page, TrackingConfig(), cache, on_numbered_view=capture
+            )
+        self.assertEqual(result["scan"]["status"], "complete")
+        self.assertEqual(len(seen), 1)
+        self.assertGreaterEqual(seen[0][0], 7)
+        self.assertTrue(any(number > 0 for number in seen[0][1]))
+        self.assertEqual(page.zoom, 5)
+
     def test_browser_wheel_finds_marker_outside_initial_html(self) -> None:
         page = _FakePage(offscreen=True, zoom=7)
         self.assertEqual([item["index"] for item in page.scene()["dynamics"]], [101, 102, 103])

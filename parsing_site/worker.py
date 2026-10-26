@@ -8,7 +8,7 @@ from time import monotonic
 from typing import Any
 
 from parsing_site.browser import BrowserNotConnectedError, BrowserSession
-from parsing_site.capture_archive import capture_due
+from parsing_site.capture_archive import capture_due, screenshot_due
 from parsing_site.config import load_config
 from parsing_site.db import Database
 from parsing_site.settings_store import SettingsStore
@@ -156,6 +156,11 @@ class ParseWorker:
                             break
                         cfg = settings.to_app_config(load_config())
                         interval = max(0.4, settings.interval_seconds)
+                        capture_started = datetime.now().astimezone()
+                        session.prepare_numbered_capture(
+                            (settings.screenshot_width, settings.screenshot_height)
+                            if screenshot_due(settings, capture_started) else None
+                        )
                         snapshot = capture_snapshot(session, cfg.tracking)
                         current_day = datetime.now().astimezone().date().isoformat()
                         if current_day != previous_day:
@@ -166,7 +171,8 @@ class ParseWorker:
                         poll_id = self._db.save_snapshot(snapshot, previous)
                         self._table_history.save_snapshot(snapshot)
                         saved, archive_errors = capture_due(
-                            session, settings, snapshot.map_zoom
+                            session, settings, snapshot.map_zoom,
+                            captured_at=capture_started,
                         )
                         for path in saved:
                             self._db.add_log("INFO", "archive", f"Сохранён файл: {path}")

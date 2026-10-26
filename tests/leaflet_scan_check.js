@@ -108,7 +108,7 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
   const result = await extract({
     mode: 'latlng', mapContainer: '.leaflet-container',
     dynamic: '.leaflet-marker-icon.map-incident', static: '.static',
-    staticObjects: [], scanNumbers: true,
+    staticObjects: [], scanNumbers: true, captureNumbered: true,
   });
   if (!mapDiscoverable) {
     assert.equal(result.scan.status, 'no_leaflet_instance');
@@ -120,6 +120,8 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     points.map((point) => point.number));
   assert.equal(result.unnumbered_dynamics, 0);
   assert.equal(result.scan.status, 'complete');
+  assert.ok(result.scan.best_numbered_view?.count > 0);
+  assert.ok(result.scan.best_numbered_view.zoom >= 8);
   assert.deepEqual(map.center, {lat: 50, lng: 0});
   assert.equal(map.zoom, initialZoom);
   assert.ok(minimumVisitedZoom >= 4, 'overview should stay at a scale used by the selected tab');

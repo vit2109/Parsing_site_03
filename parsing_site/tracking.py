@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any, Literal
@@ -156,6 +157,7 @@ async (opts) => {
   };
 
   const map = findLeafletMap(mapEl);
+  window.__parsingSiteMap = map || null;
   const proxyEl = mapEl && mapEl.querySelector(".leaflet-proxy");
   const proxy = proxyEl ? parseTransform(proxyEl.getAttribute("style") || "") : null;
   const inferredZoom = inferZoom(proxy);
@@ -430,6 +432,22 @@ async (opts) => {
     const targetZoom = Math.min(
       dynamics.some((item) => item.index > 0) ? zoom : zoom + 2, maxZoom
     );
+    const recordNumberedView = () => {
+      if (!opts.captureNumbered) return;
+      const numbered = collect(opts.dynamic, "D", true).filter((item) => {
+        if (item.index <= 0 || !Number.isFinite(item.lat) || !Number.isFinite(item.lng)) return false;
+        const point = map.latLngToContainerPoint([item.lat, item.lng]);
+        return point && point.x >= 0 && point.x <= mapRect.width &&
+          point.y >= 0 && point.y <= mapRect.height;
+      });
+      if (numbered.length > (scan.best_numbered_view?.count || 0)) {
+        const current = map.getCenter();
+        scan.best_numbered_view = {
+          lat: current.lat, lng: current.lng, zoom: map.getZoom(), count: numbered.length,
+        };
+      }
+    };
+    recordNumberedView();
     const moveTo = async (lat, lng, z) => {
       scan.views++;
       const zoomingIn = z > map.getZoom();
@@ -450,6 +468,7 @@ async (opts) => {
       });
       // Vue может перерисовать маркеры после moveend и ответа API.
       await new Promise((resolve) => setTimeout(resolve, scanWaitMs));
+      recordNumberedView();
     };
     const matchVisible = () => {
       const visible = collect(opts.dynamic, "D", true).filter((item) => item.index > 0);
@@ -731,6 +750,7 @@ class TrackingSnapshot:
 def extract_scene_from_page(
     page: Any, tracking: TrackingConfig, *, scan_numbers: bool = True,
     known_numbers: dict[int, tuple[int, float, float]] | None = None,
+    capture_numbered: bool = False,
 ) -> dict[str, Any]:
     """Снимает маркеры и вид карты из живой вкладки (JS _EXTRACT_SCRIPT)."""
     return page.evaluate(
@@ -741,6 +761,7 @@ def extract_scene_from_page(
             "mode": tracking.coordinate_mode,
             "mapContainer": tracking.map_container_selector,
             "scanNumbers": scan_numbers,
+            "captureNumbered": capture_numbered,
             "scanWaitMs": round(tracking.scan_wait_seconds * 1000),
             "knownNumbers": {
                 str(identity): {"number": number, "lat": lat, "lng": lng}
@@ -765,10 +786,13 @@ def extract_scene_with_mouse_scan(
     page: Any,
     tracking: TrackingConfig,
     number_cache: dict[int, tuple[int, float, float, float]] | None = None,
+    on_numbered_view: Callable[[dict[str, Any]], bool] | None = None,
 ) -> dict[str, Any]:
     """Обходит карту колесом браузера, если Vue не отдаёт экземпляр L.Map."""
     raw = extract_scene_from_page(page, tracking, scan_numbers=False)
-    _apply_number_cache(raw, number_cache)
+    initial_labels_visible = any(item.get("index", 0) > 0 for item in raw.get("dynamics") or [])
+    if on_numbered_view is None:
+        _apply_number_cache(raw, number_cache)
     scan = raw.get("scan") or {}
     if scan.get("status") == "ready":
         now = monotonic()
@@ -778,12 +802,14 @@ def extract_scene_with_mouse_scan(
             if now - captured_at <= 60
         }
         raw = extract_scene_from_page(
-            page, tracking, scan_numbers=True, known_numbers=recent_numbers
+            page, tracking, scan_numbers=True, known_numbers=recent_numbers,
+            capture_numbered=on_numbered_view is not None,
         )
         _apply_number_cache(raw, number_cache)
         _remember_numbers(raw, number_cache)
         return raw
     if scan.get("status") != "no_leaflet_instance":
+        _apply_number_cache(raw, number_cache)
         _remember_numbers(raw, number_cache)
         return raw
     base_map = raw.get("map") or {}
@@ -792,10 +818,33 @@ def extract_scene_with_mouse_scan(
     if base_view is None or not base_view.can_unproject or base_zoom is None:
         scan["status"] = "mouse_scan_unavailable"
         raw["scan"] = scan
+        _apply_number_cache(raw, number_cache)
         return raw
     original_lat = base_view.center_lat
     original_lng = base_view.center_lng
     scan_wait_ms = round(tracking.scan_wait_seconds * 1000)
+    captured_numbered = False
+
+    def record_numbered(scene: dict[str, Any]) -> None:
+        nonlocal captured_numbered
+        if captured_numbered or on_numbered_view is None:
+            return
+        view = map_view_from_raw(scene.get("map"))
+        if view is None:
+            return
+        for item in scene.get("dynamics") or []:
+            if item.get("index", 0) <= 0:
+                continue
+            lat, lng = _maybe_float(item.get("lat")), _maybe_float(item.get("lng"))
+            point = latlng_to_container(lat, lng, view) \
+                if lat is not None and lng is not None else None
+            if point is not None and 0 <= point[0] <= view.width \
+                    and 0 <= point[1] <= view.height:
+                captured_numbered = on_numbered_view(scene)
+                break
+
+    if initial_labels_visible:
+        record_numbered(raw)
 
     # Даже если все видимые объекты уже подписаны, за границей исходного окна
     # могут быть ещё не созданные сайтом маркеры. Сначала отдаляем карту.
@@ -816,6 +865,7 @@ def extract_scene_with_mouse_scan(
         page.mouse.wheel(0, delta)
         page.wait_for_timeout(scan_wait_ms)
         candidate = extract_scene_from_page(page, tracking, scan_numbers=False)
+        record_numbered(candidate)
         current_zoom = _maybe_float(candidate.get("map_zoom"))
         if current_zoom is None or (current_zoom - previous_zoom) * delta >= 0:
             break
@@ -843,6 +893,7 @@ def extract_scene_with_mouse_scan(
                 if column or row:
                     overview = _pan_mouse_to(page, tracking, overview, *position)
                     overview_views += 1
+                    record_numbered(overview)
                 added = _merge_overview_scene(raw, overview, base_view)
                 if (column or row) and not added:
                     continue
@@ -902,6 +953,7 @@ def extract_scene_with_mouse_scan(
                 page.mouse.wheel(0, -120)
                 page.wait_for_timeout(scan_wait_ms)
                 current = extract_scene_from_page(page, tracking, scan_numbers=False)
+                record_numbered(current)
                 current_zoom = _maybe_float(current.get("map_zoom"))
                 if current_zoom is None or previous_zoom is None or current_zoom <= previous_zoom:
                     break
@@ -913,6 +965,7 @@ def extract_scene_with_mouse_scan(
                 page.mouse.wheel(0, 120)
                 page.wait_for_timeout(scan_wait_ms)
                 current = extract_scene_from_page(page, tracking, scan_numbers=False)
+                record_numbered(current)
             overview = current
             if callable(getattr(page.mouse, "down", None)):
                 overview = _pan_mouse_to(
@@ -923,12 +976,14 @@ def extract_scene_with_mouse_scan(
         page.mouse.wheel(0, -delta)
         page.wait_for_timeout(scan_wait_ms)
         overview = extract_scene_from_page(page, tracking, scan_numbers=False)
+        record_numbered(overview)
     restored_zoom = _maybe_float(overview.get("map_zoom"))
     if restored_zoom is None or abs(restored_zoom - base_zoom) > 0.01:
         scan["status"] = "mouse_restore_failed"
         raw["scan"] = scan
         return raw
-    _apply_number_cache(raw, number_cache)
+    if on_numbered_view is None or captured_numbered:
+        _apply_number_cache(raw, number_cache)
     if not raw.get("unnumbered_dynamics"):
         if callable(getattr(page.mouse, "down", None)) and original_lat is not None \
                 and original_lng is not None:
@@ -957,6 +1012,7 @@ def extract_scene_with_mouse_scan(
         page.mouse.wheel(0, delta)
         page.wait_for_timeout(scan_wait_ms)
         scene = extract_scene_from_page(page, tracking, scan_numbers=False)
+        record_numbered(scene)
         zoom_after = _maybe_float(scene.get("map_zoom"))
         if delta < 0 and zoom_after is not None and zoom_after >= base_zoom + 2:
             for _ in range(3):
@@ -964,6 +1020,7 @@ def extract_scene_with_mouse_scan(
                     break
                 page.wait_for_timeout(scan_wait_ms)
                 scene = extract_scene_from_page(page, tracking, scan_numbers=False)
+                record_numbered(scene)
         return scene
 
     for target in targets:
@@ -1043,6 +1100,7 @@ def extract_scene_with_mouse_scan(
     scan["views"] = overview_views + views
     scan["overview_count"] = len(raw.get("dynamics") or [])
     raw["scan"] = scan
+    _apply_number_cache(raw, number_cache)
     raw["unnumbered_dynamics"] = sum(item["index"] < 0 for item in raw["dynamics"])
     _remember_numbers(raw, number_cache)
     return raw
