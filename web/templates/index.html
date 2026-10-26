@@ -151,14 +151,14 @@
           </label>
           <label class="checkbox">
             <input name="screenshot_enabled" type="checkbox" {% if settings.screenshot_enabled %}checked{% endif %} />
-            Сохранять снимки карты после обхода
+            Сохранять снимок карты при каждом обходе, когда видны номера
           </label>
           <label>
             Каталог снимков карты
             <input name="screenshot_dir" type="text" value="{{ settings.screenshot_dir }}" />
           </label>
           <label>
-            Период снимков
+            Период папок снимков
             <select name="screenshot_period_hours">
               {% for hours in [1, 3, 6, 12, 24] %}
               <option value="{{ hours }}" {% if settings.screenshot_period_hours == hours %}selected{% endif %}>{{ hours }} ч</option>
@@ -175,14 +175,14 @@
           </label>
           <label class="checkbox">
             <input name="archive_html_enabled" type="checkbox" {% if settings.archive_html_enabled %}checked{% endif %} />
-            Сохранять HTML страницы
+            Сохранять HTML при каждом обходе, когда видны номера
           </label>
           <label>
             Каталог HTML-страниц
             <input name="archive_html_dir" type="text" value="{{ settings.archive_html_dir }}" />
           </label>
           <label>
-            Период HTML-страниц
+            Период папок HTML-страниц
             <select name="archive_html_period_hours">
               {% for hours in [1, 3, 6, 12, 24] %}
               <option value="{{ hours }}" {% if settings.archive_html_period_hours == hours %}selected{% endif %}>{{ hours }} ч</option>

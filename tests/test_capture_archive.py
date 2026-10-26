@@ -6,8 +6,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from parsing_site.browser import BrowserSession
-from parsing_site.capture_archive import capture_due, period_path, screenshot_due
+from parsing_site.browser import BrowserSession, NumberedCapture
+from parsing_site.capture_archive import capture_due, period_path
 from parsing_site.config import BrowserConfig, TrackingConfig
 from parsing_site.db import Database
 from parsing_site.settings_store import SettingsStore, from_dict, validate_settings
@@ -15,25 +15,14 @@ from parsing_site.settings_store import SettingsStore, from_dict, validate_setti
 
 class FakeSession:
     def __init__(self) -> None:
-        self.images = 0
-        self.pages = 0
-        self.image_args: tuple[str, int, int] | None = None
-        self.numbered_image: tuple[bytes, float] | None = None
+        self.numbered_capture: NumberedCapture | None = None
         self.numbered_capture_error = ""
+        self.numbered_html_error = ""
 
-    def capture_map_image(self, selector: str, width: int, height: int) -> bytes:
-        self.images += 1
-        self.image_args = (selector, width, height)
-        return b"jpeg image"
-
-    def capture_html(self) -> str:
-        self.pages += 1
-        return "<html>map</html>"
-
-    def take_numbered_image(self) -> tuple[bytes, float] | None:
-        image = self.numbered_image
-        self.numbered_image = None
-        return image
+    def take_numbered_capture(self) -> NumberedCapture | None:
+        capture = self.numbered_capture
+        self.numbered_capture = None
+        return capture
 
 
 class CaptureArchiveTest(unittest.TestCase):
@@ -56,7 +45,8 @@ class CaptureArchiveTest(unittest.TestCase):
             self.assertTrue(session._capture_mouse_numbered(
                 page, {"map_zoom": 7}, ".leaflet-container"
             ))
-        self.assertEqual(session.take_numbered_image(), (b"jpeg", 7))
+        capture = session.take_numbered_capture()
+        self.assertEqual((capture.image, capture.zoom), (b"jpeg", 7))
 
     def test_leaflet_image_waits_for_labels_and_restores_view(self) -> None:
         class Page:
@@ -65,6 +55,7 @@ class CaptureArchiveTest(unittest.TestCase):
                 self.labels_after = labels_after
                 self.checks = 0
                 self.waits: list[int] = []
+                self.html_zoom: int | None = None
 
             def evaluate(self, script: str, argument: object) -> object:
                 if "const original =" in script:
@@ -79,8 +70,12 @@ class CaptureArchiveTest(unittest.TestCase):
             def wait_for_timeout(self, milliseconds: int) -> None:
                 self.waits.append(milliseconds)
 
+            def content(self) -> str:
+                self.html_zoom = self.zoom
+                return f"<html>zoom-{self.zoom}</html>"
+
         session = BrowserSession(BrowserConfig())
-        session.prepare_numbered_capture((900, 600))
+        session.prepare_numbered_capture((900, 600), html_enabled=True)
         page = Page(labels_after=2)
 
         def screenshot(_selector: str, _width: int, _height: int) -> bytes:
@@ -93,18 +88,21 @@ class CaptureArchiveTest(unittest.TestCase):
                 page, TrackingConfig(), {"lat": 51, "lng": 31, "zoom": 7, "count": 3}
             )
         self.assertEqual(image.call_count, 1)
-        self.assertEqual(session.take_numbered_image(), (b"jpeg", 7))
+        capture = session.take_numbered_capture()
+        self.assertEqual((capture.image, capture.zoom), (b"jpeg", 7))
+        self.assertEqual(capture.html, "<html>zoom-7</html>")
+        self.assertEqual(page.html_zoom, 7)
         self.assertEqual(page.zoom, 4)
         self.assertEqual(page.waits, [1500, 1500, 1500])
 
-        session.prepare_numbered_capture((900, 600))
+        session.prepare_numbered_capture((900, 600), html_enabled=True)
         page = Page(labels_after=3)
         with patch.object(session, "capture_map_image") as image:
             session._capture_best_numbered_view(
                 page, TrackingConfig(), {"lat": 51, "lng": 31, "zoom": 7, "count": 3}
             )
         image.assert_not_called()
-        self.assertIsNone(session.take_numbered_image())
+        self.assertIsNone(session.take_numbered_capture())
         self.assertEqual(page.zoom, 4)
 
     def test_period_buckets_and_saved_preferences(self) -> None:
@@ -126,43 +124,99 @@ class CaptureArchiveTest(unittest.TestCase):
             db.close()
             session = FakeSession()
             first = datetime(2026, 10, 25, 7, 15, 30, tzinfo=UTC)
-            self.assertTrue(screenshot_due(settings, first))
-            session.numbered_image = (session.capture_map_image(
-                settings.map_container_selector, 900, 600
-            ), 7)
-            saved, errors = capture_due(session, settings, 4, captured_at=first)
+            session.numbered_capture = NumberedCapture(
+                first, 7, b"jpeg-1", "<html>zoom-7</html>"
+            )
+            saved, errors = capture_due(session, settings)
             self.assertFalse(errors)
             self.assertEqual(len(saved), 2)
-            self.assertEqual(session.image_args, (settings.map_container_selector, 900, 600))
             self.assertEqual(
                 period_path(settings.screenshot_dir, 3, first).name, "06-09"
             )
             self.assertIn("zoom-7", saved[0].name)
-            self.assertIn("zoom-4", saved[1].name)
-            self.assertFalse(screenshot_due(settings, first))
-            self.assertEqual(saved[1].read_text(encoding="utf-8"), "<html>map</html>")
-            repeated, errors = capture_due(
-                session, settings, 4,
-                captured_at=datetime(2026, 10, 25, 8, 30, tzinfo=UTC),
+            self.assertIn("zoom-7", saved[1].name)
+            self.assertEqual(saved[1].read_text(encoding="utf-8"), "<html>zoom-7</html>")
+            second = datetime(2026, 10, 25, 8, 30, tzinfo=UTC)
+            session.numbered_capture = NumberedCapture(
+                second, 8, b"jpeg-2", "<html>zoom-8</html>"
             )
-            self.assertEqual((repeated, errors), ([], []))
-            self.assertEqual((session.images, session.pages), (1, 1))
-            later, errors = capture_due(
-                session, settings, 5,
-                captured_at=datetime(2026, 10, 25, 9, 1, tzinfo=UTC),
-            )
+            repeated, errors = capture_due(session, settings)
             self.assertFalse(errors)
-            self.assertEqual(later, [])  # Без видимого номера пустой снимок не пишем.
-            self.assertTrue(screenshot_due(settings, datetime(2026, 10, 25, 9, 1, tzinfo=UTC)))
-            session.numbered_image = (b"numbered view", 8)
-            later, errors = capture_due(
-                session, settings, 5,
-                captured_at=datetime(2026, 10, 25, 9, 2, tzinfo=UTC),
+            self.assertEqual(len(repeated), 2)
+            self.assertEqual(repeated[0].parent, saved[0].parent)
+            self.assertEqual(repeated[1].parent, saved[1].parent)
+            self.assertEqual(repeated[0].read_bytes(), b"jpeg-2")
+            self.assertEqual(repeated[1].read_text(encoding="utf-8"), "<html>zoom-8</html>")
+            self.assertEqual(capture_due(session, settings), ([], []))
+            session.numbered_capture = NumberedCapture(
+                second, 8, b"jpeg-3", "<html>same-time</html>"
             )
+            duplicate_time, errors = capture_due(session, settings)
             self.assertFalse(errors)
-            self.assertEqual(len(later), 1)
-            self.assertIn("zoom-8", later[0].name)
-            self.assertEqual((session.images, session.pages), (1, 1))
+            self.assertEqual(len(duplicate_time), 2)
+            self.assertNotEqual(duplicate_time[0], repeated[0])
+            self.assertNotEqual(duplicate_time[1], repeated[1])
+            later_at = datetime(2026, 10, 25, 9, 2, tzinfo=UTC)
+            session.numbered_capture = NumberedCapture(
+                later_at, 9, b"jpeg-4", "<html>zoom-9</html>"
+            )
+            later, errors = capture_due(session, settings)
+            self.assertFalse(errors)
+            self.assertEqual(len(later), 2)
+            self.assertNotEqual(later[0].parent, saved[0].parent)
+            self.assertEqual(later[1].parent, saved[1].parent)
+
+    def test_html_only_capture_uses_numbered_view(self) -> None:
+        session = BrowserSession(BrowserConfig())
+        session.prepare_numbered_capture(None, html_enabled=True)
+
+        class Page:
+            def evaluate(self, _script: str, _selector: str) -> int:
+                return 1
+
+            def content(self) -> str:
+                return "<html>numbered</html>"
+
+        with patch.object(session, "capture_map_image") as image:
+            self.assertTrue(session._capture_mouse_numbered(
+                Page(), {"map_zoom": 7}, ".leaflet-container"
+            ))
+        image.assert_not_called()
+        capture = session.take_numbered_capture()
+        self.assertIsNone(capture.image)
+        self.assertEqual(capture.html, "<html>numbered</html>")
+
+    def test_html_only_archive_is_written_each_scan(self) -> None:
+        with TemporaryDirectory() as directory:
+            settings = validate_settings(from_dict({
+                "screenshot_enabled": False,
+                "archive_html_enabled": True,
+                "archive_html_dir": directory,
+            }))
+            session = FakeSession()
+            captured_at = datetime(2026, 10, 25, 7, 15, tzinfo=UTC)
+            for number in (1, 2):
+                session.numbered_capture = NumberedCapture(
+                    captured_at, 7, html=f"<html>{number}</html>"
+                )
+                saved, errors = capture_due(session, settings)
+                self.assertFalse(errors)
+                self.assertEqual(len(saved), 1)
+                self.assertEqual(saved[0].read_text(encoding="utf-8"),
+                                 f"<html>{number}</html>")
+            self.assertEqual(len(list(Path(directory).rglob("page_*.html"))), 2)
+
+    def test_archive_reports_capture_error_without_a_view(self) -> None:
+        settings = validate_settings(from_dict({
+            "screenshot_enabled": True,
+            "archive_html_enabled": True,
+        }))
+        session = FakeSession()
+        session.numbered_capture_error = "снимок недоступен"
+        session.numbered_html_error = "HTML недоступен"
+        self.assertEqual(capture_due(session, settings), (
+            [], ["map: снимок недоступен", "page: HTML недоступен"]
+        ))
 
     def test_archive_settings_reject_unsupported_period_and_size(self) -> None:
         with self.assertRaises(ValueError):

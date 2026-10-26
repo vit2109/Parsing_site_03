@@ -49,6 +49,16 @@ class PageSnapshot:
     html: str
 
 
+@dataclass(slots=True)
+class NumberedCapture:
+    """Архивные данные одного вида карты с видимыми номерами."""
+
+    captured_at: datetime
+    zoom: float
+    image: bytes | None = None
+    html: str | None = None
+
+
 class BrowserSession:
     """Подключение к уже открытому Chrome/Edge через Chrome DevTools Protocol."""
 
@@ -61,20 +71,26 @@ class BrowserSession:
         self._cache_day = datetime.now().astimezone().date()
         self._cache_url = ""
         self._numbered_size: tuple[int, int] | None = None
-        self._numbered_image: tuple[bytes, float] | None = None
+        self._numbered_html_enabled = False
+        self._numbered_capture: NumberedCapture | None = None
         self.numbered_capture_error = ""
+        self.numbered_html_error = ""
 
-    def prepare_numbered_capture(self, size: tuple[int, int] | None) -> None:
-        """Запрашивает снимок только для периода, в котором его ещё нет."""
+    def prepare_numbered_capture(
+        self, size: tuple[int, int] | None, html_enabled: bool = False
+    ) -> None:
+        """Готовит включённые архивы для очередного обхода карты."""
         self._numbered_size = size
-        self._numbered_image = None
+        self._numbered_html_enabled = html_enabled
+        self._numbered_capture = None
         self.numbered_capture_error = ""
+        self.numbered_html_error = ""
 
-    def take_numbered_image(self) -> tuple[bytes, float] | None:
-        """Возвращает снимок с видимыми номерами, если сканирование его получило."""
-        image = self._numbered_image
-        self._numbered_image = None
-        return image
+    def take_numbered_capture(self) -> NumberedCapture | None:
+        """Возвращает архивный вид, полученный во время обхода."""
+        capture = self._numbered_capture
+        self._numbered_capture = None
+        return capture
 
     def __enter__(self) -> Self:
         """Открывает CDP-сессию для использования класса как контекстного менеджера."""
@@ -150,37 +166,51 @@ class BrowserSession:
                 lambda scene: self._capture_mouse_numbered(
                     page, scene, tracking.map_container_selector
                 )
-            ) if self._numbered_size else None,
+            ) if self._numbered_size or self._numbered_html_enabled else None,
         )
         best = (raw.get("scan") or {}).get("best_numbered_view")
-        if self._numbered_size and self._numbered_image is None and best:
+        if (self._numbered_size or self._numbered_html_enabled) \
+                and self._numbered_capture is None and best:
             self._capture_best_numbered_view(page, tracking, best)
         return snapshot, raw
 
     def _capture_mouse_numbered(self, page: Page, scene: dict, selector: str) -> bool:
-        """Делает снимок прямо во время приближения мышью."""
-        if self._numbered_size is None or self._numbered_image is not None:
-            return self._numbered_image is not None
+        """Снимает архив прямо во время приближения мышью."""
+        if self._numbered_capture is not None:
+            return True
         zoom = scene.get("map_zoom")
         if zoom is None:
             return False
+        return self._capture_visible_view(page, selector, float(zoom))
+
+    def _capture_visible_view(self, page: Page, selector: str, zoom: float) -> bool:
+        """Берёт HTML и JPEG только при наличии видимой подписи в DOM."""
         try:
             if not page.evaluate(_VISIBLE_NUMBERS_SCRIPT, selector):
                 return False
-            self._numbered_image = (
-                self.capture_map_image(
-                    selector, *self._numbered_size
-                ),
-                float(zoom),
-            )
-            return True
         except Exception as exc:  # noqa: BLE001 — ошибка архива не прерывает обход.
-            self.numbered_capture_error = str(exc)
+            if self._numbered_size is not None:
+                self.numbered_capture_error = str(exc)
+            if self._numbered_html_enabled:
+                self.numbered_html_error = str(exc)
             return False
+        capture = NumberedCapture(datetime.now().astimezone(), zoom)
+        self._numbered_capture = capture
+        if self._numbered_html_enabled:
+            try:
+                capture.html = page.content()
+            except Exception as exc:  # noqa: BLE001 — один архив не блокирует другой.
+                self.numbered_html_error = str(exc)
+        if self._numbered_size is not None:
+            try:
+                capture.image = self.capture_map_image(selector, *self._numbered_size)
+            except Exception as exc:  # noqa: BLE001 — один архив не блокирует другой.
+                self.numbered_capture_error = str(exc)
+        return True
 
     def _capture_best_numbered_view(self, page: Page, tracking: TrackingConfig, best: dict) -> None:
         """Возвращается к подписанному виду Leaflet, снимает карту и восстанавливает центр."""
-        if self._numbered_size is None:
+        if self._numbered_size is None and not self._numbered_html_enabled:
             return
         original = None
         try:
@@ -199,16 +229,9 @@ class BrowserSession:
                 return
             for _ in range(2):
                 page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
-                visible = page.evaluate(
-                    _VISIBLE_NUMBERS_SCRIPT, tracking.map_container_selector
-                )
-                if visible:
-                    self._numbered_image = (
-                        self.capture_map_image(
-                            tracking.map_container_selector, *self._numbered_size
-                        ),
-                        float(best["zoom"]),
-                    )
+                if self._capture_visible_view(
+                    page, tracking.map_container_selector, float(best["zoom"])
+                ):
                     break
         except Exception as exc:  # noqa: BLE001 — ошибка архива не прерывает обход.
             self.numbered_capture_error = str(exc)
