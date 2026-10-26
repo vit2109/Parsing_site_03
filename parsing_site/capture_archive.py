@@ -19,36 +19,34 @@ def period_path(directory: str, hours: int, captured_at: datetime) -> Path:
     return root / captured_at.strftime("%Y-%m-%d") / f"{start_hour:02d}-{start_hour + hours:02d}"
 
 
-def capture_due(session: Any, settings: RuntimeSettings) -> tuple[list[Path], list[str]]:
-    """Сохраняет каждый включённый архив из подписанного вида текущего обхода."""
-    capture = session.take_numbered_capture()
-    if capture is None:
-        errors = []
-        if settings.screenshot_enabled and session.numbered_capture_error:
-            errors.append(f"map: {session.numbered_capture_error}")
-        if settings.archive_html_enabled and session.numbered_html_error:
-            errors.append(f"page: {session.numbered_html_error}")
-        return [], errors
-    timestamp = capture.captured_at.strftime("%Y-%m-%d_%H-%M-%S-%f")
-    zoom_label = f"{capture.zoom:g}".replace(".", "_")
-    saved: list[Path] = []
-    errors: list[str] = []
-    jobs = (
-        (settings.screenshot_enabled, settings.screenshot_dir,
-         settings.screenshot_period_hours, "jpg", "map", capture.image,
-         session.numbered_capture_error),
-        (settings.archive_html_enabled, settings.archive_html_dir,
-         settings.archive_html_period_hours, "html", "page", capture.html,
-         session.numbered_html_error),
-    )
-    for enabled, directory, hours, suffix, prefix, content, capture_error in jobs:
-        if not enabled:
-            continue
-        if content is None:
-            if capture_error:
-                errors.append(f"{prefix}: {capture_error}")
-            continue
-        folder = period_path(directory, hours, capture.captured_at)
+class CaptureArchive:
+    """Сохраняет каждый подписанный вид сразу, не накапливая JPEG в памяти."""
+
+    def __init__(self, settings: RuntimeSettings) -> None:
+        self.settings = settings
+        self.saved: list[Path] = []
+        self.errors: list[str] = []
+
+    def save(self, capture: Any) -> None:
+        """Пишет JPEG вида и первый HTML обхода в выбранные папки."""
+        jobs = (
+            (self.settings.screenshot_enabled, self.settings.screenshot_dir,
+             self.settings.screenshot_period_hours, "jpg", "map", capture.image),
+            (self.settings.archive_html_enabled, self.settings.archive_html_dir,
+             self.settings.archive_html_period_hours, "html", "page", capture.html),
+        )
+        for enabled, directory, hours, suffix, prefix, content in jobs:
+            if enabled and content is not None:
+                self._write(directory, hours, suffix, prefix, content,
+                            capture.captured_at, capture.zoom)
+
+    def _write(
+        self, directory: str, hours: int, suffix: str, prefix: str,
+        content: bytes | str, captured_at: datetime, zoom: float,
+    ) -> None:
+        timestamp = captured_at.strftime("%Y-%m-%d_%H-%M-%S-%f")
+        zoom_label = f"{zoom:g}".replace(".", "_")
+        folder = period_path(directory, hours, captured_at)
         try:
             folder.mkdir(parents=True, exist_ok=True)
             stem = f"{prefix}_{timestamp}_zoom-{zoom_label}"
@@ -64,9 +62,25 @@ def capture_due(session: Any, settings: RuntimeSettings) -> tuple[list[Path], li
                 else:
                     temporary.write_text(content, encoding="utf-8")
                 temporary.replace(target)
-                saved.append(target)
+                self.saved.append(target)
             finally:
                 temporary.unlink(missing_ok=True)
         except Exception as exc:  # noqa: BLE001 — архив не должен прерывать опрос.
-            errors.append(f"{prefix}: {exc}")
-    return saved, errors
+            self.errors.append(f"{prefix}: {exc}")
+
+    def finish(self, session: Any) -> tuple[list[Path], list[str]]:
+        """Добавляет ошибки съёмки к ошибкам записи и возвращает результат."""
+        errors = self.errors.copy()
+        if self.settings.screenshot_enabled and session.numbered_capture_error:
+            errors.append(f"map: {session.numbered_capture_error}")
+        if self.settings.archive_html_enabled and session.numbered_html_error:
+            errors.append(f"page: {session.numbered_html_error}")
+        return self.saved, errors
+
+
+def capture_due(session: Any, settings: RuntimeSettings) -> tuple[list[Path], list[str]]:
+    """Сохраняет архивы из сеанса без потоковой записи (для ручных вызовов)."""
+    archive = CaptureArchive(settings)
+    while (capture := session.take_numbered_capture()) is not None:
+        archive.save(capture)
+    return archive.finish(session)

@@ -122,6 +122,7 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
   assert.equal(result.scan.status, 'complete');
   assert.ok(result.scan.best_numbered_view?.count > 0);
   assert.ok(result.scan.best_numbered_view.zoom >= 8);
+  assert.ok(result.scan.numbered_views?.length > 0);
   assert.deepEqual(map.center, {lat: 50, lng: 0});
   assert.equal(map.zoom, initialZoom);
   assert.ok(minimumVisitedZoom >= 4, 'overview should stay at a scale used by the selected tab');

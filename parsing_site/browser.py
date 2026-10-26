@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Self
@@ -72,25 +73,28 @@ class BrowserSession:
         self._cache_url = ""
         self._numbered_size: tuple[int, int] | None = None
         self._numbered_html_enabled = False
-        self._numbered_capture: NumberedCapture | None = None
+        self._numbered_captures: list[NumberedCapture] = []
+        self._on_numbered_capture: Callable[[NumberedCapture], None] | None = None
+        self._numbered_html_captured = False
         self.numbered_capture_error = ""
         self.numbered_html_error = ""
 
     def prepare_numbered_capture(
-        self, size: tuple[int, int] | None, html_enabled: bool = False
+        self, size: tuple[int, int] | None, html_enabled: bool = False,
+        on_capture: Callable[[NumberedCapture], None] | None = None,
     ) -> None:
         """Готовит включённые архивы для очередного обхода карты."""
         self._numbered_size = size
         self._numbered_html_enabled = html_enabled
-        self._numbered_capture = None
+        self._numbered_captures = []
+        self._on_numbered_capture = on_capture
+        self._numbered_html_captured = False
         self.numbered_capture_error = ""
         self.numbered_html_error = ""
 
     def take_numbered_capture(self) -> NumberedCapture | None:
         """Возвращает архивный вид, полученный во время обхода."""
-        capture = self._numbered_capture
-        self._numbered_capture = None
-        return capture
+        return self._numbered_captures.pop(0) if self._numbered_captures else None
 
     def __enter__(self) -> Self:
         """Открывает CDP-сессию для использования класса как контекстного менеджера."""
@@ -168,22 +172,24 @@ class BrowserSession:
                 )
             ) if self._numbered_size or self._numbered_html_enabled else None,
         )
-        best = (raw.get("scan") or {}).get("best_numbered_view")
-        if (self._numbered_size or self._numbered_html_enabled) \
-                and self._numbered_capture is None and best:
-            self._capture_best_numbered_view(page, tracking, best)
+        scan = raw.get("scan") or {}
+        views = scan.get("numbered_views") or []
+        if (self._numbered_size or self._numbered_html_enabled) and views:
+            self._capture_numbered_views(page, tracking, views)
         return snapshot, raw
 
     def _capture_mouse_numbered(self, page: Page, scene: dict, selector: str) -> bool:
         """Снимает архив прямо во время приближения мышью."""
-        if self._numbered_capture is not None:
+        if self._numbered_size is None and self._numbered_html_captured:
             return True
         zoom = scene.get("map_zoom")
         if zoom is None:
             return False
         return self._capture_visible_view(page, selector, float(zoom))
 
-    def _capture_visible_view(self, page: Page, selector: str, zoom: float) -> bool:
+    def _capture_visible_view(
+        self, page: Page, selector: str, zoom: float
+    ) -> bool:
         """Берёт HTML и JPEG только при наличии видимой подписи в DOM."""
         try:
             if not page.evaluate(_VISIBLE_NUMBERS_SCRIPT, selector):
@@ -195,10 +201,10 @@ class BrowserSession:
                 self.numbered_html_error = str(exc)
             return False
         capture = NumberedCapture(datetime.now().astimezone(), zoom)
-        self._numbered_capture = capture
-        if self._numbered_html_enabled:
+        if self._numbered_html_enabled and not self._numbered_html_captured:
             try:
                 capture.html = page.content()
+                self._numbered_html_captured = True
             except Exception as exc:  # noqa: BLE001 — один архив не блокирует другой.
                 self.numbered_html_error = str(exc)
         if self._numbered_size is not None:
@@ -206,32 +212,54 @@ class BrowserSession:
                 capture.image = self.capture_map_image(selector, *self._numbered_size)
             except Exception as exc:  # noqa: BLE001 — один архив не блокирует другой.
                 self.numbered_capture_error = str(exc)
+        if capture.image is not None or capture.html is not None:
+            if self._on_numbered_capture is not None:
+                self._on_numbered_capture(capture)
+            else:
+                self._numbered_captures.append(capture)
         return True
 
     def _capture_best_numbered_view(self, page: Page, tracking: TrackingConfig, best: dict) -> None:
-        """Возвращается к подписанному виду Leaflet, снимает карту и восстанавливает центр."""
+        """Совместимый вызов съёмки одного подписанного вида Leaflet."""
+        self._capture_numbered_views(page, tracking, [best])
+
+    def _capture_numbered_views(
+        self, page: Page, tracking: TrackingConfig, views: list[dict]
+    ) -> None:
+        """Снимает каждый подписанный вид Leaflet и восстанавливает исходный центр."""
         if self._numbered_size is None and not self._numbered_html_enabled:
             return
         original = None
         try:
             original = page.evaluate(
-                """view => {
+                """() => {
                   const map = window.__parsingSiteMap;
                   if (!map || typeof map.setView !== 'function') return null;
                   const center = map.getCenter();
                   const original = {lat: center.lat, lng: center.lng, zoom: map.getZoom()};
-                  map.setView([view.lat, view.lng], view.zoom, {animate: false});
                   return original;
                 }""",
-                best,
             )
             if original is None:
                 return
-            for _ in range(2):
-                page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
-                if self._capture_visible_view(
-                    page, tracking.map_container_selector, float(best["zoom"])
-                ):
+            for view in views:
+                try:
+                    page.evaluate(
+                        """view => window.__parsingSiteMap.setView(
+                          [view.lat, view.lng], view.zoom, {animate: false}
+                        )""",
+                        view,
+                    )
+                    for _ in range(2):
+                        page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
+                        if self._capture_visible_view(
+                            page, tracking.map_container_selector,
+                            float(view["zoom"]),
+                        ):
+                            break
+                except Exception as exc:  # noqa: BLE001 — остальные виды ещё можно снять.
+                    self.numbered_capture_error = str(exc)
+                if self._numbered_size is None and self._numbered_html_captured:
                     break
         except Exception as exc:  # noqa: BLE001 — ошибка архива не прерывает обход.
             self.numbered_capture_error = str(exc)

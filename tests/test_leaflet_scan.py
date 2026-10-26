@@ -124,9 +124,10 @@ class LeafletScanTest(unittest.TestCase):
                 page, TrackingConfig(), cache, on_numbered_view=capture
             )
         self.assertEqual(result["scan"]["status"], "complete")
-        self.assertEqual(len(seen), 1)
-        self.assertGreaterEqual(seen[0][0], 7)
-        self.assertTrue(any(number > 0 for number in seen[0][1]))
+        self.assertGreaterEqual(len(seen), 2)
+        self.assertTrue(all(zoom >= 7 for zoom, _numbers in seen))
+        self.assertTrue(all(any(number > 0 for number in numbers)
+                            for _zoom, numbers in seen))
         self.assertEqual(page.zoom, 5)
 
     def test_browser_wheel_finds_marker_outside_initial_html(self) -> None:

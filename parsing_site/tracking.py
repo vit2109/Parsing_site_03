@@ -432,23 +432,30 @@ async (opts) => {
     const targetZoom = Math.min(
       dynamics.some((item) => item.index > 0) ? zoom : zoom + 2, maxZoom
     );
-    const recordNumberedView = () => {
-      if (!opts.captureNumbered) return;
+    const recordNumberedView = (captureView = false) => {
+      if (!opts.captureNumbered) return 0;
       const numbered = collect(opts.dynamic, "D", true).filter((item) => {
         if (item.index <= 0 || !Number.isFinite(item.lat) || !Number.isFinite(item.lng)) return false;
         const point = map.latLngToContainerPoint([item.lat, item.lng]);
         return point && point.x >= 0 && point.x <= mapRect.width &&
           point.y >= 0 && point.y <= mapRect.height;
       });
-      if (numbered.length > (scan.best_numbered_view?.count || 0)) {
+      if (numbered.length) {
         const current = map.getCenter();
-        scan.best_numbered_view = {
+        const view = {
           lat: current.lat, lng: current.lng, zoom: map.getZoom(), count: numbered.length,
         };
+        if (numbered.length > (scan.best_numbered_view?.count || 0)) {
+          scan.best_numbered_view = view;
+        }
+        if (captureView) {
+          (scan.numbered_views ||= []).push(view);
+        }
       }
+      return numbered.length;
     };
-    recordNumberedView();
-    const moveTo = async (lat, lng, z) => {
+    recordNumberedView(true);
+    const moveTo = async (lat, lng, z, captureView = false) => {
       scan.views++;
       const zoomingIn = z > map.getZoom();
       await new Promise((resolve) => {
@@ -468,7 +475,7 @@ async (opts) => {
       });
       // Vue может перерисовать маркеры после moveend и ответа API.
       await new Promise((resolve) => setTimeout(resolve, scanWaitMs));
-      recordNumberedView();
+      return recordNumberedView(captureView);
     };
     const matchVisible = () => {
       const visible = collect(opts.dynamic, "D", true).filter((item) => item.index > 0);
@@ -581,10 +588,11 @@ async (opts) => {
         for (const target of dynamics) {
           if (target.index >= 0 || !Number.isFinite(target.lat) || !Number.isFinite(target.lng) ||
               covered.has(target.fallback_id)) continue;
-          await moveTo(target.lat, target.lng, level);
+          const numberedAtMove = await moveTo(target.lat, target.lng, level, true);
           const matched = matchVisible();
           if (!matched) {
             await new Promise((resolve) => setTimeout(resolve, scanWaitMs));
+            if (!numberedAtMove) recordNumberedView(true);
             matchVisible();
           }
           for (const candidate of dynamics) {
@@ -823,11 +831,8 @@ def extract_scene_with_mouse_scan(
     original_lat = base_view.center_lat
     original_lng = base_view.center_lng
     scan_wait_ms = round(tracking.scan_wait_seconds * 1000)
-    captured_numbered = False
-
     def record_numbered(scene: dict[str, Any]) -> None:
-        nonlocal captured_numbered
-        if captured_numbered or on_numbered_view is None:
+        if on_numbered_view is None:
             return
         view = map_view_from_raw(scene.get("map"))
         if view is None:
@@ -840,7 +845,7 @@ def extract_scene_with_mouse_scan(
                 if lat is not None and lng is not None else None
             if point is not None and 0 <= point[0] <= view.width \
                     and 0 <= point[1] <= view.height:
-                captured_numbered = on_numbered_view(scene)
+                on_numbered_view(scene)
                 break
 
     if initial_labels_visible:
@@ -865,7 +870,6 @@ def extract_scene_with_mouse_scan(
         page.mouse.wheel(0, delta)
         page.wait_for_timeout(scan_wait_ms)
         candidate = extract_scene_from_page(page, tracking, scan_numbers=False)
-        record_numbered(candidate)
         current_zoom = _maybe_float(candidate.get("map_zoom"))
         if current_zoom is None or (current_zoom - previous_zoom) * delta >= 0:
             break
@@ -893,7 +897,6 @@ def extract_scene_with_mouse_scan(
                 if column or row:
                     overview = _pan_mouse_to(page, tracking, overview, *position)
                     overview_views += 1
-                    record_numbered(overview)
                 added = _merge_overview_scene(raw, overview, base_view)
                 if (column or row) and not added:
                     continue
@@ -965,7 +968,6 @@ def extract_scene_with_mouse_scan(
                 page.mouse.wheel(0, 120)
                 page.wait_for_timeout(scan_wait_ms)
                 current = extract_scene_from_page(page, tracking, scan_numbers=False)
-                record_numbered(current)
             overview = current
             if callable(getattr(page.mouse, "down", None)):
                 overview = _pan_mouse_to(
@@ -976,13 +978,12 @@ def extract_scene_with_mouse_scan(
         page.mouse.wheel(0, -delta)
         page.wait_for_timeout(scan_wait_ms)
         overview = extract_scene_from_page(page, tracking, scan_numbers=False)
-        record_numbered(overview)
     restored_zoom = _maybe_float(overview.get("map_zoom"))
     if restored_zoom is None or abs(restored_zoom - base_zoom) > 0.01:
         scan["status"] = "mouse_restore_failed"
         raw["scan"] = scan
         return raw
-    if on_numbered_view is None or captured_numbered:
+    if on_numbered_view is None:
         _apply_number_cache(raw, number_cache)
     if not raw.get("unnumbered_dynamics"):
         if callable(getattr(page.mouse, "down", None)) and original_lat is not None \
@@ -1012,7 +1013,8 @@ def extract_scene_with_mouse_scan(
         page.mouse.wheel(0, delta)
         page.wait_for_timeout(scan_wait_ms)
         scene = extract_scene_from_page(page, tracking, scan_numbers=False)
-        record_numbered(scene)
+        if delta < 0:
+            record_numbered(scene)
         zoom_after = _maybe_float(scene.get("map_zoom"))
         if delta < 0 and zoom_after is not None and zoom_after >= base_zoom + 2:
             for _ in range(3):

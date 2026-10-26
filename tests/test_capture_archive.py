@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from parsing_site.browser import BrowserSession, NumberedCapture
-from parsing_site.capture_archive import capture_due, period_path
+from parsing_site.capture_archive import CaptureArchive, capture_due, period_path
 from parsing_site.config import BrowserConfig, TrackingConfig
 from parsing_site.db import Database
 from parsing_site.settings_store import SettingsStore, from_dict, validate_settings
@@ -26,6 +26,53 @@ class FakeSession:
 
 
 class CaptureArchiveTest(unittest.TestCase):
+    def test_each_numbered_approach_saves_a_separate_image_immediately(self) -> None:
+        with TemporaryDirectory() as directory:
+            settings = validate_settings(from_dict({
+                "screenshot_enabled": True,
+                "screenshot_dir": directory,
+                "archive_html_enabled": True,
+                "archive_html_dir": str(Path(directory) / "pages"),
+            }))
+            archive = CaptureArchive(settings)
+            session = BrowserSession(BrowserConfig())
+            session.prepare_numbered_capture(
+                (900, 600), html_enabled=True, on_capture=archive.save
+            )
+
+            class Page:
+                def __init__(self) -> None:
+                    self.html_calls = 0
+
+                def evaluate(self, _script: str, _selector: str) -> int:
+                    return 2
+
+                def content(self) -> str:
+                    self.html_calls += 1
+                    return "<html>numbered</html>"
+
+            page = Page()
+            with patch.object(session, "capture_map_image", side_effect=[
+                b"jpg-7", b"jpg-7-again", b"jpg-8"
+            ]) as image:
+                self.assertTrue(session._capture_visible_view(
+                    page, ".leaflet-container", 7
+                ))
+                self.assertEqual(len(archive.saved), 2)
+                self.assertTrue(session._capture_visible_view(
+                    page, ".leaflet-container", 7
+                ))
+                self.assertEqual(len(archive.saved), 3)
+                self.assertTrue(session._capture_visible_view(
+                    page, ".leaflet-container", 8
+                ))
+            self.assertEqual(image.call_count, 3)
+            self.assertEqual(page.html_calls, 1)
+            self.assertEqual(len(archive.saved), 4)
+            self.assertEqual([path.read_bytes() for path in archive.saved if path.suffix == ".jpg"],
+                             [b"jpg-7", b"jpg-7-again", b"jpg-8"])
+            self.assertEqual(archive.finish(session)[1], [])
+
     def test_mouse_image_requires_visible_dom_label(self) -> None:
         class Page:
             visible = 0
@@ -57,9 +104,8 @@ class CaptureArchiveTest(unittest.TestCase):
                 self.waits: list[int] = []
                 self.html_zoom: int | None = None
 
-            def evaluate(self, script: str, argument: object) -> object:
+            def evaluate(self, script: str, argument: object = None) -> object:
                 if "const original =" in script:
-                    self.zoom = argument["zoom"]
                     return {"lat": 50, "lng": 30, "zoom": 4}
                 if "querySelectorAll" in script:
                     self.checks += 1
@@ -103,6 +149,19 @@ class CaptureArchiveTest(unittest.TestCase):
             )
         image.assert_not_called()
         self.assertIsNone(session.take_numbered_capture())
+        self.assertEqual(page.zoom, 4)
+
+        session.prepare_numbered_capture((900, 600), html_enabled=True)
+        page = Page(labels_after=1)
+        with patch.object(session, "capture_map_image", side_effect=[b"zoom-7", b"zoom-8"]):
+            session._capture_numbered_views(page, TrackingConfig(), [
+                {"lat": 51, "lng": 31, "zoom": 7},
+                {"lat": 52, "lng": 32, "zoom": 8},
+            ])
+        captures = [session.take_numbered_capture(), session.take_numbered_capture()]
+        self.assertEqual([capture.image for capture in captures], [b"zoom-7", b"zoom-8"])
+        self.assertEqual([capture.html for capture in captures],
+                         ["<html>zoom-7</html>", None])
         self.assertEqual(page.zoom, 4)
 
     def test_period_buckets_and_saved_preferences(self) -> None:
