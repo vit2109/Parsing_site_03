@@ -55,9 +55,60 @@ class MaxBotTest(unittest.TestCase):
         self.assertTrue(config.public_dict()["max_token_set"])
         self.assertEqual(from_dict(config.to_dict()).max_recipients[0].user_id, 111)
         bad = config.to_dict()
-        bad["max_recipients"][0]["rules"][0]["static_index"] = 999
+        bad["max_groups"][0]["rules"][0]["static_index"] = 999
         with self.assertRaises(ValueError):
             validate_settings(from_dict(bad))
+
+    def test_group_parses_several_users_and_all_objects(self) -> None:
+        payload = settings().to_dict()
+        payload["max_groups"] = [{
+            "user_ids": "111, 222 333",
+            "all_objects": True,
+            "zones": ["blue", "alert"],
+            "rules": [],
+        }]
+        config = validate_settings(from_dict(payload))
+        self.assertEqual([item.user_id for item in config.max_recipients], [111, 222, 333])
+        self.assertEqual(len(config.max_recipients[0].rules), 2)
+        self.assertEqual(config.max_groups[0].user_ids, [111, 222, 333])
+        self.assertTrue(config.max_groups[0].all_objects)
+        restored = validate_settings(from_dict(config.to_dict()))
+        self.assertEqual(restored.max_groups[0].user_ids, [111, 222, 333])
+
+    def test_old_recipient_settings_migrate_to_groups(self) -> None:
+        legacy = settings().to_dict()
+        del legacy["max_groups"]
+        restored = validate_settings(from_dict(legacy))
+        self.assertEqual([group.user_ids for group in restored.max_groups], [[111], [222]])
+        self.assertEqual(len(restored.max_recipients), 2)
+
+    def test_group_rejects_duplicate_object_or_user(self) -> None:
+        payload = settings().to_dict()
+        payload["max_groups"] = [{
+            "user_ids": "111, 111",
+            "rules": [{"static_index": 1, "zones": ["blue"]}],
+        }]
+        with self.assertRaises(ValueError):
+            validate_settings(from_dict(payload))
+        payload["max_groups"][0]["user_ids"] = "111, 222"
+        payload["max_groups"][0]["rules"].append(
+            {"static_index": 1, "zones": ["alert"]},
+        )
+        with self.assertRaises(ValueError):
+            validate_settings(from_dict(payload))
+
+    def test_same_user_in_two_groups_combines_rules_once(self) -> None:
+        payload = settings().to_dict()
+        payload["max_groups"] = [
+            {"user_ids": "111", "rules": [{"static_index": 1, "zones": ["blue"]}]},
+            {"user_ids": "111, 222", "rules": [
+                {"static_index": 1, "zones": ["alert"]},
+                {"static_index": 2, "zones": ["warning"]},
+            ]},
+        ]
+        config = validate_settings(from_dict(payload))
+        self.assertEqual([item.user_id for item in config.max_recipients], [111, 222])
+        self.assertEqual(config.max_recipients[0].rules[0].zones, ["blue", "alert"])
 
     def test_entry_transitions_recipients_and_matching_screenshot(self) -> None:
         config = settings()

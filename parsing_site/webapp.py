@@ -68,6 +68,7 @@ class SettingsIn(BaseModel):
     max_token: str = ""
     max_token_clear: bool = False
     max_recipients: list[dict[str, Any]] = Field(default_factory=list)
+    max_groups: list[dict[str, Any]] | None = None
     threshold: float = Field(gt=0)
     warning_distance: float = Field(gt=0)
     blue_distance: float = Field(default=350.0, gt=0)

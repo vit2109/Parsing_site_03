@@ -29,6 +29,14 @@ class MaxRecipient:
 
 
 @dataclass(slots=True)
+class MaxRecipientGroup:
+    user_ids: list[int] = field(default_factory=list)
+    all_objects: bool = False
+    zones: list[str] = field(default_factory=list)
+    rules: list[MaxObjectRule] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class RuntimeSettings:
     """Настройки, изменяемые пользователем без перезапуска приложения."""
 
@@ -60,6 +68,7 @@ class RuntimeSettings:
     max_enabled: bool = False
     max_token: str = ""
     max_recipients: list[MaxRecipient] = field(default_factory=list)
+    max_groups: list[MaxRecipientGroup] = field(default_factory=list)
     lock_scale: bool = False
     static_source: str = "config"
     static_objects: list[StaticObjectConfig] = field(default_factory=list)
@@ -207,6 +216,26 @@ def from_dict(data: dict[str, Any]) -> RuntimeSettings:
             ) for rule in item.get("rules") or []],
         ) for item in data.get("max_recipients") or []
     ]
+    raw_groups = data.get("max_groups")
+    if raw_groups is None:
+        raw_groups = [
+            {"user_ids": [recipient.user_id], "rules": [asdict(rule) for rule in recipient.rules]}
+            for recipient in recipients
+        ]
+    groups = []
+    for item in raw_groups:
+        raw_ids = item.get("user_ids") or []
+        if isinstance(raw_ids, str):
+            raw_ids = [part for part in re.split(r"[\s,;]+", raw_ids.strip()) if part]
+        groups.append(MaxRecipientGroup(
+            user_ids=[int(user_id) for user_id in raw_ids],
+            all_objects=bool(item.get("all_objects", False)),
+            zones=[str(zone) for zone in item.get("zones") or []],
+            rules=[MaxObjectRule(
+                static_index=int(rule.get("static_index", 0)),
+                zones=[str(zone) for zone in rule.get("zones") or []],
+            ) for rule in item.get("rules") or []],
+        ))
     return RuntimeSettings(
         site=str(data.get("site", "http://127.0.0.1:8000")),
         cdp_url=str(data.get("cdp_url", "http://127.0.0.1:9222")),
@@ -242,6 +271,7 @@ def from_dict(data: dict[str, Any]) -> RuntimeSettings:
         max_enabled=bool(data.get("max_enabled", False)),
         max_token=str(data.get("max_token", "")),
         max_recipients=recipients,
+        max_groups=groups,
         lock_scale=bool(data.get("lock_scale", False)),
         static_source=str(data.get("static_source", "config")),
         static_objects=objects,
@@ -294,26 +324,45 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
         if settings.static_source in {"config", "page", "both"}
         else "config"
     )
-    recipients: list[MaxRecipient] = []
-    seen_users: set[int] = set()
+    groups: list[MaxRecipientGroup] = []
+    recipient_rules: dict[int, dict[int, list[str]]] = {}
     static_ids = {item.id for item in settings.static_objects}
-    for recipient in settings.max_recipients:
-        if recipient.user_id <= 0 or recipient.user_id in seen_users:
-            raise ValueError("Укажите уникальный положительный MAX user ID для каждого получателя.")
-        seen_users.add(recipient.user_id)
+    for group in settings.max_groups:
+        user_ids = list(group.user_ids)
+        if not user_ids or any(user_id <= 0 for user_id in user_ids) \
+                or len(set(user_ids)) != len(user_ids):
+            raise ValueError("В группе MAX укажите уникальные положительные user ID через пробел или запятую.")
         rules: list[MaxObjectRule] = []
         seen_statics: set[int] = set()
-        for rule in recipient.rules:
-            if rule.static_index not in static_ids or rule.static_index in seen_statics:
-                raise ValueError("Выберите существующий стационарный объект один раз для получателя MAX.")
-            zones = list(dict.fromkeys(rule.zones))
+        if group.all_objects:
+            zones = list(dict.fromkeys(group.zones))
             if not zones or any(zone not in MAX_ZONES for zone in zones):
-                raise ValueError("Для объекта MAX выберите синюю, жёлтую или красную зону.")
-            seen_statics.add(rule.static_index)
-            rules.append(MaxObjectRule(rule.static_index, zones))
+                raise ValueError("Для всех объектов MAX выберите хотя бы одну зону.")
+            rules = [MaxObjectRule(static_id, zones.copy()) for static_id in sorted(static_ids)]
+        else:
+            zones = []
+            for rule in group.rules:
+                if rule.static_index not in static_ids or rule.static_index in seen_statics:
+                    raise ValueError("Объект MAX должен существовать и встречаться в группе только один раз.")
+                rule_zones = list(dict.fromkeys(rule.zones))
+                if not rule_zones or any(zone not in MAX_ZONES for zone in rule_zones):
+                    raise ValueError("Для объекта MAX выберите синюю, жёлтую или красную зону.")
+                seen_statics.add(rule.static_index)
+                rules.append(MaxObjectRule(rule.static_index, rule_zones))
         if not rules:
-            raise ValueError("Для каждого получателя MAX выберите объект и зону.")
-        recipients.append(MaxRecipient(recipient.user_id, rules))
+            raise ValueError("Для группы MAX выберите объект и зону.")
+        groups.append(MaxRecipientGroup(user_ids, group.all_objects, zones,
+                                        [] if group.all_objects else rules))
+        for user_id in user_ids:
+            combined = recipient_rules.setdefault(user_id, {})
+            for rule in rules:
+                current = combined.setdefault(rule.static_index, [])
+                current.extend(zone for zone in rule.zones if zone not in current)
+    recipients = [
+        MaxRecipient(user_id, [MaxObjectRule(static_id, zones)
+                               for static_id, zones in sorted(rules.items())])
+        for user_id, rules in recipient_rules.items()
+    ]
     if settings.max_enabled and (not settings.max_token.strip() or not recipients):
         raise ValueError("Для рассылки MAX укажите токен бота и хотя бы одного получателя.")
     return RuntimeSettings(
@@ -348,6 +397,7 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
         max_enabled=bool(settings.max_enabled),
         max_token=settings.max_token.strip(),
         max_recipients=recipients,
+        max_groups=groups,
         lock_scale=bool(settings.lock_scale),
         static_source=source,
         static_objects=list(settings.static_objects),

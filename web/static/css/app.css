@@ -284,8 +284,11 @@ dialog footer {
 #max-recipient-list { display: grid; gap: 10px; max-height: 260px; overflow: auto; }
 .max-recipient { border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: grid; gap: 8px; }
 .max-recipient .static-block__head label { min-width: 180px; }
+.max-recipient [hidden] { display: none !important; }
+.max-rules { display: grid; gap: 8px; }
+.max-all-zones { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; font-size: 13px; }
 .max-rule { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; }
-.max-rule strong { min-width: 140px; font-size: 13px; }
+.max-rule select { min-width: 160px; max-width: 260px; }
 .btn-remove { padding: 6px 10px; }
 label.checkbox {
   flex-direction: row;

@@ -16,7 +16,7 @@ const STATUS_LABEL = {
 };
 
 let staticObjects = (window.__INITIAL_SETTINGS__?.static_objects || []).slice();
-let maxRecipients = (window.__INITIAL_SETTINGS__?.max_recipients || []).slice();
+let maxGroups = (window.__INITIAL_SETTINGS__?.max_groups || []).slice();
 
 // Отслеживание красных записей для звукового сигнала
 let previousAlertKeys = new Set();
@@ -74,11 +74,32 @@ els.cancel.addEventListener("click", () => els.dialog.close());
 els.form.addEventListener("submit", saveSettings);
 els.addStatic.addEventListener("click", addStaticRow);
 els.addMax.addEventListener("click", () => {
-  maxRecipients = collectMaxRecipients();
-  maxRecipients.push({ user_id: 0, rules: [] });
-  renderMaxRecipients();
+  maxGroups = collectMaxGroups();
+  maxGroups.push({ user_ids: "", all_objects: false, zones: [], rules: [] });
+  renderMaxGroups();
 });
-els.maxList.addEventListener("change", () => { maxRecipients = collectMaxRecipients(); });
+els.maxList.addEventListener("change", event => {
+  maxGroups = collectMaxGroups();
+  if (event.target.matches(".max-all, .max-object-select")) renderMaxGroups();
+});
+els.maxList.addEventListener("click", event => {
+  const button = event.target.closest("button[data-max-action]");
+  if (!button) return;
+  maxGroups = collectMaxGroups();
+  const group = maxGroups[Number(button.dataset.groupIndex)];
+  if (button.dataset.maxAction === "remove-group") {
+    maxGroups.splice(Number(button.dataset.groupIndex), 1);
+  } else if (button.dataset.maxAction === "add-object") {
+    const used = new Set(group.rules.map(rule => rule.static_index));
+    const available = collectStaticObjects().find(point => !used.has(point.id));
+    if (available && !group.rules.some(rule => !rule.static_index)) {
+      group.rules.push({ static_index: 0, zones: [] });
+    }
+  } else if (button.dataset.maxAction === "remove-object") {
+    group.rules.splice(Number(button.dataset.ruleIndex), 1);
+  }
+  renderMaxGroups();
+});
 
 renderStaticList();
 
@@ -648,8 +669,8 @@ function fillForm(settings) {
   els.form.elements.namedItem("max_token").value = "";
   els.form.elements.namedItem("max_token_clear").checked = false;
   els.maxTokenStatus.textContent = settings.max_token_set ? "Токен сохранён" : "Токен не задан";
-  maxRecipients = (settings.max_recipients || []).slice();
-  renderMaxRecipients();
+  maxGroups = (settings.max_groups || []).slice();
+  renderMaxGroups();
   setFormValue("threshold", settings.threshold);
   setFormValue("warning_distance", settings.warning_distance);
   setFormValue("blue_distance", settings.blue_distance);
@@ -721,7 +742,7 @@ function applyMoves(rows) {
 function renderStaticList() {
   if (!staticObjects.length) {
     els.staticList.innerHTML = `<p class="muted">Нет статичных точек. Нажмите «+ Точка».</p>`;
-    renderMaxRecipients();
+    renderMaxGroups();
     return;
   }
   els.staticList.innerHTML = staticObjects.map((item, index) => `
@@ -737,9 +758,9 @@ function renderStaticList() {
   els.staticList.querySelectorAll("[data-remove]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const removed = Number(btn.dataset.remove) + 1;
-      maxRecipients = collectMaxRecipients().map(recipient => ({
-        ...recipient,
-        rules: recipient.rules.filter(rule => rule.static_index !== removed).map(rule => ({
+      maxGroups = collectMaxGroups().map(group => ({
+        ...group,
+        rules: group.rules.filter(rule => rule.static_index !== removed).map(rule => ({
           ...rule, static_index: rule.static_index > removed ? rule.static_index - 1 : rule.static_index,
         })),
       }));
@@ -749,12 +770,12 @@ function renderStaticList() {
       renderStaticList();
     });
   });
-  renderMaxRecipients();
+  renderMaxGroups();
 }
 
 /** Добавляет новую пустую стационарную точку и перерисовывает список. */
 function addStaticRow() {
-  maxRecipients = collectMaxRecipients();
+  maxGroups = collectMaxGroups();
   staticObjects = collectStaticObjects();
   staticObjects.push({
     id: staticObjects.length + 1,
@@ -767,40 +788,52 @@ function addStaticRow() {
   renderStaticList();
 }
 
-/** Получатели MAX и зоны каждой стационарной точки. */
-function renderMaxRecipients() {
+/** Группы получателей MAX и выбранные зоны точек. */
+function renderMaxGroups() {
   if (!els.maxList) return;
   const points = collectStaticObjects();
-  els.maxList.innerHTML = maxRecipients.map((recipient, index) => `
-    <div class="max-recipient" data-recipient="${index}">
+  const zoneChoices = (zones, attribute) => [["blue", "Синяя"], ["warning", "Жёлтая"], ["alert", "Красная"]]
+    .map(([zone, label]) => `<label class="checkbox"><input type="checkbox" ${attribute}="${zone}" ${zones.includes(zone) ? "checked" : ""} />${label}</label>`).join("");
+  els.maxList.innerHTML = maxGroups.map((group, index) => {
+    const used = new Set((group.rules || []).map(rule => rule.static_index));
+    return `
+    <div class="max-recipient" data-group="${index}">
       <div class="static-block__head">
-        <label>MAX user ID <input class="max-user-id" type="text" inputmode="numeric" pattern="[0-9]+" value="${escapeAttr(String(recipient.user_id || ""))}" placeholder="Например 123456" /></label>
-        <button type="button" class="btn btn-remove" data-remove-max="${index}">×</button>
+        <label>MAX user ID (через пробел или запятую)
+          <input class="max-user-ids" type="text" value="${escapeAttr(Array.isArray(group.user_ids) ? group.user_ids.join(", ") : String(group.user_ids || ""))}" placeholder="123456, 789012" />
+        </label>
+        <button type="button" class="btn btn-remove" data-max-action="remove-group" data-group-index="${index}">×</button>
       </div>
-      ${points.map(point => {
-        const zones = recipient.rules?.find(rule => rule.static_index === point.id)?.zones || [];
-        return `<div class="max-rule" data-static-id="${point.id}"><strong>${escapeHtml(point.name)}</strong>
-          ${[["blue", "Синяя"], ["warning", "Жёлтая"], ["alert", "Красная"]].map(([zone, label]) =>
-            `<label class="checkbox"><input type="checkbox" data-zone="${zone}" ${zones.includes(zone) ? "checked" : ""} />${label}</label>`).join("")}
-        </div>`;
-      }).join("")}
+      <label class="checkbox"><input class="max-all" type="checkbox" ${group.all_objects ? "checked" : ""} />Все объекты</label>
+      <div class="max-all-zones" ${group.all_objects ? "" : "hidden"}>Зоны для всех объектов: ${zoneChoices(group.zones || [], "data-all-zone")}</div>
+      <div class="max-rules" ${group.all_objects ? "hidden" : ""}>
+        ${(group.rules || []).map((rule, ruleIndex) => `
+          <div class="max-rule" data-rule="${ruleIndex}">
+            <select class="max-object-select" aria-label="Стационарный объект">
+              ${rule.static_index ? "" : '<option value="" selected disabled>Выберите объект</option>'}
+              ${points.filter(point => point.id === rule.static_index || !used.has(point.id))
+                .map(point => `<option value="${point.id}" ${point.id === rule.static_index ? "selected" : ""}>${escapeHtml(point.name)}</option>`).join("")}
+            </select>
+            ${zoneChoices(rule.zones || [], "data-zone")}
+            <button type="button" class="btn btn-remove" data-max-action="remove-object" data-group-index="${index}" data-rule-index="${ruleIndex}" aria-label="Удалить объект">×</button>
+          </div>`).join("")}
+        <button type="button" class="btn" data-max-action="add-object" data-group-index="${index}" ${used.size >= points.length || used.has(0) ? "disabled" : ""}>+ Объект</button>
+      </div>
     </div>
-  `).join("") || `<p class="muted">Получатели не добавлены.</p>`;
-  els.maxList.querySelectorAll("[data-remove-max]").forEach(button => button.addEventListener("click", () => {
-    maxRecipients = collectMaxRecipients();
-    maxRecipients.splice(Number(button.dataset.removeMax), 1);
-    renderMaxRecipients();
-  }));
+  `;
+  }).join("") || `<p class="muted">Группы получателей не добавлены.</p>`;
 }
 
-function collectMaxRecipients() {
+function collectMaxGroups() {
   if (!els.maxList) return [];
   return [...els.maxList.querySelectorAll(".max-recipient")].map(card => ({
-    user_id: card.querySelector(".max-user-id").value.trim(),
+    user_ids: card.querySelector(".max-user-ids").value.trim(),
+    all_objects: card.querySelector(".max-all").checked,
+    zones: [...card.querySelectorAll("[data-all-zone]:checked")].map(input => input.dataset.allZone),
     rules: [...card.querySelectorAll(".max-rule")].map(row => ({
-      static_index: Number(row.dataset.staticId),
+      static_index: Number(row.querySelector(".max-object-select").value),
       zones: [...row.querySelectorAll("[data-zone]:checked")].map(input => input.dataset.zone),
-    })).filter(rule => rule.zones.length),
+    })),
   }));
 }
 
@@ -838,7 +871,7 @@ async function saveSettings(event) {
   data.archive_html_enabled = Boolean(els.form.elements.namedItem("archive_html_enabled")?.checked);
   data.max_enabled = Boolean(els.form.elements.namedItem("max_enabled")?.checked);
   data.max_token_clear = Boolean(els.form.elements.namedItem("max_token_clear")?.checked);
-  data.max_recipients = collectMaxRecipients();
+  data.max_groups = collectMaxGroups();
   data.archive_html_period_hours = Number(data.archive_html_period_hours);
   data.threshold = Number(data.threshold);
   data.warning_distance = Number(data.warning_distance);
