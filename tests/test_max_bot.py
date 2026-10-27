@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import unittest
+import urllib.error
 from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -13,6 +15,7 @@ from parsing_site.max_bot import (
     MaxAlertEngine,
     MaxDelivery,
     MaxDispatch,
+    _request_json,
     _ssl_context,
     send_max_message,
 )
@@ -177,6 +180,34 @@ class MaxBotTest(unittest.TestCase):
             self.assertEqual([item.user_id for item in second], [111, 222])
             self.assertEqual(engine.collect(snapshot("ok"), config, []), [])
             self.assertEqual(len(engine.collect(snapshot("blue"), config, [])), 1)
+
+    def test_same_dynamic_entering_two_zones_sends_one_message_per_user(self) -> None:
+        payload = settings().to_dict()
+        payload["max_groups"] = [{"user_ids": "111", "rules": [
+            {"static_index": 1, "zones": ["blue"]},
+            {"static_index": 2, "zones": ["blue"]},
+        ]}]
+        config = validate_settings(from_dict(payload))
+        scene = snapshot("blue")
+        scene.rows[1].status = "blue"
+        messages = MaxAlertEngine().collect(scene, config, [])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("Пост 1", messages[0].text)
+        self.assertIn("Пост 2", messages[0].text)
+        self.assertIn("вошёл в синюю зону", messages[0].text)
+
+    def test_rate_limit_retries_after_server_pause(self) -> None:
+        limited = urllib.error.HTTPError(
+            "https://platform-api2.max.ru/messages", 429, "Too Many Requests",
+            {"Retry-After": "1.5"}, io.BytesIO(b'{"code":"rate.limit"}'),
+        )
+        with patch("parsing_site.max_bot.urllib.request.urlopen",
+                   side_effect=[limited, io.BytesIO(b"{}")]) as opener, \
+                patch("parsing_site.max_bot._ssl_context"), \
+                patch("parsing_site.max_bot.time.sleep") as sleep:
+            self.assertEqual(_request_json("https://platform-api2.max.ru/messages", "token"), {})
+        self.assertEqual(opener.call_count, 2)
+        sleep.assert_called_once_with(1.5)
 
     def test_send_image_uses_upload_then_message(self) -> None:
         with TemporaryDirectory() as directory:

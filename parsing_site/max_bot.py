@@ -20,7 +20,7 @@ from typing import Any
 
 from parsing_site.config import ROOT
 from parsing_site.settings_store import RuntimeSettings, resolve_max_token
-from parsing_site.tracking import TrackingSnapshot
+from parsing_site.tracking import DistanceRow, TrackingSnapshot
 
 API = "https://platform-api2.max.ru"
 SEVERITY = {"ok": 0, "blue": 1, "warning": 2, "alert": 3}
@@ -79,6 +79,7 @@ class MaxAlertEngine:
         deliveries: list[MaxDelivery] = []
         for recipient in settings.max_recipients:
             rules = {rule.static_index: rule for rule in recipient.rules}
+            entered: dict[int, list[DistanceRow]] = {}
             for (dynamic_id, static_id), row in rows.items():
                 if static_id not in rules:
                     continue
@@ -88,6 +89,8 @@ class MaxAlertEngine:
                 self._previous[key] = row.status
                 if SEVERITY[row.status] <= SEVERITY[previous] or row.status not in rules[static_id].zones:
                     continue
+                entered.setdefault(dynamic_id, []).append(row)
+            for dynamic_id, triggered in entered.items():
                 distances = sorted(
                     (rows[(dynamic_id, rule_id)] for rule_id in rules
                      if (dynamic_id, rule_id) in rows),
@@ -95,18 +98,23 @@ class MaxAlertEngine:
                 )
                 if not distances:
                     continue
-                unit = "км" if row.distance_unit == "km" else row.distance_unit
+                unit = "км" if distances[0].distance_unit == "km" else distances[0].distance_unit
                 label = f"№{dynamic_id}" if dynamic_id > 0 else "номер не определён"
                 dynamic = dynamics.get(dynamic_id)
-                object_name = dynamic.object_type if dynamic and dynamic.object_type else row.dynamic_name
+                object_name = dynamic.object_type if dynamic and dynamic.object_type else distances[0].dynamic_name
+                entered_ids = {item.static_index for item in triggered}
                 lines = [
-                    (f"Объект {label} ({object_name}) вошёл в {ZONE_NAME[row.status]} зону "
-                     f"объекта «{row.static_name}»."),
-                    f"Расстояние до «{row.static_name}»: {row.distance:.1f} {unit}.",
-                    "Расстояния до наблюдаемых объектов:",
-                    *(f"• {item.static_name}: {item.distance:.1f} {unit}" for item in distances),
+                    f"Объект {label} ({object_name}) вошёл в выбранные зоны.",
                     (f"Ближайший объект: «{distances[0].static_name}», "
                      f"{distances[0].distance:.1f} {unit}."),
+                    "Расстояния до наблюдаемых объектов (★ — новый вход):",
+                    *(
+                        f"{'★' if item.static_index in entered_ids else '•'} "
+                        f"{item.static_name}: {item.distance:.1f} {unit}"
+                        + (f", вошёл в {ZONE_NAME[item.status]} зону"
+                           if item.static_index in entered_ids else "")
+                        for item in distances
+                    ),
                 ]
                 photo = self._nearest_screenshot(dynamic_id, datetime.now().astimezone())
                 if photo is None:
@@ -130,13 +138,22 @@ def _request_json(url: str, token: str, body: bytes | None = None,
         headers["Content-Type"] = content_type
     request = urllib.request.Request(url, data=body if body is not None else b"",
                                      headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=15, context=_ssl_context()) as response:
-            content = response.read()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read(1024).decode("utf-8", errors="replace")
-        raise RuntimeError(f"MAX HTTP {exc.code}: {detail}") from exc
-    return json.loads(content) if content else {}
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(request, timeout=15, context=_ssl_context()) as response:
+                content = response.read()
+            return json.loads(content) if content else {}
+        except urllib.error.HTTPError as exc:
+            detail = exc.read(1024).decode("utf-8", errors="replace")
+            if exc.code in {429, 502, 503, 504} and attempt < 4:
+                try:
+                    delay = float(exc.headers.get("Retry-After", ""))
+                except (TypeError, ValueError):
+                    delay = 2 ** attempt
+                time.sleep(min(30.0, max(0.5, delay)))
+                continue
+            raise RuntimeError(f"MAX HTTP {exc.code}: {detail}") from exc
+    raise RuntimeError("MAX: не удалось выполнить запрос после повторных попыток")
 
 
 def _upload_image(token: str, path: Path) -> dict[str, Any]:
@@ -197,6 +214,9 @@ class MaxDispatch:
             self._thread = threading.Thread(target=self._run, name="max-dispatch", daemon=True)
             self._thread.start()
         self._queue.put_nowait(delivery)
+        pending = self._queue.qsize()
+        if pending in {100, 500, 1000, 5000}:
+            self._log("WARNING", "max", f"В очереди MAX {pending} уведомлений: доставка задержится")
 
     def _run(self) -> None:
         while True:
