@@ -323,6 +323,34 @@ select {
 
 /* Экран хронологии сближений. */
 .history-app { max-width: 1480px; }
+.max-logs-app { max-width: 1480px; }
+.max-logs-topbar { grid-template-columns: 1fr auto; }
+.max-test-panel { padding: 16px; display: grid; gap: 12px; }
+.max-test-form, .max-log-filters, .max-log-pages {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.max-test-form input, .max-log-filters input, .max-log-filters select {
+  min-width: 160px;
+  max-width: 260px;
+}
+.max-log-filters { padding: 8px 16px 16px; }
+.max-log-table-wrap { max-height: 68vh; }
+.max-log-table-wrap thead { position: sticky; top: 0; background: var(--panel); }
+.max-log-time { white-space: nowrap; }
+.max-log-message { min-width: 320px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.max-log-detail { color: #ffb4b4; margin-top: 8px; }
+.max-log-status { white-space: nowrap; font-weight: 700; }
+.max-log-status-sent { color: #8be3a8; }
+.max-log-status-error { color: #ffb4b4; }
+.max-log-status-queued { color: #f2cc8f; }
+.max-log-status-skipped { color: var(--muted); }
+.max-log-pages { justify-content: flex-end; padding: 12px 16px; }
+@media (max-width: 980px) {
+  .max-logs-topbar { grid-template-columns: 1fr; }
+}
 .history-topbar { grid-template-columns: 1fr minmax(260px, 1fr) auto; }
 .history-lead { font-size: 13px; }
 .history-filter-panel { padding: 16px; overflow: visible; }

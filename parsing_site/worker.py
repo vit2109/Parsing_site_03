@@ -37,7 +37,11 @@ class ParseWorker:
         self._status = "stopped"
         self._error = ""
         self._polls = 0
-        self._max_dispatch = MaxDispatch(db.add_log, store.current)
+        self._max_dispatch = MaxDispatch(db.add_log, store.current, db)
+
+    def send_max_test(self, user_id: int) -> int | None:
+        """Ставит тестовое сообщение MAX указанному пользователю в очередь."""
+        return self._max_dispatch.submit_test(user_id)
 
     @property
     def status(self) -> dict[str, Any]:

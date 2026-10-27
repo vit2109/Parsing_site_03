@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Журнал отправки MAX</title>
+    <link rel="stylesheet" href="/static/css/app.css?v=14" />
+    <script src="/static/js/max_logs.js?v=1" defer></script>
+  </head>
+  <body>
+    <div class="app max-logs-app">
+      <header class="topbar max-logs-topbar">
+        <div>
+          <p class="kicker">Parsing Site</p>
+          <h1>Журнал отправки MAX</h1>
+        </div>
+        <div class="topbar__actions">
+          <a class="btn btn-ghost" href="/">← Мониторинг</a>
+          <a class="btn btn-history" href="/history">Хронология</a>
+        </div>
+      </header>
+
+      <section class="panel max-test-panel">
+        <h2>Тестовое сообщение</h2>
+        <form id="max-test-form" class="max-test-form">
+          <label for="max-test-user">MAX user ID</label>
+          <input id="max-test-user" type="text" inputmode="numeric" pattern="[1-9][0-9]*" autocomplete="off" placeholder="Например, 6864254" required />
+          <button id="max-test-button" class="btn btn-primary" type="submit">Отправить тест</button>
+        </form>
+        <p id="max-test-result" class="muted" role="status" aria-live="polite">Сообщение будет отправлено через очередь MAX. Результат появится в журнале.</p>
+      </section>
+
+      <section class="panel max-log-panel">
+        <div class="panel__head">
+          <h2>Сообщения</h2>
+          <p id="max-log-count" class="muted">Загрузка…</p>
+        </div>
+        <form id="max-log-filters" class="max-log-filters">
+          <label for="max-log-status">Статус</label>
+          <select id="max-log-status">
+            <option value="">Все</option>
+            <option value="queued">В очереди</option>
+            <option value="sent">Отправлено</option>
+            <option value="error">Ошибка</option>
+            <option value="skipped">Пропущено</option>
+          </select>
+          <label for="max-log-user">Получатель</label>
+          <input id="max-log-user" type="search" inputmode="numeric" placeholder="Любой ID" />
+          <button class="btn" type="submit">Показать</button>
+          <button id="max-log-refresh" class="btn btn-ghost" type="button">Обновить</button>
+        </form>
+        <p id="max-log-error" class="error-banner" role="alert" hidden></p>
+        <div class="table-wrap max-log-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Время</th>
+                <th>Получатель</th>
+                <th>Тип</th>
+                <th>Статус</th>
+                <th>Сообщение и результат</th>
+                <th>Скриншот</th>
+              </tr>
+            </thead>
+            <tbody id="max-log-rows"><tr class="empty"><td colspan="6">Загрузка…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="max-log-pages">
+          <button id="max-log-prev" class="btn" type="button" disabled>← Назад</button>
+          <span id="max-log-page" class="muted"></span>
+          <button id="max-log-next" class="btn" type="button" disabled>Далее →</button>
+        </div>
+      </section>
+    </div>
+  </body>
+</html>

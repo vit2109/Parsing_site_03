@@ -135,6 +135,18 @@ class Database:
                     message TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS max_deliveries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    queued_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    user_id INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    screenshot TEXT,
+                    error TEXT
+                );
+
                 CREATE TABLE IF NOT EXISTS polls (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     ts TEXT NOT NULL,
@@ -178,6 +190,8 @@ class Database:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts);
+                CREATE INDEX IF NOT EXISTS idx_max_deliveries_user
+                    ON max_deliveries(user_id, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_polls_ts ON polls(ts);
                 CREATE INDEX IF NOT EXISTS idx_static_observations_object
                     ON static_observations(static_index, poll_id);
@@ -388,6 +402,70 @@ class Database:
                 (max(1, min(limit, 500)),),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def add_max_delivery(
+        self, user_id: int, kind: str, message: str, screenshot: str | None,
+    ) -> int:
+        """Фиксирует постановку одного сообщения MAX в очередь без токена."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT INTO max_deliveries(queued_at, user_id, kind, status, "
+                "message, screenshot) VALUES(?, ?, ?, 'queued', ?, ?)",
+                (_now(), user_id, kind, message, screenshot),
+            )
+            self._conn.commit()
+            return int(cursor.lastrowid)
+
+    def finish_max_delivery(self, delivery_id: int, status: str, error: str = "") -> None:
+        """Обновляет результат попытки отправки сообщения MAX."""
+        if status not in {"sent", "error", "skipped"}:
+            raise ValueError("Недопустимый статус отправки MAX")
+        with self._lock:
+            self._conn.execute(
+                "UPDATE max_deliveries SET finished_at = ?, status = ?, error = ? "
+                "WHERE id = ?",
+                (_now(), status, error[:2000] or None, delivery_id),
+            )
+            self._conn.commit()
+
+    def mark_interrupted_max_deliveries(self) -> int:
+        """Отмечает сообщения, оставшиеся в очереди после прошлого запуска."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE max_deliveries SET finished_at = ?, status = 'skipped', "
+                "error = 'Приложение завершилось до отправки' WHERE status = 'queued'",
+                (_now(),),
+            )
+            self._conn.commit()
+            return int(cursor.rowcount)
+
+    def list_max_deliveries(
+        self, limit: int = 100, offset: int = 0,
+        status: str | None = None, user_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Возвращает страницу журнала MAX и число совпадающих записей."""
+        if status and status not in {"queued", "sent", "error", "skipped"}:
+            raise ValueError("Недопустимый фильтр статуса MAX")
+        where = []
+        params: list[Any] = []
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        if user_id is not None:
+            where.append("user_id = ?")
+            params.append(user_id)
+        clause = " WHERE " + " AND ".join(where) if where else ""
+        with self._lock:
+            total = self._conn.execute(
+                "SELECT COUNT(*) FROM max_deliveries" + clause, params,
+            ).fetchone()[0]
+            rows = self._conn.execute(
+                "SELECT id, queued_at, finished_at, user_id, kind, status, "
+                "message, screenshot, error FROM max_deliveries" + clause
+                + " ORDER BY id DESC LIMIT ? OFFSET ?",
+                [*params, max(1, min(limit, 200)), max(0, offset)],
+            ).fetchall()
+        return {"total": total, "items": [dict(row) for row in rows]}
 
     def save_snapshot(
         self,

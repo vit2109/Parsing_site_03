@@ -16,11 +16,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from parsing_site.config import ROOT
 from parsing_site.settings_store import RuntimeSettings, resolve_max_token
 from parsing_site.tracking import DistanceRow, TrackingSnapshot
+
+if TYPE_CHECKING:
+    from parsing_site.db import Database
 
 API = "https://platform-api2.max.ru"
 SEVERITY = {"ok": 0, "blue": 1, "warning": 2, "alert": 3}
@@ -48,6 +51,8 @@ class MaxDelivery:
     token: str
     text: str
     screenshot: Path | None
+    test: bool = False
+    log_id: int | None = None
 
 
 class MaxAlertEngine:
@@ -202,14 +207,21 @@ class MaxDispatch:
     """Фоновая очередь, ограничивающая отправку одному пользователю."""
 
     def __init__(self, log: Callable[[str, str, str], None],
-                 current_settings: Callable[[], RuntimeSettings]) -> None:
+                 current_settings: Callable[[], RuntimeSettings],
+                 database: Database | None = None) -> None:
         self._queue: queue.Queue[MaxDelivery] = queue.Queue()
         self._log = log
         self._current_settings = current_settings
+        self._database = database
         self._last_sent: dict[int, float] = {}
         self._thread: threading.Thread | None = None
 
-    def submit(self, delivery: MaxDelivery) -> None:
+    def submit(self, delivery: MaxDelivery) -> int | None:
+        if self._database is not None:
+            delivery.log_id = self._database.add_max_delivery(
+                delivery.user_id, "test" if delivery.test else "alert",
+                delivery.text, str(delivery.screenshot) if delivery.screenshot else None,
+            )
         if self._thread is None:
             self._thread = threading.Thread(target=self._run, name="max-dispatch", daemon=True)
             self._thread.start()
@@ -217,25 +229,44 @@ class MaxDispatch:
         pending = self._queue.qsize()
         if pending in {100, 500, 1000, 5000}:
             self._log("WARNING", "max", f"В очереди MAX {pending} уведомлений: доставка задержится")
+        return delivery.log_id
+
+    def submit_test(self, user_id: int) -> int | None:
+        """Ставит в ту же очередь диагностическое текстовое сообщение."""
+        token = resolve_max_token(self._current_settings())
+        if not token:
+            raise ValueError("Токен MAX не настроен")
+        text = f"Тестовое сообщение Parsing Site. Время: {datetime.now().astimezone():%d.%m.%Y %H:%M:%S}."
+        return self.submit(MaxDelivery(user_id, token, text, None, test=True))
 
     def _run(self) -> None:
         while True:
             delivery = self._queue.get()
             try:
                 settings = self._current_settings()
-                if not settings.max_enabled or not any(
+                if not delivery.test and (not settings.max_enabled or not any(
                     recipient.user_id == delivery.user_id
                     for recipient in settings.max_recipients
-                ):
+                )):
+                    if self._database is not None and delivery.log_id is not None:
+                        self._database.finish_max_delivery(
+                            delivery.log_id, "skipped", "Рассылка выключена или получатель удалён",
+                        )
                     continue
                 delivery.token = resolve_max_token(settings)
+                if not delivery.token:
+                    raise ValueError("Токен MAX не настроен")
                 wait = 0.5 - (time.monotonic() - self._last_sent.get(delivery.user_id, 0))
                 if wait > 0:
                     time.sleep(wait)
                 send_max_message(delivery)
                 self._last_sent[delivery.user_id] = time.monotonic()
-                self._log("INFO", "max", f"Сообщение отправлено user_id={delivery.user_id}")
+                if self._database is not None and delivery.log_id is not None:
+                    self._database.finish_max_delivery(delivery.log_id, "sent")
+                self._log("INFO", "max", f"Сообщение отправлено user_id={delivery.user_id}, запись #{delivery.log_id}")
             except Exception as exc:  # noqa: BLE001 — ошибка доставки не останавливает опрос.
-                self._log("WARNING", "max", f"user_id={delivery.user_id}: {exc}")
+                if self._database is not None and delivery.log_id is not None:
+                    self._database.finish_max_delivery(delivery.log_id, "error", str(exc))
+                self._log("WARNING", "max", f"user_id={delivery.user_id}, запись #{delivery.log_id}: {exc}")
             finally:
                 self._queue.task_done()

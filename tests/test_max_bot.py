@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
 from parsing_site.browser import NumberedCapture
+from parsing_site.db import Database
 from parsing_site.max_bot import (
     MaxAlertEngine,
     MaxDelivery,
@@ -282,6 +283,53 @@ class MaxBotTest(unittest.TestCase):
             dispatch.submit(MaxDelivery(111, "old-token", "Текст", None))
             dispatch._queue.join()
         sender.assert_not_called()
+
+    def test_delivery_log_records_sent_failed_and_skipped(self) -> None:
+        with TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "tracking.db")
+            config = settings()
+            dispatch = MaxDispatch(db.add_log, lambda: config, db)
+            with patch("parsing_site.max_bot.send_max_message") as sender:
+                sent_id = dispatch.submit(MaxDelivery(111, "secret", "Объект №87", None))
+                dispatch._queue.join()
+                sender.side_effect = RuntimeError("MAX HTTP 403")
+                error_id = dispatch.submit(MaxDelivery(111, "secret", "Ошибка", None))
+                dispatch._queue.join()
+                config.max_enabled = False
+                skipped_id = dispatch.submit(MaxDelivery(111, "secret", "Пропуск", None))
+                dispatch._queue.join()
+            items = {item["id"]: item for item in db.list_max_deliveries()["items"]}
+            self.assertEqual(items[sent_id]["status"], "sent")
+            self.assertEqual(items[error_id]["status"], "error")
+            self.assertIn("403", items[error_id]["error"])
+            self.assertEqual(items[skipped_id]["status"], "skipped")
+            self.assertEqual(db.list_max_deliveries(status="error")["total"], 1)
+            self.assertEqual(db.list_max_deliveries(user_id=222)["total"], 0)
+            self.assertEqual(db.list_max_deliveries(limit=1)["items"][0]["id"], skipped_id)
+            self.assertEqual(db.list_max_deliveries(limit=1, offset=1)["items"][0]["id"], error_id)
+            queued_id = db.add_max_delivery(111, "alert", "Осталось в очереди", None)
+            self.assertEqual(db.mark_interrupted_max_deliveries(), 1)
+            self.assertEqual(db.list_max_deliveries()["items"][0]["id"], queued_id)
+            self.assertEqual(db.list_max_deliveries()["items"][0]["status"], "skipped")
+            db.close()
+
+    def test_manual_message_uses_same_queue_without_active_alerts(self) -> None:
+        with TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "tracking.db")
+            config = settings()
+            config.max_enabled = False
+            dispatch = MaxDispatch(db.add_log, lambda: config, db)
+            with patch("parsing_site.max_bot.send_max_message") as sender:
+                delivery_id = dispatch.submit_test(6864254)
+                dispatch._queue.join()
+            sender.assert_called_once()
+            self.assertEqual(sender.call_args.args[0].user_id, 6864254)
+            item = db.list_max_deliveries()["items"][0]
+            self.assertEqual(item["id"], delivery_id)
+            self.assertEqual(item["kind"], "test")
+            self.assertEqual(item["status"], "sent")
+            self.assertNotIn("secret-token", item["message"])
+            db.close()
 
 
 if __name__ == "__main__":

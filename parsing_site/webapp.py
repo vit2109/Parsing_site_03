@@ -29,6 +29,7 @@ worker = ParseWorker(db, store, table_history_db)
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Инициализирует данные при старте и освобождает ресурсы при остановке ASGI."""
+    db.mark_interrupted_max_deliveries()
     store.ensure_defaults(load_config())
     db.prune_dynamic_history()
     table_history_db.prune_dynamic_history()
@@ -104,6 +105,12 @@ def history_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "history.html", {})
 
 
+@app.get("/max-logs", response_class=HTMLResponse)
+def max_logs_page(request: Request) -> HTMLResponse:
+    """Отдаёт журнал доставки уведомлений MAX."""
+    return templates.TemplateResponse(request, "max_logs.html", {})
+
+
 @app.get("/api/state")
 def api_state() -> dict[str, Any]:
     """Возвращает единый снимок настроек, worker, таблицы, хранилища и логов."""
@@ -168,6 +175,31 @@ def api_stop() -> dict[str, Any]:
 def api_logs(limit: int = 80) -> list[dict[str, Any]]:
     """Возвращает ограниченный список последних событий приложения."""
     return db.list_logs(limit)
+
+
+class MaxTestIn(BaseModel):
+    user_id: int = Field(gt=0, le=9223372036854775807)
+
+
+@app.get("/api/max/logs")
+def api_max_logs(
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    status: str | None = Query(default=None, pattern="^(queued|sent|error|skipped)$"),
+    user_id: int | None = Query(default=None, gt=0),
+) -> dict[str, Any]:
+    """Возвращает записи отправки MAX с фильтрами и постраничной выдачей."""
+    return db.list_max_deliveries(limit, offset, status, user_id)
+
+
+@app.post("/api/max/test")
+def api_max_test(payload: MaxTestIn) -> dict[str, Any]:
+    """Отправляет тестовое сообщение через общую очередь MAX."""
+    try:
+        delivery_id = worker.send_max_test(payload.user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"id": delivery_id, "status": "queued", "user_id": payload.user_id}
 
 
 @app.get("/api/movements")
