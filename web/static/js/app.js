@@ -668,7 +668,7 @@ function fillForm(settings) {
   els.form.elements.namedItem("max_enabled").checked = Boolean(settings.max_enabled);
   els.form.elements.namedItem("max_token").value = "";
   els.form.elements.namedItem("max_token_clear").checked = false;
-  els.maxTokenStatus.textContent = settings.max_token_set ? "Токен сохранён" : "Токен не задан";
+  els.maxTokenStatus.textContent = settings.max_token_set ? "Токен доступен" : "Токен не задан";
   maxGroups = (settings.max_groups || []).slice();
   renderMaxGroups();
   setFormValue("threshold", settings.threshold);

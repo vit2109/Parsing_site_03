@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -12,9 +13,15 @@ from parsing_site.max_bot import (
     MaxAlertEngine,
     MaxDelivery,
     MaxDispatch,
+    _ssl_context,
     send_max_message,
 )
-from parsing_site.settings_store import from_dict, validate_settings
+from parsing_site.settings_store import (
+    _max_token_from_dotenv,
+    from_dict,
+    resolve_max_token,
+    validate_settings,
+)
 from parsing_site.tracking import DistanceRow, SceneObject, TrackingSnapshot
 from parsing_site.worker import ParseWorker
 
@@ -49,6 +56,43 @@ def snapshot(status: str) -> TrackingSnapshot:
 
 
 class MaxBotTest(unittest.TestCase):
+    def test_first_poll_sends_existing_blue_object_once(self) -> None:
+        engine = MaxAlertEngine()
+        config = settings()
+        self.assertEqual([item.user_id for item in engine.collect(snapshot("blue"), config, [])], [111])
+        self.assertEqual(engine.collect(snapshot("blue"), config, []), [])
+
+    def test_token_from_environment_without_database_copy(self) -> None:
+        payload = settings().to_dict()
+        payload["max_token"] = ""
+        with patch.dict(os.environ, {"MAX_BOT_TOKEN": "env-secret"}):
+            config = validate_settings(from_dict(payload))
+            self.assertEqual(config.max_token, "")
+            self.assertTrue(config.public_dict()["max_token_set"])
+            self.assertEqual(resolve_max_token(config), "env-secret")
+
+    def test_token_from_local_dotenv(self) -> None:
+        with TemporaryDirectory() as directory:
+            Path(directory, ".env").write_text("MAX_BOT_TOKEN=file-secret\n", encoding="utf-8")
+            with patch.dict(os.environ, {"MAX_BOT_TOKEN": ""}), \
+                    patch("parsing_site.settings_store.ROOT", Path(directory)):
+                _max_token_from_dotenv.cache_clear()
+                self.assertEqual(resolve_max_token(from_dict({})), "file-secret")
+        _max_token_from_dotenv.cache_clear()
+
+    def test_tls_uses_local_ca_bundle(self) -> None:
+        with TemporaryDirectory() as directory:
+            bundle = Path(directory, "certs", "ca-bundle.pem")
+            bundle.parent.mkdir()
+            bundle.write_text("test", encoding="utf-8")
+            with patch.dict(os.environ, {"SSL_CERT_FILE": "", "SSL_CERT_DIR": ""}), \
+                    patch("parsing_site.max_bot.ROOT", Path(directory)), \
+                    patch("parsing_site.max_bot.ssl.create_default_context") as create:
+                _ssl_context.cache_clear()
+                _ssl_context()
+                create.assert_called_once_with(cafile=str(bundle))
+        _ssl_context.cache_clear()
+
     def test_settings_validate_and_hide_token(self) -> None:
         config = settings()
         self.assertEqual(config.public_dict()["max_token"], "")

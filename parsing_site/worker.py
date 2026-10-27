@@ -12,7 +12,7 @@ from parsing_site.capture_archive import CaptureArchive
 from parsing_site.config import load_config
 from parsing_site.db import Database
 from parsing_site.max_bot import MaxAlertEngine, MaxDispatch
-from parsing_site.settings_store import SettingsStore
+from parsing_site.settings_store import SettingsStore, resolve_max_token
 from parsing_site.table_history_db import TableHistoryDatabase
 from parsing_site.tracking import capture_snapshot, snapshot_to_dict
 
@@ -143,6 +143,13 @@ class ParseWorker:
                         settings.cdp_url,
                         settings.wait_for_selector,
                     )
+                    self._db.add_log(
+                        "INFO", "max", "Рассылка MAX "
+                        + (f"включена: {len(settings.max_recipients)} получателей, "
+                           f"токен {'доступен' if resolve_max_token(settings) else 'отсутствует'}"
+                           if settings.max_enabled else "выключена"),
+                    )
+                    first_poll = True
                     while not self._stop.is_set():
                         started = monotonic()
                         settings = self._store.current()
@@ -180,7 +187,24 @@ class ParseWorker:
                             self._db.add_log("INFO", "archive", f"Сохранён файл: {path}")
                         for error in archive_errors:
                             self._db.add_log("WARNING", "archive", error)
-                        for delivery in max_alerts.collect(snapshot, settings, archive.screenshots):
+                        deliveries = max_alerts.collect(snapshot, settings, archive.screenshots)
+                        if first_poll and settings.max_enabled:
+                            blue = sum(row.status == "blue" for row in snapshot.rows)
+                            yellow = sum(row.status == "warning" for row in snapshot.rows)
+                            red = sum(row.status == "alert" for row in snapshot.rows)
+                            self._db.add_log(
+                                "INFO", "max", f"Первый опрос #{poll_id}: "
+                                f"синих пар {blue}, жёлтых {yellow}, красных {red}; "
+                                f"подготовлено уведомлений {len(deliveries)}",
+                            )
+                        first_poll = False
+                        if deliveries:
+                            self._db.add_log(
+                                "INFO", "max", f"Опрос #{poll_id}: в очередь добавлено "
+                                f"{len(deliveries)} уведомлений для "
+                                f"{len({item.user_id for item in deliveries})} получателей",
+                            )
+                        for delivery in deliveries:
                             self._max_dispatch.submit(delivery)
                         previous = {
                             item.index: (item.x, item.y, item.lat, item.lng)

@@ -3,17 +3,44 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import asdict, dataclass, field, replace
+from functools import lru_cache
 from typing import Any
 
-from parsing_site.config import AppConfig, StaticObjectConfig, load_config
+from parsing_site.config import ROOT, AppConfig, StaticObjectConfig, load_config
 from parsing_site.coordinates import normalize_mode
 from parsing_site.db import Database
 
 _HEX = re.compile(r"^#([0-9a-fA-F]{6})$")
 COORD_MODES = {"screen", "map_relative", "percent", "latlng"}
 MAX_ZONES = {"blue", "warning", "alert"}
+
+
+@lru_cache(maxsize=1)
+def _max_token_from_dotenv() -> str:
+    """Ищет токен в локальном .env и существующем соседнем проекте бота."""
+    for path in (
+        ROOT / ".env",
+        ROOT.parent / "MAX_BOT" / ".env",
+        ROOT.parent.parent / "MAX_BOT" / ".env",
+    ):
+        try:
+            lines = path.read_text(encoding="utf-8-sig").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            key, separator, value = line.partition("=")
+            if separator and key.strip() == "MAX_BOT_TOKEN":
+                return value.strip().strip('"\'')
+    return ""
+
+
+def resolve_max_token(settings: RuntimeSettings) -> str:
+    """Возвращает токен из настроек, окружения или .env без записи в БД."""
+    return settings.max_token.strip() or os.environ.get("MAX_BOT_TOKEN", "").strip() \
+        or _max_token_from_dotenv()
 
 
 @dataclass(slots=True)
@@ -83,7 +110,7 @@ class RuntimeSettings:
         """Возвращает настройки для браузера без секретного токена."""
         payload = self.to_dict()
         payload["max_token"] = ""
-        payload["max_token_set"] = bool(self.max_token)
+        payload["max_token_set"] = bool(resolve_max_token(self))
         return payload
 
     def to_app_config(self, base: AppConfig | None = None) -> AppConfig:
@@ -363,7 +390,7 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
                                for static_id, zones in sorted(rules.items())])
         for user_id, rules in recipient_rules.items()
     ]
-    if settings.max_enabled and (not settings.max_token.strip() or not recipients):
+    if settings.max_enabled and (not resolve_max_token(settings) or not recipients):
         raise ValueError("Для рассылки MAX укажите токен бота и хотя бы одного получателя.")
     return RuntimeSettings(
         site=site,

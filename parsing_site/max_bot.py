@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
+import ssl
 import threading
 import time
 import urllib.error
@@ -12,15 +14,32 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from parsing_site.settings_store import RuntimeSettings
+from parsing_site.config import ROOT
+from parsing_site.settings_store import RuntimeSettings, resolve_max_token
 from parsing_site.tracking import TrackingSnapshot
 
 API = "https://platform-api2.max.ru"
 SEVERITY = {"ok": 0, "blue": 1, "warning": 2, "alert": 3}
 ZONE_NAME = {"blue": "синюю", "warning": "жёлтую", "alert": "красную"}
+
+
+@lru_cache(maxsize=1)
+def _ssl_context() -> ssl.SSLContext:
+    """Проверяет TLS с выбранным CA-набором; никогда не отключает проверку."""
+    if os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR"):
+        return ssl.create_default_context()
+    for path in (
+        ROOT / "certs" / "ca-bundle.pem",
+        ROOT.parent / "MAX_BOT" / "certs" / "ca-bundle.pem",
+        ROOT.parent.parent / "MAX_BOT" / "certs" / "ca-bundle.pem",
+    ):
+        if path.is_file():
+            return ssl.create_default_context(cafile=str(path))
+    return ssl.create_default_context()
 
 
 @dataclass(slots=True)
@@ -93,7 +112,7 @@ class MaxAlertEngine:
                 if photo is None:
                     lines.append("Скриншот с видимым номером объекта не найден.")
                 deliveries.append(MaxDelivery(
-                    recipient.user_id, settings.max_token, "\n".join(lines)[:4000], photo,
+                    recipient.user_id, resolve_max_token(settings), "\n".join(lines)[:4000], photo,
                 ))
         self._previous = {key: value for key, value in self._previous.items() if key in active}
         return deliveries
@@ -112,7 +131,7 @@ def _request_json(url: str, token: str, body: bytes | None = None,
     request = urllib.request.Request(url, data=body if body is not None else b"",
                                      headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with urllib.request.urlopen(request, timeout=15, context=_ssl_context()) as response:
             content = response.read()
     except urllib.error.HTTPError as exc:
         detail = exc.read(1024).decode("utf-8", errors="replace")
@@ -189,7 +208,7 @@ class MaxDispatch:
                     for recipient in settings.max_recipients
                 ):
                     continue
-                delivery.token = settings.max_token
+                delivery.token = resolve_max_token(settings)
                 wait = 0.5 - (time.monotonic() - self._last_sent.get(delivery.user_id, 0))
                 if wait > 0:
                     time.sleep(wait)

@@ -252,7 +252,7 @@
             <input name="max_token" type="password" autocomplete="new-password" placeholder="Новый токен (пустое поле сохраняет текущий)" />
           </label>
           <p id="max-token-status" class="muted"></p>
-          <label class="checkbox"><input name="max_token_clear" type="checkbox" /> Удалить сохранённый токен</label>
+          <label class="checkbox"><input name="max_token_clear" type="checkbox" /> Удалить токен из настроек (.env останется)</label>
           <div id="max-recipient-list"></div>
         </div>
         <p id="settings-error" class="form-error" hidden></p>
@@ -266,6 +266,6 @@
     <script>
       window.__INITIAL_SETTINGS__ = {{ settings | tojson }};
     </script>
-    <script src="/static/js/app.js?v=8"></script>
+    <script src="/static/js/app.js?v=9"></script>
   </body>
 </html>
