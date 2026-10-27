@@ -11,6 +11,7 @@ from parsing_site.browser import BrowserNotConnectedError, BrowserSession
 from parsing_site.capture_archive import CaptureArchive
 from parsing_site.config import load_config
 from parsing_site.db import Database
+from parsing_site.max_bot import MaxAlertEngine, MaxDispatch
 from parsing_site.settings_store import SettingsStore
 from parsing_site.table_history_db import TableHistoryDatabase
 from parsing_site.tracking import capture_snapshot, snapshot_to_dict
@@ -36,6 +37,7 @@ class ParseWorker:
         self._status = "stopped"
         self._error = ""
         self._polls = 0
+        self._max_dispatch = MaxDispatch(db.add_log, store.current)
 
     @property
     def status(self) -> dict[str, Any]:
@@ -124,6 +126,7 @@ class ParseWorker:
             # DOM-маркеров. Не считаем перемещение относительно прежней сессии.
             previous: dict[int, tuple[float, ...]] = {}
             previous_day: str | None = None
+            max_alerts = MaxAlertEngine()
             settings = self._store.current()
             cfg = settings.to_app_config(load_config())
             interval = max(0.4, settings.interval_seconds)
@@ -159,7 +162,7 @@ class ParseWorker:
                         archive = CaptureArchive(settings)
                         session.prepare_numbered_capture(
                             (settings.screenshot_width, settings.screenshot_height)
-                            if settings.screenshot_enabled else None,
+                            if settings.screenshot_enabled or settings.max_enabled else None,
                             html_enabled=settings.archive_html_enabled,
                             on_capture=archive.save,
                         )
@@ -177,6 +180,8 @@ class ParseWorker:
                             self._db.add_log("INFO", "archive", f"Сохранён файл: {path}")
                         for error in archive_errors:
                             self._db.add_log("WARNING", "archive", error)
+                        for delivery in max_alerts.collect(snapshot, settings, archive.screenshots):
+                            self._max_dispatch.submit(delivery)
                         previous = {
                             item.index: (item.x, item.y, item.lat, item.lng)
                             for item in snapshot.dynamics

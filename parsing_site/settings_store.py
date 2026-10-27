@@ -13,6 +13,19 @@ from parsing_site.db import Database
 
 _HEX = re.compile(r"^#([0-9a-fA-F]{6})$")
 COORD_MODES = {"screen", "map_relative", "percent", "latlng"}
+MAX_ZONES = {"blue", "warning", "alert"}
+
+
+@dataclass(slots=True)
+class MaxObjectRule:
+    static_index: int
+    zones: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class MaxRecipient:
+    user_id: int
+    rules: list[MaxObjectRule] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -44,6 +57,9 @@ class RuntimeSettings:
     archive_html_enabled: bool = False
     archive_html_dir: str = "data/html"
     archive_html_period_hours: int = 1
+    max_enabled: bool = False
+    max_token: str = ""
+    max_recipients: list[MaxRecipient] = field(default_factory=list)
     lock_scale: bool = False
     static_source: str = "config"
     static_objects: list[StaticObjectConfig] = field(default_factory=list)
@@ -52,6 +68,13 @@ class RuntimeSettings:
         """Сериализует настройки и вложенные точки в JSON-совместимый словарь."""
         payload = asdict(self)
         payload["static_objects"] = [asdict(item) for item in self.static_objects]
+        return payload
+
+    def public_dict(self) -> dict[str, Any]:
+        """Возвращает настройки для браузера без секретного токена."""
+        payload = self.to_dict()
+        payload["max_token"] = ""
+        payload["max_token_set"] = bool(self.max_token)
         return payload
 
     def to_app_config(self, base: AppConfig | None = None) -> AppConfig:
@@ -175,6 +198,15 @@ def from_dict(data: dict[str, Any]) -> RuntimeSettings:
                 lng=_optional(item.get("lng")),
             )
         )
+    recipients = [
+        MaxRecipient(
+            user_id=int(item.get("user_id", 0)),
+            rules=[MaxObjectRule(
+                static_index=int(rule.get("static_index", 0)),
+                zones=[str(zone) for zone in rule.get("zones") or []],
+            ) for rule in item.get("rules") or []],
+        ) for item in data.get("max_recipients") or []
+    ]
     return RuntimeSettings(
         site=str(data.get("site", "http://127.0.0.1:8000")),
         cdp_url=str(data.get("cdp_url", "http://127.0.0.1:9222")),
@@ -207,6 +239,9 @@ def from_dict(data: dict[str, Any]) -> RuntimeSettings:
         archive_html_enabled=bool(data.get("archive_html_enabled", False)),
         archive_html_dir=str(data.get("archive_html_dir", "data/html")),
         archive_html_period_hours=int(data.get("archive_html_period_hours", 1)),
+        max_enabled=bool(data.get("max_enabled", False)),
+        max_token=str(data.get("max_token", "")),
+        max_recipients=recipients,
         lock_scale=bool(data.get("lock_scale", False)),
         static_source=str(data.get("static_source", "config")),
         static_objects=objects,
@@ -259,6 +294,28 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
         if settings.static_source in {"config", "page", "both"}
         else "config"
     )
+    recipients: list[MaxRecipient] = []
+    seen_users: set[int] = set()
+    static_ids = {item.id for item in settings.static_objects}
+    for recipient in settings.max_recipients:
+        if recipient.user_id <= 0 or recipient.user_id in seen_users:
+            raise ValueError("Укажите уникальный положительный MAX user ID для каждого получателя.")
+        seen_users.add(recipient.user_id)
+        rules: list[MaxObjectRule] = []
+        seen_statics: set[int] = set()
+        for rule in recipient.rules:
+            if rule.static_index not in static_ids or rule.static_index in seen_statics:
+                raise ValueError("Выберите существующий стационарный объект один раз для получателя MAX.")
+            zones = list(dict.fromkeys(rule.zones))
+            if not zones or any(zone not in MAX_ZONES for zone in zones):
+                raise ValueError("Для объекта MAX выберите синюю, жёлтую или красную зону.")
+            seen_statics.add(rule.static_index)
+            rules.append(MaxObjectRule(rule.static_index, zones))
+        if not rules:
+            raise ValueError("Для каждого получателя MAX выберите объект и зону.")
+        recipients.append(MaxRecipient(recipient.user_id, rules))
+    if settings.max_enabled and (not settings.max_token.strip() or not recipients):
+        raise ValueError("Для рассылки MAX укажите токен бота и хотя бы одного получателя.")
     return RuntimeSettings(
         site=site,
         cdp_url=cdp_url,
@@ -288,6 +345,9 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
         archive_html_enabled=bool(settings.archive_html_enabled),
         archive_html_dir=settings.archive_html_dir.strip(),
         archive_html_period_hours=settings.archive_html_period_hours,
+        max_enabled=bool(settings.max_enabled),
+        max_token=settings.max_token.strip(),
+        max_recipients=recipients,
         lock_scale=bool(settings.lock_scale),
         static_source=source,
         static_objects=list(settings.static_objects),

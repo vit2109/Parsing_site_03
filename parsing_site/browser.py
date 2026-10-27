@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 _VISIBLE_NUMBERS_SCRIPT = """selector => {
   const map = document.querySelector(selector);
-  if (!map) return 0;
+  if (!map) return [];
   const box = map.getBoundingClientRect();
   return [...map.querySelectorAll('.leaflet-marker-icon.map-incident-operator-number')]
     .filter(el => {
@@ -33,7 +33,7 @@ _VISIBLE_NUMBERS_SCRIPT = """selector => {
       const x = rect.left + rect.width / 2;
       const y = rect.top + rect.height / 2;
       return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
-    }).length;
+    }).map(el => Number(el.textContent.trim().replace(/^№\\s*/, '')));
 }"""
 
 
@@ -58,6 +58,7 @@ class NumberedCapture:
     zoom: float
     image: bytes | None = None
     html: str | None = None
+    numbers: tuple[int, ...] = ()
 
 
 class BrowserSession:
@@ -192,7 +193,8 @@ class BrowserSession:
     ) -> bool:
         """Берёт HTML и JPEG только при наличии видимой подписи в DOM."""
         try:
-            if not page.evaluate(_VISIBLE_NUMBERS_SCRIPT, selector):
+            labels = page.evaluate(_VISIBLE_NUMBERS_SCRIPT, selector)
+            if not labels:
                 return False
         except Exception as exc:  # noqa: BLE001 — ошибка архива не прерывает обход.
             if self._numbered_size is not None:
@@ -201,6 +203,8 @@ class BrowserSession:
                 self.numbered_html_error = str(exc)
             return False
         capture = NumberedCapture(datetime.now().astimezone(), zoom)
+        if isinstance(labels, list):
+            capture.numbers = tuple(sorted({int(number) for number in labels if int(number) > 0}))
         if self._numbered_html_enabled and not self._numbered_html_captured:
             try:
                 capture.html = page.content()

@@ -26,24 +26,29 @@ class CaptureArchive:
         self.settings = settings
         self.saved: list[Path] = []
         self.errors: list[str] = []
+        self.screenshots: list[tuple[Path, datetime, tuple[int, ...]]] = []
 
     def save(self, capture: Any) -> None:
         """Пишет JPEG вида и первый HTML обхода в выбранные папки."""
         jobs = (
-            (self.settings.screenshot_enabled, self.settings.screenshot_dir,
+            (self.settings.screenshot_enabled or self.settings.max_enabled,
+             self.settings.screenshot_dir if self.settings.screenshot_enabled
+             else str(ROOT / "data" / "max_bot_screenshots"),
              self.settings.screenshot_period_hours, "jpg", "map", capture.image),
             (self.settings.archive_html_enabled, self.settings.archive_html_dir,
              self.settings.archive_html_period_hours, "html", "page", capture.html),
         )
         for enabled, directory, hours, suffix, prefix, content in jobs:
             if enabled and content is not None:
-                self._write(directory, hours, suffix, prefix, content,
-                            capture.captured_at, capture.zoom)
+                path = self._write(directory, hours, suffix, prefix, content,
+                                   capture.captured_at, capture.zoom)
+                if path is not None and suffix == "jpg":
+                    self.screenshots.append((path, capture.captured_at, capture.numbers))
 
     def _write(
         self, directory: str, hours: int, suffix: str, prefix: str,
         content: bytes | str, captured_at: datetime, zoom: float,
-    ) -> None:
+    ) -> Path | None:
         timestamp = captured_at.strftime("%Y-%m-%d_%H-%M-%S-%f")
         zoom_label = f"{zoom:g}".replace(".", "_")
         folder = period_path(directory, hours, captured_at)
@@ -63,15 +68,17 @@ class CaptureArchive:
                     temporary.write_text(content, encoding="utf-8")
                 temporary.replace(target)
                 self.saved.append(target)
+                return target
             finally:
                 temporary.unlink(missing_ok=True)
         except Exception as exc:  # noqa: BLE001 — архив не должен прерывать опрос.
             self.errors.append(f"{prefix}: {exc}")
+        return None
 
     def finish(self, session: Any) -> tuple[list[Path], list[str]]:
         """Добавляет ошибки съёмки к ошибкам записи и возвращает результат."""
         errors = self.errors.copy()
-        if self.settings.screenshot_enabled and session.numbered_capture_error:
+        if (self.settings.screenshot_enabled or self.settings.max_enabled) and session.numbered_capture_error:
             errors.append(f"map: {session.numbered_capture_error}")
         if self.settings.archive_html_enabled and session.numbered_html_error:
             errors.append(f"page: {session.numbered_html_error}")

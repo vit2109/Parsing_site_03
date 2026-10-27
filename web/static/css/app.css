@@ -280,6 +280,12 @@ dialog footer {
   align-items: center;
 }
 .static-row input { min-width: 0; }
+.max-block { border-top: 1px solid var(--line); padding-top: 16px; display: grid; gap: 10px; }
+#max-recipient-list { display: grid; gap: 10px; max-height: 260px; overflow: auto; }
+.max-recipient { border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: grid; gap: 8px; }
+.max-recipient .static-block__head label { min-width: 180px; }
+.max-rule { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; }
+.max-rule strong { min-width: 140px; font-size: 13px; }
 .btn-remove { padding: 6px 10px; }
 label.checkbox {
   flex-direction: row;

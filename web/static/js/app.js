@@ -16,6 +16,7 @@ const STATUS_LABEL = {
 };
 
 let staticObjects = (window.__INITIAL_SETTINGS__?.static_objects || []).slice();
+let maxRecipients = (window.__INITIAL_SETTINGS__?.max_recipients || []).slice();
 
 // Отслеживание красных записей для звукового сигнала
 let previousAlertKeys = new Set();
@@ -50,6 +51,9 @@ const els = {
   historySizeDay: document.getElementById("stat-history-size-day"),
   staticList: document.getElementById("static-list"),
   addStatic: document.getElementById("btn-add-static"),
+  maxList: document.getElementById("max-recipient-list"),
+  addMax: document.getElementById("btn-add-max-recipient"),
+  maxTokenStatus: document.getElementById("max-token-status"),
 };
 
 els.start.addEventListener("click", () => post("/api/worker/start"));
@@ -69,6 +73,12 @@ if (els.pruneHistory) els.pruneHistory.addEventListener("click", async () => {
 els.cancel.addEventListener("click", () => els.dialog.close());
 els.form.addEventListener("submit", saveSettings);
 els.addStatic.addEventListener("click", addStaticRow);
+els.addMax.addEventListener("click", () => {
+  maxRecipients = collectMaxRecipients();
+  maxRecipients.push({ user_id: 0, rules: [] });
+  renderMaxRecipients();
+});
+els.maxList.addEventListener("change", () => { maxRecipients = collectMaxRecipients(); });
 
 renderStaticList();
 
@@ -634,6 +644,12 @@ function fillForm(settings) {
   setFormValue("archive_html_period_hours", settings.archive_html_period_hours ?? 1);
   els.form.elements.namedItem("screenshot_enabled").checked = Boolean(settings.screenshot_enabled);
   els.form.elements.namedItem("archive_html_enabled").checked = Boolean(settings.archive_html_enabled);
+  els.form.elements.namedItem("max_enabled").checked = Boolean(settings.max_enabled);
+  els.form.elements.namedItem("max_token").value = "";
+  els.form.elements.namedItem("max_token_clear").checked = false;
+  els.maxTokenStatus.textContent = settings.max_token_set ? "Токен сохранён" : "Токен не задан";
+  maxRecipients = (settings.max_recipients || []).slice();
+  renderMaxRecipients();
   setFormValue("threshold", settings.threshold);
   setFormValue("warning_distance", settings.warning_distance);
   setFormValue("blue_distance", settings.blue_distance);
@@ -705,6 +721,7 @@ function applyMoves(rows) {
 function renderStaticList() {
   if (!staticObjects.length) {
     els.staticList.innerHTML = `<p class="muted">Нет статичных точек. Нажмите «+ Точка».</p>`;
+    renderMaxRecipients();
     return;
   }
   els.staticList.innerHTML = staticObjects.map((item, index) => `
@@ -719,15 +736,26 @@ function renderStaticList() {
   `).join("");
   els.staticList.querySelectorAll("[data-remove]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      staticObjects.splice(Number(btn.dataset.remove), 1);
+      const removed = Number(btn.dataset.remove) + 1;
+      maxRecipients = collectMaxRecipients().map(recipient => ({
+        ...recipient,
+        rules: recipient.rules.filter(rule => rule.static_index !== removed).map(rule => ({
+          ...rule, static_index: rule.static_index > removed ? rule.static_index - 1 : rule.static_index,
+        })),
+      }));
+      staticObjects = collectStaticObjects();
+      staticObjects.splice(removed - 1, 1);
       renumberStatics();
       renderStaticList();
     });
   });
+  renderMaxRecipients();
 }
 
 /** Добавляет новую пустую стационарную точку и перерисовывает список. */
 function addStaticRow() {
+  maxRecipients = collectMaxRecipients();
+  staticObjects = collectStaticObjects();
   staticObjects.push({
     id: staticObjects.length + 1,
     name: `Точка ${staticObjects.length + 1}`,
@@ -737,6 +765,43 @@ function addStaticRow() {
     lng: null,
   });
   renderStaticList();
+}
+
+/** Получатели MAX и зоны каждой стационарной точки. */
+function renderMaxRecipients() {
+  if (!els.maxList) return;
+  const points = collectStaticObjects();
+  els.maxList.innerHTML = maxRecipients.map((recipient, index) => `
+    <div class="max-recipient" data-recipient="${index}">
+      <div class="static-block__head">
+        <label>MAX user ID <input class="max-user-id" type="text" inputmode="numeric" pattern="[0-9]+" value="${escapeAttr(String(recipient.user_id || ""))}" placeholder="Например 123456" /></label>
+        <button type="button" class="btn btn-remove" data-remove-max="${index}">×</button>
+      </div>
+      ${points.map(point => {
+        const zones = recipient.rules?.find(rule => rule.static_index === point.id)?.zones || [];
+        return `<div class="max-rule" data-static-id="${point.id}"><strong>${escapeHtml(point.name)}</strong>
+          ${[["blue", "Синяя"], ["warning", "Жёлтая"], ["alert", "Красная"]].map(([zone, label]) =>
+            `<label class="checkbox"><input type="checkbox" data-zone="${zone}" ${zones.includes(zone) ? "checked" : ""} />${label}</label>`).join("")}
+        </div>`;
+      }).join("")}
+    </div>
+  `).join("") || `<p class="muted">Получатели не добавлены.</p>`;
+  els.maxList.querySelectorAll("[data-remove-max]").forEach(button => button.addEventListener("click", () => {
+    maxRecipients = collectMaxRecipients();
+    maxRecipients.splice(Number(button.dataset.removeMax), 1);
+    renderMaxRecipients();
+  }));
+}
+
+function collectMaxRecipients() {
+  if (!els.maxList) return [];
+  return [...els.maxList.querySelectorAll(".max-recipient")].map(card => ({
+    user_id: card.querySelector(".max-user-id").value.trim(),
+    rules: [...card.querySelectorAll(".max-rule")].map(row => ({
+      static_index: Number(row.dataset.staticId),
+      zones: [...row.querySelectorAll("[data-zone]:checked")].map(input => input.dataset.zone),
+    })).filter(rule => rule.zones.length),
+  }));
 }
 
 /** Читает и нормализует стационарные точки из полей формы. */
@@ -771,6 +836,9 @@ async function saveSettings(event) {
   data.screenshot_width = Number(data.screenshot_width);
   data.screenshot_height = Number(data.screenshot_height);
   data.archive_html_enabled = Boolean(els.form.elements.namedItem("archive_html_enabled")?.checked);
+  data.max_enabled = Boolean(els.form.elements.namedItem("max_enabled")?.checked);
+  data.max_token_clear = Boolean(els.form.elements.namedItem("max_token_clear")?.checked);
+  data.max_recipients = collectMaxRecipients();
   data.archive_html_period_hours = Number(data.archive_html_period_hours);
   data.threshold = Number(data.threshold);
   data.warning_distance = Number(data.warning_distance);

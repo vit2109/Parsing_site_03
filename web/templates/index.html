@@ -5,7 +5,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Мониторинг объектов</title>
-    <link rel="stylesheet" href="/static/css/app.css?v=7" />
+    <link rel="stylesheet" href="/static/css/app.css?v=8" />
   </head>
   <body>
     <div class="app">
@@ -238,6 +238,23 @@
           </p>
           <div id="static-list" class="static-list"></div>
         </div>
+        <div class="static-block max-block">
+          <div class="static-block__head">
+            <h3>Оповещения в MAX</h3>
+            <button type="button" class="btn" id="btn-add-max-recipient">+ Получатель</button>
+          </div>
+          <label class="checkbox">
+            <input name="max_enabled" type="checkbox" />
+            Отправлять сообщения при входе в выбранные зоны
+          </label>
+          <p class="muted static-hint">Укажите токен бота и MAX user ID получателей. Для каждой точки выберите зоны. Бот должен иметь возможность писать пользователю.</p>
+          <label>Токен бота MAX
+            <input name="max_token" type="password" autocomplete="new-password" placeholder="Новый токен (пустое поле сохраняет текущий)" />
+          </label>
+          <p id="max-token-status" class="muted"></p>
+          <label class="checkbox"><input name="max_token_clear" type="checkbox" /> Удалить сохранённый токен</label>
+          <div id="max-recipient-list"></div>
+        </div>
         <p id="settings-error" class="form-error" hidden></p>
         <footer>
           <button value="cancel" class="btn" type="button" id="btn-cancel">Отмена</button>
@@ -249,6 +266,6 @@
     <script>
       window.__INITIAL_SETTINGS__ = {{ settings | tojson }};
     </script>
-    <script src="/static/js/app.js?v=6"></script>
+    <script src="/static/js/app.js?v=7"></script>
   </body>
 </html>

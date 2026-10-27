@@ -64,6 +64,10 @@ class SettingsIn(BaseModel):
     archive_html_enabled: bool = False
     archive_html_dir: str = "data/html"
     archive_html_period_hours: int = 1
+    max_enabled: bool = False
+    max_token: str = ""
+    max_token_clear: bool = False
+    max_recipients: list[dict[str, Any]] = Field(default_factory=list)
     threshold: float = Field(gt=0)
     warning_distance: float = Field(gt=0)
     blue_distance: float = Field(default=350.0, gt=0)
@@ -89,7 +93,7 @@ def index(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "index.html",
-        {"settings": settings.to_dict()},
+        {"settings": settings.public_dict()},
     )
 
 
@@ -107,7 +111,7 @@ def api_state() -> dict[str, Any]:
     snapshot = status["snapshot"]
     current_rows = len(snapshot.get("rows", [])) if snapshot else None
     return {
-        "settings": settings.to_dict(),
+        "settings": settings.public_dict(),
         "worker": {
             "running": status["running"],
             "status": status["status"],
@@ -126,19 +130,23 @@ def api_state() -> dict[str, Any]:
 @app.get("/api/settings")
 def api_get_settings() -> dict[str, Any]:
     """Возвращает сохранённые runtime-настройки."""
-    return store.current().to_dict()
+    return store.current().public_dict()
 
 
 @app.put("/api/settings")
 def api_put_settings(payload: SettingsIn) -> dict[str, Any]:
     """Проверяет и полностью заменяет runtime-настройки переданного PUT-запроса."""
     data = payload.model_dump()
+    if data.pop("max_token_clear"):
+        data["max_token"] = ""
+    elif not data["max_token"].strip():
+        data["max_token"] = store.current().max_token
     try:
         settings = store.save(from_dict(data))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.add_log("INFO", "settings", f"Настройки сохранены: {settings.site}")
-    return settings.to_dict()
+    return settings.public_dict()
 
 
 @app.post("/api/worker/start")
