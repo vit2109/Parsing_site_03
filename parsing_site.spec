@@ -14,6 +14,7 @@ datas = [
     (str(project_dir / "config.toml"), "."),
     (str(project_dir / "start_chrome.ps1"), "."),
     (str(project_dir / "start_chrome.bat"), "."),
+    (str(project_dir / "certs" / "ca-bundle.pem"), "certs"),
 ]
 
 hiddenimports = [

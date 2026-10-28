@@ -89,12 +89,25 @@ class MaxBotTest(unittest.TestCase):
             bundle = Path(directory, "certs", "ca-bundle.pem")
             bundle.parent.mkdir()
             bundle.write_text("test", encoding="utf-8")
-            with patch.dict(os.environ, {"SSL_CERT_FILE": "", "SSL_CERT_DIR": ""}), \
-                    patch("parsing_site.max_bot.ROOT", Path(directory)), \
+            with patch("parsing_site.max_bot.ROOT", Path(directory)), \
                     patch("parsing_site.max_bot.ssl.create_default_context") as create:
                 _ssl_context.cache_clear()
                 _ssl_context()
-                create.assert_called_once_with(cafile=str(bundle))
+                create.assert_called_once_with()
+                create.return_value.load_verify_locations.assert_called_once_with(cafile=str(bundle))
+        _ssl_context.cache_clear()
+
+    def test_tls_uses_bundled_ca_after_exe_is_moved(self) -> None:
+        with TemporaryDirectory() as directory:
+            bundle = Path(directory, "bundle", "certs", "ca-bundle.pem")
+            bundle.parent.mkdir(parents=True)
+            bundle.write_text("test", encoding="utf-8")
+            with patch("parsing_site.max_bot.ROOT", Path(directory, "installed")), \
+                    patch("parsing_site.max_bot.BUNDLE_ROOT", Path(directory, "bundle")), \
+                    patch("parsing_site.max_bot.ssl.create_default_context") as create:
+                _ssl_context.cache_clear()
+                _ssl_context()
+                create.return_value.load_verify_locations.assert_called_once_with(cafile=str(bundle))
         _ssl_context.cache_clear()
 
     def test_settings_validate_and_hide_token(self) -> None:

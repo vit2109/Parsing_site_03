@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import queue
 import ssl
 import threading
@@ -18,7 +17,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from parsing_site.config import ROOT
+from parsing_site.config import BUNDLE_ROOT, ROOT
 from parsing_site.settings_store import RuntimeSettings, resolve_max_token
 from parsing_site.tracking import DistanceRow, TrackingSnapshot
 
@@ -32,17 +31,18 @@ ZONE_NAME = {"blue": "синюю", "warning": "жёлтую", "alert": "крас
 
 @lru_cache(maxsize=1)
 def _ssl_context() -> ssl.SSLContext:
-    """Проверяет TLS с выбранным CA-набором; никогда не отключает проверку."""
-    if os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR"):
-        return ssl.create_default_context()
+    """Добавляет проверенный CA-набор к системным сертификатам."""
+    context = ssl.create_default_context()
     for path in (
         ROOT / "certs" / "ca-bundle.pem",
+        BUNDLE_ROOT / "certs" / "ca-bundle.pem",
         ROOT.parent / "MAX_BOT" / "certs" / "ca-bundle.pem",
         ROOT.parent.parent / "MAX_BOT" / "certs" / "ca-bundle.pem",
     ):
         if path.is_file():
-            return ssl.create_default_context(cafile=str(path))
-    return ssl.create_default_context()
+            context.load_verify_locations(cafile=str(path))
+            break
+    return context
 
 
 @dataclass(slots=True)
