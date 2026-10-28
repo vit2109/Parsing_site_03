@@ -575,35 +575,60 @@ async (opts) => {
       }
       dynamics.filter((item) => item.index > 0).forEach((item) => usedNumbers.add(item.index));
       scan.overview_count = dynamics.length;
-      // Каждый уровень покрываем сеткой видимых областей. Неподписанные маркеры
-      // повторно проверяем на следующем уровне: в скоплении сайт скрывает часть
-      // подписей даже после того, как показал номера соседних объектов.
-      const zoomLevels = [...new Set([
-        targetZoom, Math.min(targetZoom + 2, maxZoom),
-        Math.min(targetZoom + 4, maxZoom), Math.min(zoom + 6, maxZoom),
-      ])].filter((level) => level >= targetZoom && Number.isFinite(level));
-      for (const level of zoomLevels) {
-        if (!dynamics.some((item) => item.index < 0)) break;
-        const covered = new Set();
-        for (const target of dynamics) {
-          if (target.index >= 0 || !Number.isFinite(target.lat) || !Number.isFinite(target.lng) ||
-              covered.has(target.fallback_id)) continue;
-          const numberedAtMove = await moveTo(target.lat, target.lng, level, true);
+      // Объединяем маркеры, попадающие в один безопасный прямоугольник вида.
+      // Если вся группа поместится на максимальном масштабе, сразу идём туда
+      // один раз: повторные заходы к копиям с тем же номером ничего не дают.
+      const finalZoom = Math.min(zoom + 6, maxZoom);
+      const groupAt = (items, level) => {
+        const positioned = items.map((item) => ({
+          item, point: project3857(item.lat, item.lng, level),
+        }));
+        const minX = Math.min(...positioned.map((entry) => entry.point.x));
+        const minY = Math.min(...positioned.map((entry) => entry.point.y));
+        const cellW = Math.max(1, mapRect.width * 0.6);
+        const cellH = Math.max(1, mapRect.height * 0.6);
+        const cells = new Map();
+        for (const entry of positioned) {
+          const key = `${Math.floor((entry.point.x - minX) / cellW)},` +
+            `${Math.floor((entry.point.y - minY) / cellH)}`;
+          if (!cells.has(key)) cells.set(key, []);
+          cells.get(key).push(entry.item);
+        }
+        return [...cells.values()].sort((a, b) => b.length - a.length);
+      };
+      const attemptedAtFinal = new Set();
+      for (const level of [...new Set([targetZoom, finalZoom])]) {
+        const pending = dynamics.filter((item) => item.index < 0 &&
+          Number.isFinite(item.lat) && Number.isFinite(item.lng) &&
+          !attemptedAtFinal.has(item.fallback_id));
+        if (!pending.length) break;
+        for (const group of groupAt(pending, level)) {
+          const remaining = group.filter((item) => item.index < 0 &&
+            !attemptedAtFinal.has(item.fallback_id));
+          if (!remaining.length) continue;
+          const highPoints = remaining.map((item) => project3857(item.lat, item.lng, finalZoom));
+          const highX = highPoints.map((point) => point.x);
+          const highY = highPoints.map((point) => point.y);
+          const fitsHigh = Math.max(...highX) - Math.min(...highX) <= mapRect.width * 0.6 &&
+            Math.max(...highY) - Math.min(...highY) <= mapRect.height * 0.6;
+          const visitZoom = level === finalZoom || fitsHigh ? finalZoom : level;
+          const points = remaining.map((item) => project3857(item.lat, item.lng, visitZoom));
+          const xs = points.map((point) => point.x);
+          const ys = points.map((point) => point.y);
+          const center = unproject3857(
+            (Math.min(...xs) + Math.max(...xs)) / 2,
+            (Math.min(...ys) + Math.max(...ys)) / 2, visitZoom,
+          );
+          const numberedAtMove = await moveTo(center.lat, center.lng, visitZoom, true);
           const matched = matchVisible();
           if (!matched) {
             await new Promise((resolve) => setTimeout(resolve, scanWaitMs));
             if (!numberedAtMove) recordNumberedView(true);
             matchVisible();
           }
-          for (const candidate of dynamics) {
-            if (candidate.index >= 0 || !Number.isFinite(candidate.lat) || !Number.isFinite(candidate.lng)) continue;
-            const p = map.latLngToContainerPoint([candidate.lat, candidate.lng]);
-            if (p && p.x >= mapRect.width * 0.1 && p.x <= mapRect.width * 0.9 &&
-                p.y >= mapRect.height * 0.1 && p.y <= mapRect.height * 0.9) {
-              covered.add(candidate.fallback_id);
-            }
+          if (visitZoom === finalZoom) {
+            remaining.forEach((item) => attemptedAtFinal.add(item.fallback_id));
           }
-          covered.add(target.fallback_id);
         }
       }
     } finally {
@@ -790,6 +815,28 @@ def extract_scene_from_page(
     )
 
 
+def _scan_target_groups(
+    targets: list[dict[str, Any]], width: float, height: float, zoom: float,
+) -> list[list[dict[str, Any]]]:
+    """Собирает близкие маркеры в один вид на масштабе проверки номеров."""
+    positioned = []
+    for item in targets:
+        lat, lng = _maybe_float(item.get("lat")), _maybe_float(item.get("lng"))
+        if lat is not None and lng is not None:
+            positioned.append((item, project_3857(lat, lng, zoom)))
+    if not positioned:
+        return []
+    origin_x = min(point[0] for _, point in positioned)
+    origin_y = min(point[1] for _, point in positioned)
+    cell_width = max(1.0, width * 0.4)
+    cell_height = max(1.0, height * 0.4)
+    cells: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for item, (x, y) in positioned:
+        key = (int((x - origin_x) // cell_width), int((y - origin_y) // cell_height))
+        cells.setdefault(key, []).append(item)
+    return sorted(cells.values(), key=len, reverse=True)
+
+
 def extract_scene_with_mouse_scan(
     page: Any,
     tracking: TrackingConfig,
@@ -924,13 +971,18 @@ def extract_scene_with_mouse_scan(
                 max_gestures=24,
             )
         used = {item["index"] for item in raw["dynamics"] if item["index"] > 0}
-        for target in raw["dynamics"]:
-            if target["index"] > 0:
+        offscreen = []
+        for item in raw["dynamics"]:
+            if item["index"] > 0:
                 continue
-            original_point = latlng_to_container(target["lat"], target["lng"], base_view)
-            if original_point is not None and 0 <= original_point[0] <= base_view.width \
-                    and 0 <= original_point[1] <= base_view.height:
-                continue
+            point = latlng_to_container(item["lat"], item["lng"], base_view)
+            if point is not None and not (0 <= point[0] <= base_view.width
+                                          and 0 <= point[1] <= base_view.height):
+                offscreen.append(item)
+        for group in _scan_target_groups(
+            offscreen, base_view.width, base_view.height, base_zoom + 6,
+        ):
+            target = group[0]
             current_view = map_view_from_raw(overview.get("map"))
             point = latlng_to_container(target["lat"], target["lng"], current_view) \
                 if current_view is not None else None
@@ -950,7 +1002,7 @@ def extract_scene_with_mouse_scan(
             anchor_x, anchor_y = map_left + point[0], map_top + point[1]
             ticks = 0
             current = overview
-            while target["index"] < 0 and ticks < 6:
+            while any(item["index"] < 0 for item in group) and ticks < 6:
                 previous_zoom = _maybe_float(current.get("map_zoom"))
                 page.mouse.move(anchor_x, anchor_y)
                 page.mouse.wheel(0, -120)
@@ -1001,9 +1053,10 @@ def extract_scene_with_mouse_scan(
         item for item in raw.get("dynamics") or []
         if item.get("index", 0) < 0 and _maybe_float(item.get("lat")) is not None
         and _maybe_float(item.get("lng")) is not None
+        and (point := latlng_to_container(item["lat"], item["lng"], base_view)) is not None
+        and 0 <= point[0] <= base_view.width and 0 <= point[1] <= base_view.height
     ]
     used_numbers = {item["index"] for item in raw["dynamics"] if item["index"] > 0}
-    attempted: set[int] = set()
     wheel_ticks: int | None = None
     views = 0
     wheel_worked = False
@@ -1025,9 +1078,12 @@ def extract_scene_with_mouse_scan(
                 record_numbered(scene)
         return scene
 
-    for target in targets:
-        if target["index"] > 0 or target.get("fallback_id") in attempted:
+    for group in _scan_target_groups(
+        targets, base_view.width, base_view.height, base_zoom + 6,
+    ):
+        if all(item["index"] > 0 for item in group):
             continue
+        target = next(item for item in group if item["index"] < 0)
         point = latlng_to_container(target["lat"], target["lng"], base_view)
         if point is None:
             continue
@@ -1057,10 +1113,9 @@ def extract_scene_with_mouse_scan(
                 break
             views += 1
             _merge_numbered_scene(raw, current, used_numbers)
-            # Появление номеров соседей не означает, что подписан сам target:
-            # плотные группы сайт раскрывает только при следующем приближении.
+            # Проверяем всю группу: номера её соседей могут появиться позже.
             max_ticks = min(10, (wheel_ticks or 6) + 4)
-            while target["index"] < 0 and ticks < max_ticks:
+            while any(item["index"] < 0 for item in group) and ticks < max_ticks:
                 previous_zoom = _maybe_float(current.get("map_zoom"))
                 current = scene_after_wheel(screen_x, screen_y, -120)
                 ticks += 1
@@ -1069,8 +1124,6 @@ def extract_scene_with_mouse_scan(
                 if current_zoom is not None and previous_zoom is not None \
                         and current_zoom <= previous_zoom:
                     break
-            if target["index"] < 0:
-                attempted.add(target.get("fallback_id"))
         finally:
             for _ in range(ticks + 4):
                 current_zoom = _maybe_float(current.get("map_zoom"))

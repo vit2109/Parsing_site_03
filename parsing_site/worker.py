@@ -37,6 +37,7 @@ class ParseWorker:
         self._status = "stopped"
         self._error = ""
         self._polls = 0
+        self._max_poll: dict[str, Any] | None = None
         self._max_dispatch = MaxDispatch(db.add_log, store.current, db)
 
     def send_max_test(self, user_id: int) -> int | None:
@@ -53,6 +54,7 @@ class ParseWorker:
                 "error": self._error,
                 "polls": self._polls,
                 "snapshot": self._latest,
+                "max_poll": self._max_poll,
             }
 
     def start(self) -> None:
@@ -63,6 +65,7 @@ class ParseWorker:
             self._stop.clear()
             self._status = "starting"
             self._error = ""
+            self._max_poll = None
             self._thread = threading.Thread(
                 target=self._run, name="parse-worker", daemon=True
             )
@@ -192,6 +195,30 @@ class ParseWorker:
                         for error in archive_errors:
                             self._db.add_log("WARNING", "archive", error)
                         deliveries = max_alerts.collect(snapshot, settings, archive.screenshots)
+                        zone_pairs = {
+                            zone: sum(row.status == zone for row in snapshot.rows)
+                            for zone in ("blue", "warning", "alert")
+                        }
+                        selected_rules = [
+                            {rule.static_index: set(rule.zones) for rule in recipient.rules}
+                            for recipient in settings.max_recipients
+                        ]
+                        eligible_pairs = sum(
+                            row.status in rules.get(row.static_index, ())
+                            for row in snapshot.rows for rules in selected_rules
+                        )
+                        max_poll = {
+                            "poll_id": poll_id,
+                            "zone_pairs": zone_pairs,
+                            "eligible_pairs": eligible_pairs,
+                            "prepared": len(deliveries),
+                            "prepared_with_screenshot": sum(
+                                delivery.screenshot is not None for delivery in deliveries
+                            ),
+                            "screenshots": len(archive.screenshots),
+                            "scan_status": snapshot.scan_status,
+                            "archive_errors": archive_errors[:5],
+                        }
                         if first_poll and settings.max_enabled:
                             blue = sum(row.status == "blue" for row in snapshot.rows)
                             yellow = sum(row.status == "warning" for row in snapshot.rows)
@@ -221,6 +248,7 @@ class ParseWorker:
                             self._polls += 1
                             self._latest = snapshot_to_dict(snapshot)
                             self._latest["poll_id"] = poll_id
+                            self._max_poll = max_poll
                             self._status = "running"
                             self._error = ""
                         if alerts:

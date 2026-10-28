@@ -106,6 +106,17 @@ class LeafletScanTest(unittest.TestCase):
         self.assertGreater(page.mouse.zoom_in_calls, 0)
         self.assertEqual(page.waits.count(1500), len(page.waits))
 
+    def test_browser_wheel_visits_dense_duplicate_group_once(self) -> None:
+        page = _FakePage(duplicates=30)
+        with patch(
+            "parsing_site.tracking.extract_scene_from_page",
+            side_effect=lambda _p, _t, **_kw: page.scene(),
+        ):
+            result = extract_scene_with_mouse_scan(page, TrackingConfig())
+        self.assertEqual(len(result["dynamics"]), 33)
+        self.assertEqual(result["scan"]["views"], 6)
+        self.assertEqual(page.zoom, 5)
+
     def test_mouse_capture_waits_for_visible_numbers_even_with_cache(self) -> None:
         page = _FakePage()
         cache: dict[int, tuple[int, float, float, float]] = {}
@@ -224,11 +235,12 @@ class _FakeDragMouse(_FakeMouse):
 
 class _FakePage:
     def __init__(self, crowded: bool = False, offscreen: bool = False,
-                 far: bool = False, zoom: int = 5) -> None:
+                 far: bool = False, zoom: int = 5, duplicates: int = 0) -> None:
         self.zoom = zoom
         self.crowded = crowded
         self.offscreen = offscreen
         self.far = far
+        self.duplicates = duplicates
         self.center_lat = 50.0
         self.center_lng = 40.0
         self.mouse = _FakeDragMouse(self) if far else _FakeMouse(self)
@@ -264,6 +276,13 @@ class _FakePage:
                     "lat": 50.0, "lng": lng,
                     "x": point[0], "y": point[1],
                 })
+                if i == 0:
+                    dynamics.extend({
+                        "index": 101 if number_visible else -1000 - copy,
+                        "fallback_id": -1000 - copy,
+                        "lat": 50.0, "lng": lng,
+                        "x": point[0], "y": point[1],
+                    } for copy in range(self.duplicates))
         proxy_x, proxy_y = project_3857(self.center_lat, self.center_lng, self.zoom)
         return {
             "dynamics": dynamics,

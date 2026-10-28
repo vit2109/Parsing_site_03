@@ -92,7 +92,10 @@ class MaxAlertEngine:
                 active.add(key)
                 previous = self._previous.get(key, "ok")
                 self._previous[key] = row.status
-                if SEVERITY[row.status] <= SEVERITY[previous] or row.status not in rules[static_id].zones:
+                selected = rules[static_id].zones
+                if row.status not in selected or (
+                    previous in selected and SEVERITY[row.status] <= SEVERITY[previous]
+                ):
                     continue
                 entered.setdefault(dynamic_id, []).append(row)
             for dynamic_id, triggered in entered.items():
@@ -184,23 +187,37 @@ def _upload_image(token: str, path: Path) -> dict[str, Any]:
     raise RuntimeError("MAX не вернул токен загруженного изображения")
 
 
-def send_max_message(delivery: MaxDelivery) -> None:
-    """Загружает JPEG и отправляет текст с изображением одним сообщением."""
+def send_max_message(delivery: MaxDelivery) -> str | None:
+    """Отправляет сообщение; при ошибке JPEG сохраняет доставку текста."""
     body: dict[str, Any] = {"text": delivery.text}
-    if delivery.screenshot and delivery.screenshot.is_file():
-        body["attachments"] = [{
-            "type": "image",
-            "payload": _upload_image(delivery.token, delivery.screenshot),
-        }]
+    photo_error: str | None = None
+    if delivery.screenshot:
+        try:
+            if not delivery.screenshot.is_file():
+                raise FileNotFoundError("Файл снимка недоступен")
+            body["attachments"] = [{
+                "type": "image",
+                "payload": _upload_image(delivery.token, delivery.screenshot),
+            }]
+        except Exception as exc:  # noqa: BLE001 — текст события всё ещё нужно доставить.
+            photo_error = str(exc)
+            body["text"] += "\nСкриншот не удалось прикрепить."
     url = f"{API}/messages?user_id={delivery.user_id}"
-    for attempt in range(3):
+    for attempt in range(5):
         try:
             _request_json(url, delivery.token, json.dumps(body, ensure_ascii=False).encode("utf-8"))
-            return
+            return photo_error
         except RuntimeError as exc:
-            if "attachment.not.ready" not in str(exc) or attempt == 2:
+            if "attachments" not in body or "attachment.not.ready" not in str(exc):
                 raise
-            time.sleep(0.5 * (attempt + 1))
+            if attempt == 4:
+                photo_error = str(exc)
+                del body["attachments"]
+                body["text"] += "\nСкриншот не удалось прикрепить."
+                _request_json(url, delivery.token, json.dumps(body, ensure_ascii=False).encode("utf-8"))
+                return photo_error
+            time.sleep(2 ** attempt)
+    return photo_error
 
 
 class MaxDispatch:
@@ -259,10 +276,16 @@ class MaxDispatch:
                 wait = 0.5 - (time.monotonic() - self._last_sent.get(delivery.user_id, 0))
                 if wait > 0:
                     time.sleep(wait)
-                send_max_message(delivery)
+                photo_error = send_max_message(delivery)
                 self._last_sent[delivery.user_id] = time.monotonic()
                 if self._database is not None and delivery.log_id is not None:
-                    self._database.finish_max_delivery(delivery.log_id, "sent")
+                    self._database.finish_max_delivery(
+                        delivery.log_id, "sent",
+                        f"Скриншот не отправлен: {photo_error}"
+                        if isinstance(photo_error, str) and photo_error else "",
+                    )
+                if isinstance(photo_error, str) and photo_error:
+                    self._log("WARNING", "max", f"user_id={delivery.user_id}: скриншот не отправлен: {photo_error}")
                 self._log("INFO", "max", f"Сообщение отправлено user_id={delivery.user_id}, запись #{delivery.log_id}")
             except Exception as exc:  # noqa: BLE001 — ошибка доставки не останавливает опрос.
                 if self._database is not None and delivery.log_id is not None:

@@ -16,7 +16,7 @@ from parsing_site.config import ROOT, WEB_DIR, load_config
 from parsing_site.db import Database
 from parsing_site.history_export import build_history_workbook
 from parsing_site.html_probe import analyze_html_file
-from parsing_site.settings_store import SettingsStore, from_dict
+from parsing_site.settings_store import SettingsStore, from_dict, resolve_max_token
 from parsing_site.table_history_db import TableHistoryDatabase
 from parsing_site.worker import ParseWorker
 
@@ -190,6 +190,23 @@ def api_max_logs(
 ) -> dict[str, Any]:
     """Возвращает записи отправки MAX с фильтрами и постраничной выдачей."""
     return db.list_max_deliveries(limit, offset, status, user_id)
+
+
+@app.get("/api/max/status")
+def api_max_status() -> dict[str, Any]:
+    """Показывает условия автоматической рассылки без раскрытия токена."""
+    settings = store.current()
+    state = worker.status
+    return {
+        "enabled": settings.max_enabled,
+        "token_set": bool(resolve_max_token(settings)),
+        "recipients": len(settings.max_recipients),
+        "rules": sum(len(item.rules) for item in settings.max_recipients),
+        "worker_running": state["running"],
+        "worker_status": state["status"],
+        "worker_error": state["error"],
+        "last_poll": state["max_poll"],
+    }
 
 
 @app.post("/api/max/test")

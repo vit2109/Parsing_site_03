@@ -21,6 +21,38 @@
     return td;
   }
 
+  async function loadStatus() {
+    const config = document.querySelector("#max-config-state");
+    const poll = document.querySelector("#max-poll-state");
+    try {
+      const response = await fetch("/api/max/status");
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const state = await response.json();
+      const problems = [];
+      if (!state.enabled) problems.push("рассылка по зонам выключена");
+      if (!state.token_set) problems.push("токен не найден");
+      if (!state.recipients || !state.rules) problems.push("получатели и зоны не настроены");
+      config.textContent = problems.length
+        ? `Автоматические сообщения не отправляются: ${problems.join("; ")}. Измените настройки на странице мониторинга.`
+        : `Рассылка включена · получателей: ${state.recipients} · правил по объектам: ${state.rules}`;
+      config.classList.toggle("max-status-problem", problems.length > 0);
+      if (state.last_poll) {
+        const last = state.last_poll;
+        const zones = last.zone_pairs || {};
+        poll.textContent = `${state.worker_running ? "" : "Обход остановлен. "}Опрос #${last.poll_id}: синих пар ${zones.blue || 0}, жёлтых ${zones.warning || 0}, красных ${zones.alert || 0}; подходящих выбранным зонам ${last.eligible_pairs}; новых уведомлений ${last.prepared}, из них со скриншотом ${last.prepared_with_screenshot}; снимков с номерами ${last.screenshots}. Обход: ${last.scan_status || "—"}.`
+          + (last.archive_errors?.length ? ` Ошибки снимков: ${last.archive_errors.join("; ")}` : "")
+          + (state.worker_error ? ` Ошибка опроса: ${state.worker_error}` : "");
+      } else {
+        poll.textContent = state.worker_running
+          ? "Ожидание первого завершённого опроса карты."
+          : `Опрос карты не запущен${state.worker_error ? `: ${state.worker_error}` : "."}`;
+      }
+    } catch (exc) {
+      config.textContent = `Не удалось получить состояние рассылки: ${exc.message}`;
+      config.classList.add("max-status-problem");
+    }
+  }
+
   async function load() {
     const params = new URLSearchParams({ limit: String(size), offset: String(offset) });
     if (filters.status) params.set("status", filters.status);
@@ -46,7 +78,10 @@
           detail.textContent = item.error;
           message.append(detail);
         }
-        cell(tr, item.screenshot ? "Да" : "Нет");
+        const photo = !item.screenshot ? "Нет" : item.status === "sent"
+          ? item.error?.startsWith("Скриншот не отправлен:") ? "Ошибка" : "Отправлен"
+          : "Выбран";
+        cell(tr, photo);
         rows.append(tr);
       }
       if (!data.items.length) {
@@ -102,6 +137,7 @@
       result.textContent = `Тестовое сообщение пользователю ${userId} добавлено в очередь (запись #${data.id}).`;
       offset = 0;
       await load();
+      await loadStatus();
     } catch (exc) {
       result.textContent = `Отправка не начата: ${exc.message}`;
     } finally {
@@ -110,5 +146,6 @@
   });
 
   load();
-  setInterval(load, 5000);
+  loadStatus();
+  setInterval(() => { load(); loadStatus(); }, 5000);
 })();

@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const extract = eval(fs.readFileSync(process.argv[2], 'utf8'));
 const nativeSetTimeout = global.setTimeout;
 
-async function check(initialZoom, mapDiscoverable = true, crowded = false, overlapping = false) {
+async function check(initialZoom, mapDiscoverable = true, crowded = false, overlapping = false,
+  sameNumber = false, denseUnique = false) {
   let zoomInMoves = 0;
   let zoomInWaits = 0;
   let awaitingZoomInPause = false;
@@ -20,7 +21,11 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     }
     return nativeSetTimeout(callback, Math.min(delay, 1), ...args);
   };
-  const points = overlapping ? Array.from({length: 9}, (_, i) => (
+  const points = denseUnique ? Array.from({length: 9}, (_, i) => (
+    {lat: 50, lng: i * 0.015, number: 101 + i}
+  )) : sameNumber ? Array.from({length: 30}, (_, i) => (
+    {lat: 50, lng: 0, number: 101, id: i + 1}
+  )) : overlapping ? Array.from({length: 9}, (_, i) => (
     {lat: 50, lng: 0, number: 101 + i}
   )) : [
     ...Array.from({length: 12}, (_, i) => ({lat: 50, lng: i * 0.5, number: 101 + i})),
@@ -69,7 +74,7 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     return {
       classList: number ? ['leaflet-marker-icon', 'map-incident-operator-number']
         : ['leaflet-marker-icon', 'map-incident', type],
-      dataset: overlapping ? {} : {incidentId: String(point.number)},
+      dataset: overlapping ? {} : {incidentId: String(point.id || point.number)},
       id: '', textContent: number ? String(origin ? point.number + 1000 : point.number) : '',
       style: {marginTop: number ? (origin ? '-9px' : '-19px') : '-10px'},
       getBoundingClientRect: () => ({left: p.x - 10, top: p.y - 10, width: 20, height: 20}),
@@ -116,6 +121,23 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
       document.querySelectorAll('.leaflet-marker-icon.map-incident').length);
     return;
   }
+  if (sameNumber) {
+    assert.equal(result.dynamics.length, 30);
+    assert.equal(result.dynamics.filter((item) => item.index > 0).length, 1);
+    assert.equal(zoomInMoves, 1, 'one dense group needs one zoom-in');
+    assert.deepEqual(map.center, {lat: 50, lng: 0});
+    assert.equal(map.zoom, initialZoom);
+    return;
+  }
+  if (denseUnique) {
+    assert.equal(result.dynamics.length, 9);
+    assert.equal(result.unnumbered_dynamics, 0);
+    assert.equal(result.scan.status, 'complete');
+    assert.equal(zoomInMoves, 1, 'one view should show all distinct numbers in a dense group');
+    assert.deepEqual(map.center, {lat: 50, lng: 0});
+    assert.equal(map.zoom, initialZoom);
+    return;
+  }
   assert.deepEqual(result.dynamics.map((item) => item.index).sort((a, b) => a - b),
     points.map((point) => point.number));
   assert.equal(result.unnumbered_dynamics, 0);
@@ -137,5 +159,7 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
   await check(6, true, true); // скопление: часть подписей появится лишь на следующем масштабе
   await check(6, false); // диагностика, когда карта не найдена
   await check(4, true, false, true); // девять значков с совпадающими координатами
+  await check(6, true, false, false, true); // 30 копий одного номера — один общий вид
+  await check(6, true, false, false, false, true); // 9 разных номеров в одной группе
   console.log('Leaflet scan: both zoom cases passed');
 })().catch((error) => {console.error(error); process.exitCode = 1;});

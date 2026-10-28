@@ -66,6 +66,19 @@ class MaxBotTest(unittest.TestCase):
         self.assertEqual([item.user_id for item in engine.collect(snapshot("blue"), config, [])], [111])
         self.assertEqual(engine.collect(snapshot("blue"), config, []), [])
 
+    def test_entry_into_selected_zone_from_unselected_zone(self) -> None:
+        payload = settings().to_dict()
+        payload["max_groups"] = [{"user_ids": "111", "rules": [
+            {"static_index": 1, "zones": ["blue"]},
+        ]}]
+        config = validate_settings(from_dict(payload))
+        engine = MaxAlertEngine()
+        self.assertEqual(engine.collect(snapshot("alert"), config, []), [])
+        entered = engine.collect(snapshot("blue"), config, [])
+        self.assertEqual(len(entered), 1)
+        self.assertIn("синюю зону", entered[0].text)
+        self.assertEqual(engine.collect(snapshot("blue"), config, []), [])
+
     def test_token_from_environment_without_database_copy(self) -> None:
         payload = settings().to_dict()
         payload["max_token"] = ""
@@ -238,12 +251,57 @@ class MaxBotTest(unittest.TestCase):
                 return {"message": {}}
 
             with patch("parsing_site.max_bot._request_json", side_effect=request):
-                send_max_message(MaxDelivery(111, "secret", "Текст", photo))
+                result = send_max_message(MaxDelivery(111, "secret", "Текст", photo))
+            self.assertIsNone(result)
             self.assertEqual(len(calls), 3)
             self.assertTrue(calls[1][2].find(b"jpeg") >= 0)
             body = json.loads(calls[2][2])
             self.assertEqual(body["attachments"][0]["payload"], {"token": "image-token"})
             self.assertEqual(calls[2][0].split("?user_id=")[1], "111")
+
+    def test_image_upload_error_still_delivers_text(self) -> None:
+        with TemporaryDirectory() as directory:
+            photo = Path(directory) / "map.jpg"
+            photo.write_bytes(b"jpeg")
+            messages = []
+
+            def request(url, _token, body=None, _content_type="application/json"):
+                if "/uploads?" in url:
+                    raise RuntimeError("MAX HTTP 503: upload unavailable")
+                messages.append(json.loads(body))
+                return {"message": {}}
+
+            with patch("parsing_site.max_bot._request_json", side_effect=request):
+                result = send_max_message(MaxDelivery(111, "secret", "Зональное событие", photo))
+            self.assertIn("upload unavailable", result)
+            self.assertEqual(len(messages), 1)
+            self.assertNotIn("attachments", messages[0])
+            self.assertIn("Зональное событие", messages[0]["text"])
+            self.assertIn("Скриншот не удалось", messages[0]["text"])
+
+    def test_image_not_ready_retries_then_delivers_with_image(self) -> None:
+        with TemporaryDirectory() as directory:
+            photo = Path(directory) / "map.jpg"
+            photo.write_bytes(b"jpeg")
+            messages = []
+
+            def request(url, _token, body=None, _content_type="application/json"):
+                if "/uploads?" in url:
+                    return {"url": "https://upload.example/image"}
+                if url.startswith("https://upload.example"):
+                    return {"photos": {"photo-id": {"token": "image-token"}}}
+                messages.append(json.loads(body))
+                if len(messages) == 1:
+                    raise RuntimeError("MAX HTTP 400: attachment.not.ready")
+                return {"message": {}}
+
+            with patch("parsing_site.max_bot._request_json", side_effect=request), \
+                    patch("parsing_site.max_bot.time.sleep") as sleep:
+                result = send_max_message(MaxDelivery(111, "secret", "Событие", photo))
+            self.assertIsNone(result)
+            self.assertEqual(len(messages), 2)
+            self.assertIn("attachments", messages[1])
+            sleep.assert_called_once_with(1)
 
     def test_worker_captures_for_max_even_when_archive_disabled(self) -> None:
         with TemporaryDirectory() as directory:
@@ -287,6 +345,60 @@ class MaxBotTest(unittest.TestCase):
             delivery = worker._max_dispatch.submit.call_args.args[0]
             self.assertEqual(delivery.user_id, 111)
             self.assertTrue(delivery.screenshot.is_file())
+            self.assertEqual(worker.status["max_poll"]["prepared"], 1)
+            self.assertEqual(worker.status["max_poll"]["screenshots"], 1)
+            self.assertEqual(worker.status["max_poll"]["eligible_pairs"], 1)
+
+    def test_zone_poll_queues_and_sends_message_with_screenshot(self) -> None:
+        with TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "tracking.db")
+            store = Mock()
+            store.current.return_value = settings()
+            worker = ParseWorker(database, store, Mock())
+            sent = []
+
+            class Session:
+                numbered_capture_error = ""
+                numbered_html_error = ""
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return None
+
+                def prepare_numbered_capture(self, _size, html_enabled, on_capture):
+                    self.on_capture = on_capture
+
+            session = Session()
+
+            def capture(_session, _tracking):
+                session.on_capture(NumberedCapture(
+                    datetime.now().astimezone(), 7, b"jpeg", numbers=(87,),
+                ))
+                worker._stop.set()
+                return snapshot("blue")
+
+            def request(url, _token, body=None, _content_type="application/json"):
+                if "/uploads?" in url:
+                    return {"url": "https://upload.example/image"}
+                if url.startswith("https://upload.example"):
+                    return {"photos": {"photo-id": {"token": "image-token"}}}
+                sent.append(json.loads(body))
+                return {"message": {}}
+
+            with patch("parsing_site.worker.BrowserSession", return_value=session), \
+                    patch("parsing_site.worker.capture_snapshot", side_effect=capture), \
+                    patch("parsing_site.capture_archive.ROOT", Path(directory)), \
+                    patch("parsing_site.max_bot._request_json", side_effect=request):
+                worker._run()
+                worker._max_dispatch._queue.join()
+            self.assertEqual(len(sent), 1)
+            self.assertIn("Объект №87", sent[0]["text"])
+            self.assertEqual(sent[0]["attachments"][0]["payload"], {"token": "image-token"})
+            self.assertEqual(database.list_max_deliveries()["items"][0]["status"], "sent")
+            self.assertEqual(worker.status["max_poll"]["prepared_with_screenshot"], 1)
+            database.close()
 
     def test_disabling_max_skips_waiting_notifications(self) -> None:
         config = settings()
@@ -324,6 +436,18 @@ class MaxBotTest(unittest.TestCase):
             self.assertEqual(db.mark_interrupted_max_deliveries(), 1)
             self.assertEqual(db.list_max_deliveries()["items"][0]["id"], queued_id)
             self.assertEqual(db.list_max_deliveries()["items"][0]["status"], "skipped")
+            db.close()
+
+    def test_delivery_log_records_photo_error_without_losing_text(self) -> None:
+        with TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "tracking.db")
+            dispatch = MaxDispatch(db.add_log, settings, db)
+            with patch("parsing_site.max_bot.send_max_message", return_value="HTTP 503"):
+                delivery_id = dispatch.submit(MaxDelivery(111, "secret", "Объект №87", None))
+                dispatch._queue.join()
+            item = next(item for item in db.list_max_deliveries()["items"] if item["id"] == delivery_id)
+            self.assertEqual(item["status"], "sent")
+            self.assertIn("Скриншот не отправлен", item["error"])
             db.close()
 
     def test_manual_message_uses_same_queue_without_active_alerts(self) -> None:

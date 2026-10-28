@@ -325,6 +325,9 @@ select {
 .history-app { max-width: 1480px; }
 .max-logs-app { max-width: 1480px; }
 .max-logs-topbar { grid-template-columns: 1fr auto; }
+.max-status-panel { padding: 16px; display: grid; gap: 8px; }
+.max-status-panel p { margin: 0; }
+.max-status-problem { color: #ffb4b4; }
 .max-test-panel { padding: 16px; display: grid; gap: 12px; }
 .max-test-form, .max-log-filters, .max-log-pages {
   display: flex;
