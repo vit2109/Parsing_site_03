@@ -47,6 +47,22 @@ class HistoryDatabaseTest(unittest.TestCase):
             )
             self.assertEqual({point["dynamic_index"] for point in entered["points"]}, {62})
             self.assertEqual({point["dynamic_index"] for point in all_objects["points"]}, {62, 63})
+            found = db.get_static_zone_trajectories(
+                static_index=1, include_outside=True, dynamic_query="№63", **period
+            )
+            self.assertEqual([point["dynamic_index"] for point in found["points"]], [63])
+            self.assertEqual(
+                {point["dynamic_index"] for point in db.get_static_zone_trajectories(
+                    static_index=1, include_outside=True, limit=1, **period
+                )["points"]},
+                {62},
+            )
+            self.assertEqual(
+                {point["dynamic_index"] for point in db.get_static_zone_trajectories(
+                    static_index=1, include_outside=True, limit=2, **period
+                )["points"]},
+                {62, 63},
+            )
             db.close()
 
     def test_map_coordinate_precision_groups_nearby_points_without_changing_storage(self) -> None:

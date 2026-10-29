@@ -47,6 +47,9 @@ const STATUS_LABEL = { alert: "красная зона", warning: "жёлтая 
  */
 let staticObjects = [];
 let staticLoadRequest = 0;
+let staticZoneRequest = 0;
+let staticSearchTimer;
+let currentStaticIndex = null;
 
 /**
  * Карта (инстанс) офлайн-карты для отображения динамической траектории.
@@ -128,8 +131,13 @@ els.form.addEventListener("submit", loadHistory);
 dynamicFilters.addEventListener("change", () => {
   if (currentDynamicData) renderDynamicMap(currentDynamicData);
 });
-staticFilters.addEventListener("input", () => {
-  if (currentStaticData) renderStaticZoneMap(currentStaticData);
+staticFilters.addEventListener("input", (event) => {
+  if (event.target.name === "object_query") {
+    clearTimeout(staticSearchTimer);
+    staticSearchTimer = setTimeout(loadStaticZones, 300);
+  } else if (currentStaticData) {
+    renderStaticZoneMap(currentStaticData);
+  }
 });
 
 /**
@@ -341,7 +349,10 @@ function renderHistory(data) {
     button.addEventListener("click", () => openDynamicTrajectory(Number(button.dataset.dynamicIndex), button.dataset.objectDate));
   });
   els.body.querySelectorAll("[data-static-index]").forEach((button) => {
-    button.addEventListener("click", () => openStaticZones(Number(button.dataset.staticIndex)));
+    button.addEventListener("click", () => openStaticZones(
+      Number(button.dataset.staticIndex),
+      Number(button.closest("tr").querySelector("[data-dynamic-index]").dataset.dynamicIndex),
+    ));
   });
 }
 
@@ -449,8 +460,12 @@ function renderDynamicMap(data) {
 }
 
 /** Загружает зоны точки и траектории входивших в них объектов. */
-async function openStaticZones(staticIndex) {
+async function openStaticZones(staticIndex, dynamicIndex = null) {
   hideError();
+  clearTimeout(staticSearchTimer);
+  currentStaticIndex = staticIndex;
+  staticFilters.querySelector('[name="object_query"]').value = dynamicIndex == null ? "" : dynamicNumberLabel(dynamicIndex);
+  staticFilters.querySelector('[name="zone_filter"]').value = "all";
   currentStaticData = null;
   const selected = staticObjects.find((item) => Number(item.static_index) === staticIndex);
   els.staticTitle.textContent = selected ? `#${staticIndex} ${selected.static_name}` : `Объект #${staticIndex}`;
@@ -468,13 +483,26 @@ async function openStaticZones(staticIndex) {
     });
     els.staticTrajectories.innerHTML = '<p class="muted">Загрузка объектов за выбранный период…</p>';
   }
+  await loadStaticZones();
+}
+
+async function loadStaticZones() {
+  if (!els.staticModal.open || currentStaticIndex == null) return;
+  const request = ++staticZoneRequest;
+  const params = periodParams();
+  params.set("include_outside", "true");
+  const query = staticFilters.querySelector('[name="object_query"]').value.trim();
+  if (query) params.set("dynamic_query", query);
+  els.staticTrajectories.innerHTML = '<p class="muted">Поиск объектов…</p>';
   try {
-    const data = await getJson(`/api/history/static-zones/${staticIndex}?${periodParams()}&include_outside=true`);
+    const data = await getJson(`/api/history/static-zones/${currentStaticIndex}?${params}`);
+    if (request !== staticZoneRequest) return;
     els.staticTitle.textContent = `#${data.static_index} ${data.static_name}`;
     els.staticZoneMeta.textContent = `Красная зона: ${formatKm(data.alert_radius_km)} · жёлтая зона: ${formatKm(data.warning_radius_km)} · синяя зона: ${formatKm(data.blue_radius_km)} · объектов: ${data.objects_total} · точность координат: ${Number(data.coordinate_precision || 4)}${data.truncated ? ` · показаны первые ${data.points_total} точек; уточните период для остальных` : ""}`;
     if (!els.staticModal.open) return;
     renderStaticZoneMap(data);
   } catch (error) {
+    if (request !== staticZoneRequest) return;
     els.staticZoneMeta.textContent = error.message;
     els.staticTrajectories.innerHTML = `<p class="muted history-empty-detail">${escapeHtml(error.message)}</p>`;
   }
@@ -494,7 +522,7 @@ function renderStaticZoneMap(data) {
   const zoneTime = (item) => item.points.find((point) => point.status === zoneOf(item))?.ts
     || item.points[0]?.ts || "";
   const trajectories = data.trajectories.filter((item) =>
-    (item.entered_zone !== false || filterChecked(staticFilters, "others")) &&
+    (item.entered_zone !== false || filterChecked(staticFilters, "others") || query) &&
     (!query || `${dynamicNumberLabel(item.dynamic_index)} ${item.dynamic_name}`.toLowerCase().includes(query)) &&
     (zoneFilter === "all" || zoneOf(item) === zoneFilter)
   );

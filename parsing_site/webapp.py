@@ -68,6 +68,7 @@ class SettingsIn(BaseModel):
     archive_html_period_hours: int = 1
     max_enabled: bool = False
     max_token: str = ""
+    max_display_distance_km: float = Field(default=150.0, gt=0, le=20_000)
     max_token_clear: bool = False
     max_recipients: list[dict[str, Any]] = Field(default_factory=list)
     max_groups: list[dict[str, Any]] | None = None
@@ -477,6 +478,7 @@ def api_history_static_zones(
     source: str = Query(default="real", pattern="^(real|fake)$"),
     limit: int = Query(default=1_500, ge=1, le=20_000),
     include_outside: bool = False,
+    dynamic_query: str = Query(default="", max_length=200),
 ) -> dict[str, Any]:
     """Возвращает траектории объектов, входивших в зоны выбранной точки."""
     start, end = _history_bounds(date_from, date_to, time_from, time_to)
@@ -494,6 +496,7 @@ def api_history_static_zones(
         limit=limit + 1,
         coordinate_precision=coordinate_precision,
         include_outside=include_outside,
+        dynamic_query=dynamic_query,
     )
     if result is None:
         configured = next(

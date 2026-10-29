@@ -667,6 +667,7 @@ function fillForm(settings) {
   els.form.elements.namedItem("screenshot_enabled").checked = Boolean(settings.screenshot_enabled);
   els.form.elements.namedItem("archive_html_enabled").checked = Boolean(settings.archive_html_enabled);
   els.form.elements.namedItem("max_enabled").checked = Boolean(settings.max_enabled);
+  setFormValue("max_display_distance_km", settings.max_display_distance_km ?? 150);
   els.form.elements.namedItem("max_token").value = "";
   els.form.elements.namedItem("max_token_clear").checked = false;
   els.maxTokenStatus.textContent = settings.max_token_set ? "Токен доступен" : "Токен не задан";
@@ -872,6 +873,7 @@ async function saveSettings(event) {
   data.screenshot_height = Number(data.screenshot_height);
   data.archive_html_enabled = Boolean(els.form.elements.namedItem("archive_html_enabled")?.checked);
   data.max_enabled = Boolean(els.form.elements.namedItem("max_enabled")?.checked);
+  data.max_display_distance_km = Number(data.max_display_distance_km);
   data.max_token_clear = Boolean(els.form.elements.namedItem("max_token_clear")?.checked);
   data.max_groups = collectMaxGroups();
   data.archive_html_period_hours = Number(data.archive_html_period_hours);

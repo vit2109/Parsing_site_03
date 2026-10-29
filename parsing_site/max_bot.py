@@ -84,6 +84,22 @@ class MaxAlertEngine:
             return []
         rows = {(row.dynamic_index, row.static_index): row for row in snapshot.rows}
         dynamics = {item.index: item for item in snapshot.dynamics}
+        zone_counts: dict[int, dict[str, int]] = {}
+        for row in snapshot.rows:
+            if row.status in {"alert", "warning", "blue"}:
+                counts = zone_counts.setdefault(row.static_index, {
+                    "alert": 0, "warning": 0, "blue": 0,
+                })
+                counts[row.status] += 1
+
+        def static_label(row: DistanceRow) -> str:
+            counts = zone_counts.get(row.static_index, {})
+            return (
+                f"{row.static_name} (красная: {counts.get('alert', 0)}, "
+                f"жёлтая: {counts.get('warning', 0)}, "
+                f"синяя: {counts.get('blue', 0)})"
+            )
+
         active: set[tuple[int, int, int]] = set()
         deliveries: list[MaxDelivery] = []
         for recipient in settings.max_recipients:
@@ -103,33 +119,47 @@ class MaxAlertEngine:
                     continue
                 entered.setdefault(dynamic_id, []).append(row)
             for dynamic_id, triggered in entered.items():
-                distances = sorted(
+                all_distances = sorted(
                     (rows[(dynamic_id, rule_id)] for rule_id in rules
                      if (dynamic_id, rule_id) in rows),
                     key=lambda item: item.distance,
                 )
-                if not distances:
+                if not all_distances:
                     continue
-                unit = "км" if distances[0].distance_unit == "km" else distances[0].distance_unit
+                distances = [
+                    row for row in all_distances
+                    if row.distance_unit != "km"
+                    or row.distance <= settings.max_display_distance_km
+                ]
+                unit = "км" if all_distances[0].distance_unit == "km" else all_distances[0].distance_unit
                 label = f"№{dynamic_id}" if dynamic_id > 0 else "номер не определён"
                 dynamic = dynamics.get(dynamic_id)
-                object_name = dynamic.object_type if dynamic and dynamic.object_type else distances[0].dynamic_name
+                object_name = dynamic.object_type if dynamic and dynamic.object_type else all_distances[0].dynamic_name
                 entered_ids = {item.static_index for item in triggered}
                 lines = [
+                    f"Всего динамических объектов: {len(snapshot.dynamics)}.",
                     f"Объект {label} ({object_name}) вошёл в выбранные зоны.",
-                    (f"Ближайший объект: «{distances[0].static_name}», "
-                     f"{distances[0].distance:.1f} {unit}."),
-                    "Расстояния до наблюдаемых объектов (★ — новый вход):",
-                    *(
-                        f"{'★' if item.static_index in entered_ids else '•'} "
-                        f"{item.static_name}: {item.distance:.1f} {unit}"
-                        + (f", вошёл в {ZONE_NAME[item.status]} зону"
-                           if item.static_index in entered_ids else "")
-                        for item in distances
-                    ),
                 ]
-                nearest = distances[0]
-                static = self._geo(nearest)
+                if distances:
+                    lines.extend([
+                        (f"Ближайший объект: «{static_label(distances[0])}», "
+                         f"{distances[0].distance:.1f} {unit}."),
+                        "Расстояния до наблюдаемых объектов (★ — новый вход):",
+                        *(
+                            f"{'★' if item.static_index in entered_ids else '•'} "
+                            f"{static_label(item)}: {item.distance:.1f} {unit}"
+                            + (f", вошёл в {ZONE_NAME[item.status]} зону"
+                               if item.static_index in entered_ids else "")
+                            for item in distances
+                        ),
+                    ])
+                else:
+                    lines.append(
+                        "Стационарных объектов в пределах "
+                        f"{settings.max_display_distance_km:g} км нет."
+                    )
+                nearest = distances[0] if distances else None
+                static = self._geo(nearest) if nearest else None
                 related = tuple(
                     point for row in distances if (point := self._geo(row)) is not None
                 )
@@ -137,13 +167,13 @@ class MaxAlertEngine:
                     dynamic_id, static, related, screenshots,
                     datetime.now().astimezone(),
                 )
-                if photo is None:
+                if photo is None and nearest is not None:
                     lines.append(PHOTO_MISSING_NOTE)
                 deliveries.append(MaxDelivery(
                     recipient.user_id, resolve_max_token(settings), "\n".join(lines)[:4000], photo,
                     dynamic_index=dynamic_id,
-                    nearest_static_index=nearest.static_index,
-                    nearest_static_name=nearest.static_name,
+                    nearest_static_index=nearest.static_index if nearest else 0,
+                    nearest_static_name=nearest.static_name if nearest else "",
                     nearest_static=static,
                     related_statics=related,
                 ))

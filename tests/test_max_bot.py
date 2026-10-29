@@ -210,7 +210,7 @@ class MaxBotTest(unittest.TestCase):
             first = engine.collect(snapshot("blue"), config, photos)
             self.assertEqual([item.user_id for item in first], [111])
             self.assertEqual(first[0].screenshot, match)
-            self.assertIn("Ближайший объект: «Пост 2», 2.0 км", first[0].text)
+            self.assertIn("Ближайший объект: «Пост 2 (красная: 0, жёлтая: 0, синяя: 0)», 2.0 км", first[0].text)
             self.assertEqual(engine.collect(snapshot("blue"), config, []), [])
             second = engine.collect(snapshot("alert"), config, [])
             self.assertEqual([item.user_id for item in second], [111, 222])
@@ -244,6 +244,43 @@ class MaxBotTest(unittest.TestCase):
         self.assertIn("Пост 1", messages[0].text)
         self.assertIn("Пост 2", messages[0].text)
         self.assertIn("вошёл в синюю зону", messages[0].text)
+
+    def test_message_counts_all_dynamics_and_each_static_zone(self) -> None:
+        scene = snapshot("blue")
+        scene.dynamics.extend([
+            SceneObject(88, "Автомобиль", 0, 0),
+            SceneObject(89, "Автомобиль", 0, 0),
+        ])
+        for dynamic_id, static_id, status in (
+            (88, 1, "alert"), (88, 2, "warning"),
+            (89, 1, "warning"), (89, 2, "blue"),
+        ):
+            scene.rows.append(DistanceRow(
+                static_id, f"Пост {static_id}", 0, 0,
+                dynamic_id, "Автомобиль", 0, 0, "", 3, status, "km",
+            ))
+        messages = MaxAlertEngine().collect(scene, settings(), [])
+        first = next(item for item in messages if item.dynamic_index == 87)
+        self.assertTrue(first.text.startswith("Всего динамических объектов: 3."))
+        self.assertIn("Пост 1 (красная: 1, жёлтая: 1, синяя: 1)", first.text)
+        self.assertIn("Пост 2 (красная: 0, жёлтая: 1, синяя: 1)", first.text)
+
+    def test_display_distance_filters_statics_without_suppressing_alert(self) -> None:
+        payload = settings().to_dict()
+        payload["max_display_distance_km"] = 3
+        config = validate_settings(from_dict(payload))
+        self.assertEqual(config.max_display_distance_km, 3)
+        messages = MaxAlertEngine().collect(snapshot("blue"), config, [])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("Пост 2", messages[0].text)
+        self.assertNotIn("Пост 1", messages[0].text)
+
+        payload["max_display_distance_km"] = 1
+        config = validate_settings(from_dict(payload))
+        messages = MaxAlertEngine().collect(snapshot("blue"), config, [])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("Стационарных объектов в пределах 1 км нет", messages[0].text)
+        self.assertIsNone(messages[0].screenshot)
 
     def test_rate_limit_retries_after_server_pause(self) -> None:
         limited = urllib.error.HTTPError(

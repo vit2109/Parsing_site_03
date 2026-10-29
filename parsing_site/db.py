@@ -930,12 +930,22 @@ class Database:
         limit: int = 20_000,
         coordinate_precision: int = 6,
         include_outside: bool = False,
+        dynamic_query: str = "",
     ) -> dict[str, Any] | None:
         """Траектории вошедших в зоны объектов без повторов соседних координат."""
         source = _normalize_source(data_source)
         precision = max(3, min(6, int(coordinate_precision)))
         point_limit = max(1, min(limit, 20_001))
         groups: dict[tuple[str, int], dict[str, Any]] = {}
+        query = dynamic_query.strip()
+        dynamic_filter = ""
+        dynamic_params: tuple[Any, ...] = ()
+        if query:
+            number = query.removeprefix("№").strip()
+            if number.lower().startswith("id ") and number[3:].strip().isdigit():
+                number = f"-{number[3:].strip()}"
+            dynamic_filter = "AND (d.name LIKE ? OR CAST(d.dynamic_index AS TEXT) = ?) "
+            dynamic_params = (f"%{query}%", number)
         with closing(self._open_read_connection()) as read_conn:
             static = read_conn.execute(
                 "SELECT s.static_index, s.name AS static_name, s.lat, s.lng, "
@@ -962,8 +972,8 @@ class Database:
                 "WHERE p.data_source = ? AND p.ts >= ? AND p.ts <= ? "
                 "AND s.lat IS NOT NULL AND s.lng IS NOT NULL "
                 "AND d.lat IS NOT NULL AND d.lng IS NOT NULL "
-                "ORDER BY p.ts, d.id",
-                (static_index, source, date_from, date_to),
+                + dynamic_filter + "ORDER BY p.ts, d.id",
+                (static_index, source, date_from, date_to, *dynamic_params),
             )
             for row in rows:
                 distance = _geo_distance_values(
@@ -1014,13 +1024,35 @@ class Database:
                 group["points"].append(point)
         result = dict(static)
         result["points"] = []
-        ordered_keys = sorted(groups, key=lambda key: (not groups[key]["entered"], key))
-        for key in ordered_keys:
-            if groups[key]["entered"] or include_outside:
-                result["points"].extend(groups[key]["points"])
-                if len(result["points"]) >= point_limit:
-                    result["points"] = result["points"][:point_limit]
-                    break
+        if len({key[1] for key in groups}) <= 1:
+            for key in sorted(groups):
+                if groups[key]["entered"] or include_outside:
+                    result["points"].extend(groups[key]["points"])
+                    if len(result["points"]) >= point_limit:
+                        result["points"] = result["points"][:point_limit]
+                        break
+            return result
+        ordered_keys = sorted(
+            groups,
+            key=lambda key: groups[key]["points"][-1]["ts"] if groups[key]["points"] else "",
+            reverse=True,
+        )
+        ordered_keys.sort(key=lambda key: not groups[key]["entered"])
+        streams = [
+            iter(groups[key]["points"]) for key in ordered_keys
+            if groups[key]["entered"] or include_outside
+        ]
+        while streams and len(result["points"]) < point_limit:
+            remaining = []
+            for stream in streams:
+                point = next(stream, None)
+                if point is not None:
+                    result["points"].append(point)
+                    remaining.append(stream)
+                    if len(result["points"]) >= point_limit:
+                        break
+            streams = remaining
+        result["points"].sort(key=lambda point: (point["object_date"], point["dynamic_index"], point["ts"]))
         return result
 
     def count_legacy_history(

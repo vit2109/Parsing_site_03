@@ -95,6 +95,7 @@ class RuntimeSettings:
     archive_html_period_hours: int = 1
     max_enabled: bool = False
     max_token: str = ""
+    max_display_distance_km: float = 150.0
     max_recipients: list[MaxRecipient] = field(default_factory=list)
     max_groups: list[MaxRecipientGroup] = field(default_factory=list)
     lock_scale: bool = False
@@ -301,6 +302,7 @@ def from_dict(data: dict[str, Any]) -> RuntimeSettings:
         archive_html_period_hours=int(data.get("archive_html_period_hours", 1)),
         max_enabled=bool(data.get("max_enabled", False)),
         max_token=str(data.get("max_token", "")),
+        max_display_distance_km=float(data.get("max_display_distance_km", 150)),
         max_recipients=recipients,
         max_groups=groups,
         lock_scale=bool(data.get("lock_scale", False)),
@@ -333,6 +335,8 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
         raise ValueError("Укажите каталог для снимков карты.")
     if settings.archive_html_enabled and not settings.archive_html_dir.strip():
         raise ValueError("Укажите каталог для HTML-страниц.")
+    if not 0 < settings.max_display_distance_km <= 20_000:
+        raise ValueError("Диапазон объектов в сообщении MAX должен быть от 0 до 20 000 км.")
     if settings.threshold <= 0:
         raise ValueError("Порог красного выделения должен быть больше 0.")
     warning = max(settings.warning_distance, settings.threshold)
@@ -430,6 +434,7 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
         archive_html_period_hours=settings.archive_html_period_hours,
         max_enabled=bool(settings.max_enabled),
         max_token=settings.max_token.strip(),
+        max_display_distance_km=float(settings.max_display_distance_km),
         max_recipients=recipients,
         max_groups=groups,
         lock_scale=bool(settings.lock_scale),
