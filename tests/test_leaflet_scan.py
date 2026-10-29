@@ -9,10 +9,11 @@ from unittest.mock import patch
 
 from bs4 import BeautifulSoup
 
-from parsing_site.config import StaticObjectConfig, TrackingConfig
+from parsing_site.config import ScanZoneConfig, StaticObjectConfig, TrackingConfig
 from parsing_site.coordinates import (
     MapView,
     container_to_latlng,
+    haversine_km,
     latlng_to_container,
     project_3857,
     unproject_3857,
@@ -22,10 +23,63 @@ from parsing_site.html_probe import (
     _number_at_marker,
     extract_scene_from_html,
 )
-from parsing_site.tracking import _EXTRACT_SCRIPT, extract_scene_with_mouse_scan
+from parsing_site.scan_routes import group_static_points
+from parsing_site.tracking import (
+    _EXTRACT_SCRIPT, _scan_group_center, _scan_target_groups,
+    extract_scene_from_page, extract_scene_with_mouse_scan,
+)
 
 
 class LeafletScanTest(unittest.TestCase):
+    def test_static_group_centers_obey_radius_without_chain_expansion(self) -> None:
+        points = [
+            StaticObjectConfig(index, str(index), 0, 0, 50, lng)
+            for index, lng in enumerate((0, 0.2, 0.4, 1.6), start=1)
+        ]
+        groups = group_static_points(points, 50)
+        self.assertEqual([len(group.static_ids) for group in groups], [3, 1])
+        for group in groups:
+            for point in points:
+                if point.id in group.static_ids:
+                    self.assertLessEqual(
+                        haversine_km(group.lat, group.lng, point.lat, point.lng), 50,
+                    )
+        self.assertAlmostEqual(groups[0].lng, 0.2, places=2)
+        antimeridian = group_static_points([
+            StaticObjectConfig(1, "A", 0, 0, 0, 179.9),
+            StaticObjectConfig(2, "B", 0, 0, 0, -179.9),
+        ], 50)
+        self.assertEqual(len(antimeridian), 1)
+        self.assertGreater(abs(antimeridian[0].lng), 179)
+
+    def test_grouped_route_combines_markers_that_fit_one_view(self) -> None:
+        targets = [
+            {"lat": 50.0, "lng": 0.0, "index": -101},
+            {"lat": 50.0, "lng": 0.5, "index": -102},
+        ]
+        self.assertEqual(len(_scan_target_groups(targets, 800, 600, 10)), 2)
+        groups = _scan_target_groups(targets, 800, 600, 10, [(50, 0.25)])
+        self.assertEqual(len(groups), 1)
+        center = _scan_group_center(groups[0], 800, 600, 10, [(50, 0.25)])
+        self.assertAlmostEqual(center[1], 0.25, places=2)
+
+    def test_grouped_centers_are_passed_to_leaflet(self) -> None:
+        class Page:
+            def evaluate(self, _script: str, options: dict) -> dict:
+                return options
+
+        config = TrackingConfig(
+            scan_mode="grouped_static", scan_group_radius_km=50,
+            static_objects=[
+                StaticObjectConfig(1, "A", 0, 0, 50, 0),
+                StaticObjectConfig(2, "B", 0, 0, 50, 0.5),
+                StaticObjectConfig(3, "C", 0, 0, 50, 12),
+            ],
+        )
+        options = extract_scene_from_page(Page(), config)
+        self.assertEqual(options["scanMode"], "grouped_static")
+        self.assertEqual([entry["static_count"] for entry in options["scanRoutePoints"]], [2, 1])
+
     def test_saved_html_matches_current_and_unstyled_labels_per_marker(self) -> None:
         soup = BeautifulSoup(
             '<div class="leaflet-marker-icon map-incident-operator-number" '
@@ -138,6 +192,24 @@ class LeafletScanTest(unittest.TestCase):
         self.assertLessEqual(page.max_zoom_seen, 7)
         self.assertEqual(page.zoom, 5)
         self.assertAlmostEqual(page.center_lng, 40, places=3)
+
+    def test_wheel_fallback_uses_configured_sector_route(self) -> None:
+        page = _FakePage(offscreen=True, far=True, zoom=7)
+        tracking = TrackingConfig(
+            scan_mode="zones", scan_max_zoom=8,
+            scan_zones=[ScanZoneConfig("Запад", 50, 40, 400),
+                        ScanZoneConfig("Восток", 50, 55, 200)],
+        )
+        with patch(
+            "parsing_site.tracking.extract_scene_from_page",
+            side_effect=lambda _p, _t, **_kw: page.scene(),
+        ):
+            result = extract_scene_with_mouse_scan(page, tracking)
+        self.assertEqual(result["scan"]["mode"], "zones")
+        self.assertEqual(len(result["dynamics"]), 4)
+        self.assertEqual(page.zoom, 7)
+        self.assertAlmostEqual(page.center_lng, 40, places=3)
+        self.assertLessEqual(page.max_zoom_seen, 8)
 
     def test_wheel_fallback_zooms_out_from_close_initial_view(self) -> None:
         page = _FakePage(zoom=12)

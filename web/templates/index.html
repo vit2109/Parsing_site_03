@@ -154,6 +154,27 @@
             Максимальное приближение при обходе (zoom)
             <input name="scan_max_zoom" type="number" min="4" max="18" step="1" required value="{{ settings.scan_max_zoom }}" />
           </label>
+          <label>
+            Режим обхода карты
+            <select name="scan_mode">
+              <option value="adaptive" {% if settings.scan_mode == 'adaptive' %}selected{% endif %}>Адаптивный — обзор и группы объектов</option>
+              <option value="static_points" {% if settings.scan_mode == 'static_points' %}selected{% endif %}>По стационарным точкам — один проход групп</option>
+              <option value="grouped_static" {% if settings.scan_mode == 'grouped_static' %}selected{% endif %}>По группам стационарных точек</option>
+              <option value="zones" {% if settings.scan_mode == 'zones' %}selected{% endif %}>По заданным секторам — один проход групп</option>
+            </select>
+          </label>
+          <label id="scan-group-radius-control">
+            Радиус объединения стационарных точек, км
+            <input name="scan_group_radius_km" type="number" min="1" max="500" step="1" required value="{{ settings.scan_group_radius_km }}" />
+          </label>
+          <div class="static-block" id="scan-zones-block">
+            <div class="static-block__head">
+              <h3>Секторы обхода</h3>
+              <button type="button" class="btn" id="btn-add-scan-zone">+ Сектор</button>
+            </div>
+            <p class="muted static-hint">В режиме секторов укажите центр lat/lng и радиус. Объекты вне секторов не участвуют в поиске номеров.</p>
+            <div id="scan-zone-list" class="static-list"></div>
+          </div>
           <label class="checkbox">
             <input name="screenshot_enabled" type="checkbox" {% if settings.screenshot_enabled %}checked{% endif %} />
             Сохранять снимок при каждом приближении с видимыми номерами
@@ -275,6 +296,6 @@
     <script>
       window.__INITIAL_SETTINGS__ = {{ settings | tojson }};
     </script>
-    <script src="/static/js/app.js?v=11"></script>
+    <script src="/static/js/app.js?v=13"></script>
   </body>
 </html>

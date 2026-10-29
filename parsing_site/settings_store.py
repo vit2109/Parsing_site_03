@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, field, replace
 from functools import lru_cache
 from typing import Any
 
-from parsing_site.config import ROOT, AppConfig, StaticObjectConfig, load_config
+from parsing_site.config import ROOT, AppConfig, ScanZoneConfig, StaticObjectConfig, load_config
 from parsing_site.coordinates import normalize_mode
 from parsing_site.db import Database
 
@@ -85,6 +85,9 @@ class RuntimeSettings:
     reference_zoom: float = 0.0
     scan_wait_seconds: float = 1.5
     scan_max_zoom: int = 10
+    scan_mode: str = "adaptive"
+    scan_group_radius_km: float = 50.0
+    scan_zones: list[ScanZoneConfig] = field(default_factory=list)
     screenshot_enabled: bool = False
     screenshot_dir: str = "data/screenshots"
     screenshot_period_hours: int = 1
@@ -146,6 +149,9 @@ class RuntimeSettings:
                 reference_zoom=self.reference_zoom,
                 scan_wait_seconds=self.scan_wait_seconds,
                 scan_max_zoom=self.scan_max_zoom,
+                scan_mode=self.scan_mode,
+                scan_group_radius_km=self.scan_group_radius_km,
+                scan_zones=list(self.scan_zones),
                 lock_scale=self.lock_scale,
                 static_objects=list(self.static_objects),
             ),
@@ -215,6 +221,9 @@ def from_app_config(cfg: AppConfig) -> RuntimeSettings:
         reference_zoom=cfg.tracking.reference_zoom,
         scan_wait_seconds=cfg.tracking.scan_wait_seconds,
         scan_max_zoom=cfg.tracking.scan_max_zoom,
+        scan_mode=cfg.tracking.scan_mode,
+        scan_group_radius_km=cfg.tracking.scan_group_radius_km,
+        scan_zones=list(cfg.tracking.scan_zones),
         lock_scale=cfg.tracking.lock_scale,
         static_source=cfg.tracking.static_source,
         static_objects=list(cfg.tracking.static_objects),
@@ -238,6 +247,15 @@ def from_dict(data: dict[str, Any]) -> RuntimeSettings:
                 lng=_optional(item.get("lng")),
             )
         )
+    scan_zones = [
+        ScanZoneConfig(
+            name=str(item.get("name") or f"Сектор {index}"),
+            lat=float(item["lat"]),
+            lng=float(item["lng"]),
+            radius_km=float(item.get("radius_km", 350)),
+        )
+        for index, item in enumerate(data.get("scan_zones") or [], start=1)
+    ]
     recipients = [
         MaxRecipient(
             user_id=int(item.get("user_id", 0)),
@@ -292,6 +310,9 @@ def from_dict(data: dict[str, Any]) -> RuntimeSettings:
         reference_zoom=float(data.get("reference_zoom", 0)),
         scan_wait_seconds=float(data.get("scan_wait_seconds", 1.5)),
         scan_max_zoom=int(data.get("scan_max_zoom", 10)),
+        scan_mode=str(data.get("scan_mode", "adaptive")),
+        scan_group_radius_km=float(data.get("scan_group_radius_km", 50)),
+        scan_zones=scan_zones,
         screenshot_enabled=bool(data.get("screenshot_enabled", False)),
         screenshot_dir=str(data.get("screenshot_dir", "data/screenshots")),
         screenshot_period_hours=int(data.get("screenshot_period_hours", 1)),
@@ -325,6 +346,27 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
         raise ValueError("Задержка на точке должна быть от 0.2 до 10 с.")
     if not 4 <= settings.scan_max_zoom <= 18:
         raise ValueError("Максимальный zoom обхода должен быть от 4 до 18.")
+    if settings.scan_mode not in {"adaptive", "static_points", "grouped_static", "zones"}:
+        raise ValueError("Неизвестный режим обхода карты.")
+    if not 1 <= settings.scan_group_radius_km <= 500:
+        raise ValueError("Радиус объединения стационарных точек должен быть от 1 до 500 км.")
+    if settings.scan_mode in {"static_points", "grouped_static"} \
+            and settings.coordinate_mode != "latlng":
+        raise ValueError("Обход по стационарным точкам требует режима координат lat/lng.")
+    if settings.scan_mode in {"static_points", "grouped_static"} and not any(
+        point.lat is not None and point.lng is not None
+        and -85 <= point.lat <= 85 and -180 <= point.lng <= 180
+        for point in settings.static_objects
+    ):
+        raise ValueError("Для обхода по стационарным точкам укажите их lat/lng.")
+    if settings.scan_mode == "zones" and not settings.scan_zones:
+        raise ValueError("Для обхода по секторам добавьте хотя бы один сектор.")
+    if len(settings.scan_zones) > 24:
+        raise ValueError("Допускается не более 24 секторов обхода.")
+    for zone in settings.scan_zones:
+        if not zone.name.strip() or not -85 <= zone.lat <= 85 \
+                or not -180 <= zone.lng <= 180 or not 1 <= zone.radius_km <= 2000:
+            raise ValueError("Сектор обхода: укажите название, lat/lng и радиус 1–2000 км.")
     if settings.screenshot_period_hours not in {1, 3, 6, 12, 24} \
             or settings.archive_html_period_hours not in {1, 3, 6, 12, 24}:
         raise ValueError("Период сохранения должен быть 1, 3, 6, 12 или 24 часа.")
@@ -424,6 +466,10 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
         reference_zoom=float(settings.reference_zoom),
         scan_wait_seconds=float(settings.scan_wait_seconds),
         scan_max_zoom=int(settings.scan_max_zoom),
+        scan_mode=settings.scan_mode,
+        scan_group_radius_km=float(settings.scan_group_radius_km),
+        scan_zones=[ScanZoneConfig(zone.name.strip(), zone.lat, zone.lng, zone.radius_km)
+                    for zone in settings.scan_zones],
         screenshot_enabled=bool(settings.screenshot_enabled),
         screenshot_dir=settings.screenshot_dir.strip(),
         screenshot_period_hours=settings.screenshot_period_hours,

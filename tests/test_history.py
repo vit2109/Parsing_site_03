@@ -126,6 +126,35 @@ class HistoryDatabaseTest(unittest.TestCase):
             self.assertEqual(store.load().scan_max_zoom, 8)
             db.close()
 
+    def test_scan_modes_and_zones_round_trip(self) -> None:
+        self.assertEqual(from_dict({}).scan_mode, "adaptive")
+        payload = {"scan_mode": "zones", "scan_zones": [
+            {"name": "Север", "lat": 59.9, "lng": 30.3, "radius_km": 150},
+        ]}
+        settings = validate_settings(from_dict(payload))
+        self.assertEqual(settings.to_app_config().tracking.scan_mode, "zones")
+        self.assertEqual(settings.to_app_config().tracking.scan_zones[0].radius_km, 150)
+        with TemporaryDirectory() as directory:
+            db = Database(Path(directory) / "settings.db")
+            loaded = SettingsStore(db).save(settings)
+            self.assertEqual(loaded.scan_zones[0].name, "Север")
+            self.assertEqual(SettingsStore(db).load().scan_zones[0].lat, 59.9)
+            db.close()
+        with self.assertRaises(ValueError):
+            validate_settings(from_dict({"scan_mode": "zones"}))
+        with self.assertRaises(ValueError):
+            validate_settings(from_dict({"scan_mode": "static_points"}))
+        with self.assertRaises(ValueError):
+            validate_settings(from_dict({"scan_mode": "unknown"}))
+        grouped = validate_settings(from_dict({
+            "scan_mode": "grouped_static", "scan_group_radius_km": 50,
+            "static_objects": [{"id": 1, "name": "Точка", "lat": 59.9, "lng": 30.3}],
+        }))
+        self.assertEqual(grouped.to_app_config().tracking.scan_mode, "grouped_static")
+        self.assertEqual(from_dict(grouped.to_dict()).scan_group_radius_km, 50)
+        with self.assertRaises(ValueError):
+            validate_settings(from_dict({"scan_group_radius_km": 501}))
+
     def test_trajectory_keeps_first_timestamp_until_coordinates_change(self) -> None:
         with TemporaryDirectory() as directory:
             db = Database(Path(directory) / "tracking.db")

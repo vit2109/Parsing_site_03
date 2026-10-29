@@ -34,6 +34,9 @@ map_container_selector = ".leaflet-container"
 # Пауза после каждого перемещения карты для загрузки номеров маркеров.
 scan_wait_seconds = 1.5
 scan_max_zoom = 10
+# adaptive | static_points | grouped_static | zones
+scan_mode = "adaptive"
+scan_group_radius_km = 50
 # Эталонный zoom Leaflet (0 = не проверять). lock_scale — для режимов в px
 reference_zoom = 0
 lock_scale = false

@@ -53,6 +53,13 @@ app.mount("/static", StaticFiles(directory=WEB_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 
 
+class ScanZoneIn(BaseModel):
+    name: str = Field(min_length=1)
+    lat: float = Field(ge=-85, le=85)
+    lng: float = Field(ge=-180, le=180)
+    radius_km: float = Field(default=350, ge=1, le=2000)
+
+
 class SettingsIn(BaseModel):
     """Тело запроса сохранения настроек с базовыми ограничениями значений."""
 
@@ -61,6 +68,9 @@ class SettingsIn(BaseModel):
     interval_seconds: float = Field(ge=0.4, le=600)
     scan_wait_seconds: float = Field(default=1.5, ge=0.2, le=10)
     scan_max_zoom: int = Field(default=10, ge=4, le=18)
+    scan_mode: str = "adaptive"
+    scan_group_radius_km: float = Field(default=50, ge=1, le=500)
+    scan_zones: list[ScanZoneIn] = Field(default_factory=list)
     screenshot_enabled: bool = False
     screenshot_dir: str = "data/screenshots"
     screenshot_period_hours: int = 1

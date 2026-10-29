@@ -16,6 +16,7 @@ const STATUS_LABEL = {
 };
 
 let staticObjects = (window.__INITIAL_SETTINGS__?.static_objects || []).slice();
+let scanZones = (window.__INITIAL_SETTINGS__?.scan_zones || []).slice();
 let maxGroups = (window.__INITIAL_SETTINGS__?.max_groups || []).slice();
 
 // Отслеживание красных записей для звукового сигнала
@@ -50,6 +51,10 @@ const els = {
   historyRowsDay: document.getElementById("stat-history-rows-day"),
   historySizeDay: document.getElementById("stat-history-size-day"),
   staticList: document.getElementById("static-list"),
+  scanZoneList: document.getElementById("scan-zone-list"),
+  scanZonesBlock: document.getElementById("scan-zones-block"),
+  scanGroupRadiusControl: document.getElementById("scan-group-radius-control"),
+  addScanZone: document.getElementById("btn-add-scan-zone"),
   addStatic: document.getElementById("btn-add-static"),
   maxList: document.getElementById("max-recipient-list"),
   addMax: document.getElementById("btn-add-max-recipient"),
@@ -73,6 +78,14 @@ if (els.pruneHistory) els.pruneHistory.addEventListener("click", async () => {
 els.cancel.addEventListener("click", () => els.dialog.close());
 els.form.addEventListener("submit", saveSettings);
 els.addStatic.addEventListener("click", addStaticRow);
+els.addScanZone.addEventListener("click", () => {
+  scanZones = collectScanZones();
+  const point = collectStaticObjects().find(item => item.lat != null && item.lng != null);
+  scanZones.push({name: `Сектор ${scanZones.length + 1}`,
+    lat: point?.lat ?? null, lng: point?.lng ?? null, radius_km: 350});
+  renderScanZones();
+});
+els.form.elements.namedItem("scan_mode").addEventListener("change", showScanModeControls);
 els.addMax.addEventListener("click", () => {
   maxGroups = collectMaxGroups();
   maxGroups.push({ user_ids: "", all_objects: false, zones: [], rules: [] });
@@ -611,6 +624,8 @@ async function loadTestHtml() {
 /** Синхронизирует список точек и открывает диалог настроек. */
 function openSettings() {
   renderStaticList();
+  renderScanZones();
+  showScanModeControls();
   els.dialog.showModal();
 }
 
@@ -644,6 +659,7 @@ function applySettings(settings) {
   els.interval.textContent = `${settings.interval_seconds} с`;
   if (!els.dialog.open) {
     staticObjects = (settings.static_objects || []).slice();
+    scanZones = (settings.scan_zones || []).slice();
     fillForm(settings);
   }
 }
@@ -658,6 +674,10 @@ function fillForm(settings) {
   setFormValue("interval_seconds", settings.interval_seconds);
   setFormValue("scan_wait_seconds", settings.scan_wait_seconds ?? 1.5);
   setFormValue("scan_max_zoom", settings.scan_max_zoom ?? 10);
+  setFormValue("scan_mode", settings.scan_mode ?? "adaptive");
+  setFormValue("scan_group_radius_km", settings.scan_group_radius_km ?? 50);
+  renderScanZones();
+  showScanModeControls();
   setFormValue("screenshot_dir", settings.screenshot_dir ?? "data/screenshots");
   setFormValue("screenshot_period_hours", settings.screenshot_period_hours ?? 1);
   setFormValue("screenshot_width", settings.screenshot_width ?? 1280);
@@ -852,6 +872,42 @@ function collectStaticObjects() {
   }));
 }
 
+function showScanModeControls() {
+  const mode = els.form.elements.namedItem("scan_mode").value;
+  const active = mode === "zones";
+  els.scanZonesBlock.hidden = !active;
+  els.scanZoneList.querySelectorAll("input").forEach(input => { input.disabled = !active; });
+  els.scanGroupRadiusControl.hidden = mode !== "grouped_static";
+}
+
+function renderScanZones() {
+  els.scanZoneList.innerHTML = scanZones.map((zone, index) => `
+    <div class="scan-zone-row" data-index="${index}">
+      <input type="text" data-field="name" value="${escapeAttr(zone.name || "")}" placeholder="Название" aria-label="Название сектора" required />
+      <input type="number" data-field="lat" value="${num(zone.lat)}" min="-85" max="85" step="any" placeholder="lat" aria-label="Широта" required />
+      <input type="number" data-field="lng" value="${num(zone.lng)}" min="-180" max="180" step="any" placeholder="lng" aria-label="Долгота" required />
+      <input type="number" data-field="radius_km" value="${num(zone.radius_km)}" min="1" max="2000" step="any" placeholder="радиус, км" aria-label="Радиус, км" required />
+      <button type="button" class="btn btn-remove" data-remove-zone="${index}" aria-label="Удалить сектор">×</button>
+    </div>
+  `).join("") || `<p class="muted">Нет секторов. Нажмите «+ Сектор».</p>`;
+  els.scanZoneList.querySelectorAll("[data-remove-zone]").forEach(button => {
+    button.addEventListener("click", () => {
+      scanZones = collectScanZones();
+      scanZones.splice(Number(button.dataset.removeZone), 1);
+      renderScanZones();
+    });
+  });
+}
+
+function collectScanZones() {
+  return [...els.scanZoneList.querySelectorAll(".scan-zone-row")].map(row => ({
+    name: row.querySelector('[data-field="name"]').value.trim(),
+    lat: parseOptional(row.querySelector('[data-field="lat"]').value),
+    lng: parseOptional(row.querySelector('[data-field="lng"]').value),
+    radius_km: parseOptional(row.querySelector('[data-field="radius_km"]').value),
+  }));
+}
+
 /** Назначает точкам последовательные идентификаторы после удаления. */
 function renumberStatics() {
   staticObjects.forEach((item, index) => {
@@ -867,6 +923,8 @@ async function saveSettings(event) {
   data.interval_seconds = Number(data.interval_seconds);
   data.scan_wait_seconds = Number(data.scan_wait_seconds);
   data.scan_max_zoom = Number(data.scan_max_zoom);
+  data.scan_group_radius_km = Number(data.scan_group_radius_km);
+  data.scan_zones = collectScanZones();
   data.screenshot_enabled = Boolean(els.form.elements.namedItem("screenshot_enabled")?.checked);
   data.screenshot_period_hours = Number(data.screenshot_period_hours);
   data.screenshot_width = Number(data.screenshot_width);
@@ -896,6 +954,7 @@ async function saveSettings(event) {
     const current = await get("/api/settings");
     const saved = await put("/api/settings", { ...current, ...data });
     staticObjects = saved.static_objects || [];
+    scanZones = saved.scan_zones || [];
     applySettings(saved);
     els.dialog.close();
   } catch (err) {

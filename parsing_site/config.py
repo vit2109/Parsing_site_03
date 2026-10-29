@@ -101,6 +101,16 @@ class StaticObjectConfig:
 
 
 @dataclass(slots=True)
+class ScanZoneConfig:
+    """Заранее заданный сектор обхода карты."""
+
+    name: str
+    lat: float
+    lng: float
+    radius_km: float = 350.0
+
+
+@dataclass(slots=True)
 class TrackingConfig:
     """Правила съёма карты: селекторы, режим координат, пороги, статичные точки."""
 
@@ -113,6 +123,9 @@ class TrackingConfig:
     reference_zoom: float = 0.0
     scan_wait_seconds: float = 1.5
     scan_max_zoom: int = 10
+    scan_mode: str = "adaptive"
+    scan_group_radius_km: float = 50.0
+    scan_zones: list[ScanZoneConfig] = field(default_factory=list)
     lock_scale: bool = False
     threshold: float = 140.0
     warning_ratio: float = 1.4
@@ -187,6 +200,16 @@ def load_config(path: Path | None = None) -> AppConfig:
             )
         )
 
+    scan_zones = [
+        ScanZoneConfig(
+            name=str(item.get("name") or f"Сектор {index}"),
+            lat=float(item["lat"]),
+            lng=float(item["lng"]),
+            radius_km=float(item.get("radius_km", 350)),
+        )
+        for index, item in enumerate(tracking_raw.get("scan_zones") or [], start=1)
+    ]
+
     source = str(tracking_raw.get("static_source", "config")).strip().lower()
     if source not in {"config", "page", "both"}:
         source = "config"
@@ -228,6 +251,9 @@ def load_config(path: Path | None = None) -> AppConfig:
             reference_zoom=float(tracking_raw.get("reference_zoom", 0.0)),
             scan_wait_seconds=float(tracking_raw.get("scan_wait_seconds", 1.5)),
             scan_max_zoom=int(tracking_raw.get("scan_max_zoom", 10)),
+            scan_mode=str(tracking_raw.get("scan_mode", "adaptive")),
+            scan_group_radius_km=float(tracking_raw.get("scan_group_radius_km", 50)),
+            scan_zones=scan_zones,
             lock_scale=bool(tracking_raw.get("lock_scale", False)),
             threshold=float(tracking_raw.get("threshold", 140.0)),
             warning_ratio=float(tracking_raw.get("warning_ratio", 1.4)),

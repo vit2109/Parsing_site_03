@@ -30,8 +30,10 @@ from parsing_site.coordinates import (
     normalize_mode,
     project_3857,
     static_to_point,
+    unproject_3857,
 )
 from parsing_site.phone_loader import get_phone_for_static
+from parsing_site.scan_routes import group_static_points
 
 BLUE_ZONE_KM = 350.0
 
@@ -433,7 +435,8 @@ async (opts) => {
     }
   };
   dynamics.forEach(applyKnownNumber);
-  const scan = { status: map ? "ready" : "no_leaflet_instance", views: 0, overview_count: dynamics.length };
+  const scan = { status: map ? "ready" : "no_leaflet_instance", views: 0,
+    overview_count: dynamics.length, mode: opts.scanMode || "adaptive" };
 
   // Сначала собираем маркеры при отдалении, затем читаем подписи в увеличенном виде.
   // Позиции всех объектов в результате пересчитываются для исходного вида карты.
@@ -451,16 +454,31 @@ async (opts) => {
     const staticPoints = opts.mode === "latlng" ? (opts.staticObjects || [])
       .filter((item) => Number.isFinite(item.lat) && Number.isFinite(item.lng) &&
         Math.abs(item.lat) <= 85.0511287798 && Math.abs(item.lng) <= 180) : [];
+    const scanMode = ["adaptive", "static_points", "grouped_static", "zones"].includes(opts.scanMode)
+      ? opts.scanMode : "adaptive";
+    const groupedRoute = scanMode === "grouped_static" ? (opts.scanRoutePoints || [])
+      .filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng) &&
+        Math.abs(point.lat) <= 85 && Math.abs(point.lng) <= 180) : [];
+    const scanZones = scanMode === "zones" ? (opts.scanZones || [])
+      .filter((zone) => Number.isFinite(zone.lat) && Number.isFinite(zone.lng) &&
+        Math.abs(zone.lat) <= 85 && Math.abs(zone.lng) <= 180 &&
+        Number.isFinite(zone.radius_km) && zone.radius_km >= 1) : [];
+    scan.mode = scanMode;
     const scanRadiusKm = Math.max(1, Number(opts.scanRadiusKm) || 350);
-    const inStaticArea = (lat, lng) => !staticPoints.length || staticPoints.some((point) => {
+    const distanceKm = (lat, lng, point) => {
       const dLat = (lat - point.lat) * Math.PI / 180;
       const dLng = (lng - point.lng) * Math.PI / 180;
       const a = Math.sin(dLat / 2) ** 2 +
         Math.cos(lat * Math.PI / 180) * Math.cos(point.lat * Math.PI / 180) *
         Math.sin(dLng / 2) ** 2;
-      return 12742 * Math.asin(Math.min(1, Math.sqrt(a))) <= scanRadiusKm;
-    });
-    if (staticPoints.length) {
+      return 12742 * Math.asin(Math.min(1, Math.sqrt(a)));
+    };
+    const inStaticArea = (lat, lng) =>
+      (!staticPoints.length || staticPoints.some((point) =>
+        distanceKm(lat, lng, point) <= scanRadiusKm)) &&
+      (!scanZones.length || scanZones.some((zone) =>
+        distanceKm(lat, lng, zone) <= zone.radius_km));
+    if (staticPoints.length || scanZones.length) {
       const nearby = dynamics.filter((item) => !Number.isFinite(item.lat) ||
         !Number.isFinite(item.lng) || inStaticArea(item.lat, item.lng));
       dynamics.length = 0;
@@ -589,11 +607,17 @@ async (opts) => {
         await moveTo(originalCenter.lat, originalCenter.lng, overviewZoom);
         rememberVisible();
       }
-      if (staticPoints.length) {
+      const routePoints = scanMode === "zones" ? scanZones
+        : scanMode === "grouped_static" && groupedRoute.length ? groupedRoute : staticPoints;
+      if (scanMode === "grouped_static") {
+        scan.static_groups = routePoints.length;
+        scan.static_points = staticPoints.length;
+      }
+      if (routePoints.length) {
         // Обзор строится вокруг стационарных точек; далёкие маркеры не ведут
         // карту за пределы контролируемых зон.
         const survey = [];
-        for (const point of staticPoints) {
+        for (const point of routePoints) {
           const projected = project3857(point.lat, point.lng, overviewZoom);
           if (!survey.some((entry) =>
             Math.abs(entry.x - projected.x) < mapRect.width * 0.4 &&
@@ -601,7 +625,7 @@ async (opts) => {
             survey.push({lat: point.lat, lng: point.lng, ...projected});
           }
         }
-        scan.static_areas = survey.length;
+        scan.route_areas = survey.length;
         for (const center of survey) {
           if (!canExplore()) break;
           await moveTo(center.lat, center.lng, overviewZoom);
@@ -659,25 +683,78 @@ async (opts) => {
         const positioned = items.map((item) => ({
           item, point: project3857(item.lat, item.lng, level),
         }));
-        const minX = Math.min(...positioned.map((entry) => entry.point.x));
-        const minY = Math.min(...positioned.map((entry) => entry.point.y));
-        const cellW = Math.max(1, mapRect.width * 0.35);
-        const cellH = Math.max(1, mapRect.height * 0.35);
         const cells = new Map();
-        for (const entry of positioned) {
-          const key = `${Math.floor((entry.point.x - minX) / cellW)},` +
-            `${Math.floor((entry.point.y - minY) / cellH)}`;
-          if (!cells.has(key)) cells.set(key, []);
-          cells.get(key).push(entry.item);
+        if (scanMode === "grouped_static") {
+          // Один вид может вместить маркеры по разные стороны границы обычной
+          // сетки. Собираем их по ближайшей группе стационарных точек и
+          // проверяем фактические размеры кадра на выбранном масштабе.
+          const buckets = [];
+          for (const entry of positioned.sort((a, b) =>
+            a.point.x - b.point.x || a.point.y - b.point.y)) {
+            let routeIndex = 0;
+            let routeDistance = Infinity;
+            routePoints.forEach((point, index) => {
+              const distance = distanceKm(entry.item.lat, entry.item.lng, point);
+              if (distance < routeDistance) { routeIndex = index; routeDistance = distance; }
+            });
+            let best = null;
+            let bestSpan = Infinity;
+            for (const bucket of buckets) {
+              if (bucket.routeIndex !== routeIndex) continue;
+              const minX = Math.min(bucket.minX, entry.point.x);
+              const maxX = Math.max(bucket.maxX, entry.point.x);
+              const minY = Math.min(bucket.minY, entry.point.y);
+              const maxY = Math.max(bucket.maxY, entry.point.y);
+              if (maxX - minX > mapRect.width * 0.7 ||
+                  maxY - minY > mapRect.height * 0.7) continue;
+              const span = maxX - minX + maxY - minY;
+              if (span < bestSpan) { best = bucket; bestSpan = span; }
+            }
+            if (best) {
+              best.items.push(entry.item);
+              best.minX = Math.min(best.minX, entry.point.x);
+              best.maxX = Math.max(best.maxX, entry.point.x);
+              best.minY = Math.min(best.minY, entry.point.y);
+              best.maxY = Math.max(best.maxY, entry.point.y);
+            } else {
+              buckets.push({routeIndex, items: [entry.item],
+                minX: entry.point.x, maxX: entry.point.x,
+                minY: entry.point.y, maxY: entry.point.y});
+            }
+          }
+          buckets.forEach((bucket, index) => cells.set(index, bucket.items));
+        } else {
+          const minX = Math.min(...positioned.map((entry) => entry.point.x));
+          const minY = Math.min(...positioned.map((entry) => entry.point.y));
+          const cellW = Math.max(1, mapRect.width * 0.35);
+          const cellH = Math.max(1, mapRect.height * 0.35);
+          for (const entry of positioned) {
+            const key = `${Math.floor((entry.point.x - minX) / cellW)},` +
+              `${Math.floor((entry.point.y - minY) / cellH)}`;
+            if (!cells.has(key)) cells.set(key, []);
+            cells.get(key).push(entry.item);
+          }
         }
         const remaining = [...cells.values()];
+        const routeIndexes = new Map(remaining.map((group) => {
+          let bestIndex = 0;
+          let bestDistance = Infinity;
+          routePoints.forEach((point, index) => {
+            const distance = distanceKm(group[0].lat, group[0].lng, point);
+            if (distance < bestDistance) { bestDistance = distance; bestIndex = index; }
+          });
+          return [group, bestIndex];
+        }));
         const ordered = [];
         const current = map.getCenter();
         let cursor = project3857(current.lat, current.lng, overviewZoom);
         while (remaining.length) {
           let closest = 0;
           let shortest = Infinity;
+          const firstRoute = scanMode === "adaptive" || !routePoints.length ? null
+            : Math.min(...remaining.map((group) => routeIndexes.get(group)));
           remaining.forEach((group, index) => {
+            if (firstRoute !== null && routeIndexes.get(group) !== firstRoute) return;
             const center = project3857(group[0].lat, group[0].lng, overviewZoom);
             const distance = (center.x - cursor.x) ** 2 + (center.y - cursor.y) ** 2;
             if (distance < shortest) { closest = index; shortest = distance; }
@@ -689,7 +766,9 @@ async (opts) => {
         return ordered;
       };
       const attemptedAtFinal = new Set();
-      for (const level of [...new Set([targetZoom, finalZoom])]) {
+      const levels = scanMode === "adaptive"
+        ? [...new Set([targetZoom, finalZoom])] : [finalZoom];
+      for (const level of levels) {
         if (!canExplore()) break;
         const pending = dynamics.filter((item) => item.index < 0 &&
           Number.isFinite(item.lat) && Number.isFinite(item.lng) &&
@@ -710,10 +789,21 @@ async (opts) => {
           const points = remaining.map((item) => project3857(item.lat, item.lng, visitZoom));
           const xs = points.map((point) => point.x);
           const ys = points.map((point) => point.y);
-          const center = unproject3857(
-            (Math.min(...xs) + Math.max(...xs)) / 2,
-            (Math.min(...ys) + Math.max(...ys)) / 2, visitZoom,
-          );
+          let centerX = (Math.min(...xs) + Math.max(...xs)) / 2;
+          let centerY = (Math.min(...ys) + Math.max(...ys)) / 2;
+          if (scanMode === "grouped_static" && routePoints.length) {
+            const nearest = routePoints.reduce((best, point) => {
+              const distance = distanceKm(remaining[0].lat, remaining[0].lng, point);
+              return distance < best.distance ? {point, distance} : best;
+            }, {point: null, distance: Infinity}).point;
+            const anchor = project3857(nearest.lat, nearest.lng, visitZoom);
+            if (points.every((point) => Math.abs(point.x - anchor.x) <= mapRect.width * 0.35 &&
+                Math.abs(point.y - anchor.y) <= mapRect.height * 0.35)) {
+              centerX = anchor.x;
+              centerY = anchor.y;
+            }
+          }
+          const center = unproject3857(centerX, centerY, visitZoom);
           // Между удалёнными группами перемещаем карту только на обзорном зуме.
           const current = map.getCenter();
           if (map.getZoom() !== overviewZoom ||
@@ -736,7 +826,7 @@ async (opts) => {
             if (!numberedAtMove) recordNumberedView(true);
             matchVisible();
           }
-          if (visitZoom === finalZoom) {
+          if (visitZoom === finalZoom || scanMode !== "adaptive") {
             remaining.forEach((item) => attemptedAtFinal.add(item.fallback_id));
           }
         }
@@ -901,6 +991,9 @@ def extract_scene_from_page(
     capture_numbered: bool = False,
 ) -> dict[str, Any]:
     """Снимает маркеры и вид карты из живой вкладки (JS _EXTRACT_SCRIPT)."""
+    grouped_route = group_static_points(
+        tracking.static_objects, tracking.scan_group_radius_km,
+    ) if tracking.scan_mode == "grouped_static" else []
     return page.evaluate(
         _EXTRACT_SCRIPT,
         {
@@ -912,6 +1005,17 @@ def extract_scene_from_page(
             "captureNumbered": capture_numbered,
             "scanWaitMs": round(tracking.scan_wait_seconds * 1000),
             "scanMaxZoom": tracking.scan_max_zoom,
+            "scanMode": tracking.scan_mode,
+            "scanRoutePoints": [
+                {"lat": group.lat, "lng": group.lng,
+                 "static_count": len(group.static_ids)}
+                for group in grouped_route
+            ],
+            "scanZones": [
+                {"name": zone.name, "lat": zone.lat, "lng": zone.lng,
+                 "radius_km": zone.radius_km}
+                for zone in tracking.scan_zones
+            ],
             "scanRadiusKm": max(tracking.threshold, tracking.warning_limit,
                                 tracking.blue_limit),
             "knownNumbers": {
@@ -935,6 +1039,7 @@ def extract_scene_from_page(
 
 def _scan_target_groups(
     targets: list[dict[str, Any]], width: float, height: float, zoom: float,
+    grouped_centers: list[tuple[float, float]] | None = None,
 ) -> list[list[dict[str, Any]]]:
     """Собирает близкие маркеры в один вид на масштабе проверки номеров."""
     positioned = []
@@ -944,6 +1049,34 @@ def _scan_target_groups(
             positioned.append((item, project_3857(lat, lng, zoom)))
     if not positioned:
         return []
+    if grouped_centers:
+        buckets: list[dict[str, Any]] = []
+        for item, (x, y) in sorted(positioned, key=lambda entry: entry[1]):
+            route_index = min(
+                range(len(grouped_centers)),
+                key=lambda index: haversine_km(
+                    item["lat"], item["lng"], *grouped_centers[index],
+                ),
+            )
+            candidates = [bucket for bucket in buckets
+                          if bucket["route_index"] == route_index
+                          and max(bucket["max_x"], x) - min(bucket["min_x"], x) <= width * 0.7
+                          and max(bucket["max_y"], y) - min(bucket["min_y"], y) <= height * 0.7]
+            if candidates:
+                bucket = min(candidates, key=lambda value:
+                             max(value["max_x"], x) - min(value["min_x"], x)
+                             + max(value["max_y"], y) - min(value["min_y"], y))
+                bucket["items"].append(item)
+                bucket["min_x"] = min(bucket["min_x"], x)
+                bucket["max_x"] = max(bucket["max_x"], x)
+                bucket["min_y"] = min(bucket["min_y"], y)
+                bucket["max_y"] = max(bucket["max_y"], y)
+            else:
+                buckets.append({"route_index": route_index, "items": [item],
+                                "min_x": x, "max_x": x, "min_y": y, "max_y": y})
+        return [bucket["items"] for bucket in sorted(
+            buckets, key=lambda value: (value["route_index"], -len(value["items"])),
+        )]
     origin_x = min(point[0] for _, point in positioned)
     origin_y = min(point[1] for _, point in positioned)
     cell_width = max(1.0, width * 0.4)
@@ -953,6 +1086,27 @@ def _scan_target_groups(
         key = (int((x - origin_x) // cell_width), int((y - origin_y) // cell_height))
         cells.setdefault(key, []).append(item)
     return sorted(cells.values(), key=len, reverse=True)
+
+
+def _scan_group_center(
+    group: list[dict[str, Any]], width: float, height: float, zoom: float,
+    grouped_centers: list[tuple[float, float]] | None,
+) -> tuple[float, float]:
+    """Центрирует группу на опорной точке, если все маркеры видны в одном кадре."""
+    if not grouped_centers:
+        return group[0]["lat"], group[0]["lng"]
+    points = [project_3857(item["lat"], item["lng"], zoom) for item in group]
+    route = min(grouped_centers, key=lambda point:
+                haversine_km(group[0]["lat"], group[0]["lng"], *point))
+    anchor_x, anchor_y = project_3857(*route, zoom)
+    if all(abs(x - anchor_x) <= width * 0.35 and abs(y - anchor_y) <= height * 0.35
+           for x, y in points):
+        return route
+    return unproject_3857(
+        (min(x for x, _ in points) + max(x for x, _ in points)) / 2,
+        (min(y for _, y in points) + max(y for _, y in points)) / 2,
+        zoom,
+    )
 
 
 def extract_scene_with_mouse_scan(
@@ -990,15 +1144,29 @@ def extract_scene_with_mouse_scan(
         if tracking.coordinate_mode == "latlng"
         and item.lat is not None and item.lng is not None
     ]
+    scan_zones = tracking.scan_zones if tracking.scan_mode == "zones" else []
+    scan["mode"] = tracking.scan_mode
+    grouped_route = group_static_points(
+        tracking.static_objects, tracking.scan_group_radius_km,
+    ) if tracking.scan_mode == "grouped_static" else []
+    grouped_centers = [(group.lat, group.lng) for group in grouped_route]
+    if tracking.scan_mode == "grouped_static":
+        scan["static_groups"] = len(grouped_route)
+        scan["static_points"] = len(static_points)
     scan_radius = max(tracking.threshold, tracking.warning_limit, tracking.blue_limit)
 
     def in_static_area(lat: float, lng: float) -> bool:
-        return not static_points or any(
+        near_static = not static_points or any(
             haversine_km(lat, lng, static_lat, static_lng) <= scan_radius
             for static_lat, static_lng in static_points
         )
+        near_zone = not scan_zones or any(
+            haversine_km(lat, lng, zone.lat, zone.lng) <= zone.radius_km
+            for zone in scan_zones
+        )
+        return near_static and near_zone
 
-    if static_points:
+    if static_points or scan_zones:
         raw["dynamics"] = [
             item for item in raw.get("dynamics") or []
             if (lat := _maybe_float(item.get("lat"))) is None
@@ -1072,7 +1240,20 @@ def extract_scene_with_mouse_scan(
     overview_view = map_view_from_raw(overview.get("map"))
     if overview_view is not None and overview_view.can_unproject:
         if callable(getattr(page.mouse, "down", None)) and callable(getattr(page.mouse, "up", None)):
-            queue = [(0, 0)]
+            route_points = (
+                [(zone.lat, zone.lng) for zone in scan_zones]
+                if tracking.scan_mode == "zones" else static_points
+                if tracking.scan_mode == "static_points" else
+                [(group.lat, group.lng) for group in grouped_route]
+                if tracking.scan_mode == "grouped_static" else []
+            )
+            for lat, lng in route_points:
+                if overview_views >= 32 or monotonic() >= scan_deadline:
+                    break
+                overview = _pan_mouse_to(page, tracking, overview, lat, lng)
+                overview_views += 1
+                _merge_overview_scene(raw, overview, base_view, in_static_area)
+            queue = [] if route_points else [(0, 0)]
             seen: set[tuple[int, int]] = set()
             while queue and len(seen) < 16 and overview_views < 32 \
                     and monotonic() < scan_deadline:
@@ -1131,23 +1312,27 @@ def extract_scene_with_mouse_scan(
                 offscreen.append(item)
         for group in _scan_target_groups(
             offscreen, base_view.width, base_view.height, scan_zoom_ceiling,
+            grouped_centers,
         ):
             if overview_views >= 32 or monotonic() >= scan_deadline:
                 break
-            target = group[0]
+            target_lat, target_lng = _scan_group_center(
+                group, base_view.width, base_view.height, scan_zoom_ceiling,
+                grouped_centers,
+            )
             current_view = map_view_from_raw(overview.get("map"))
-            point = latlng_to_container(target["lat"], target["lng"], current_view) \
+            point = latlng_to_container(target_lat, target_lng, current_view) \
                 if current_view is not None else None
             if point is None:
                 continue
             if not (0 <= point[0] <= current_view.width and 0 <= point[1] <= current_view.height):
                 if not callable(getattr(page.mouse, "down", None)):
                     continue
-                overview = _pan_mouse_to(page, tracking, overview, target["lat"], target["lng"])
+                overview = _pan_mouse_to(page, tracking, overview, target_lat, target_lng)
                 current_view = map_view_from_raw(overview.get("map"))
                 if current_view is None:
                     continue
-                point = latlng_to_container(target["lat"], target["lng"], current_view)
+                point = latlng_to_container(target_lat, target_lng, current_view)
                 if point is None or not (0 <= point[0] <= current_view.width \
                         and 0 <= point[1] <= current_view.height):
                     continue
@@ -1238,13 +1423,17 @@ def extract_scene_with_mouse_scan(
 
     for group in _scan_target_groups(
         targets, base_view.width, base_view.height, scan_zoom_ceiling,
+        grouped_centers,
     ):
         if views + overview_views >= 32 or monotonic() >= scan_deadline:
             break
         if all(item["index"] > 0 for item in group):
             continue
-        target = next(item for item in group if item["index"] < 0)
-        point = latlng_to_container(target["lat"], target["lng"], base_view)
+        target_lat, target_lng = _scan_group_center(
+            group, base_view.width, base_view.height, scan_zoom_ceiling,
+            grouped_centers,
+        )
+        point = latlng_to_container(target_lat, target_lng, base_view)
         if point is None:
             continue
         x, y = point

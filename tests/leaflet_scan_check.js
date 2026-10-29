@@ -6,7 +6,7 @@ const nativeSetTimeout = global.setTimeout;
 
 async function check(initialZoom, mapDiscoverable = true, crowded = false, overlapping = false,
   sameNumber = false, denseUnique = false, bounded = false, mixedLabels = false,
-  highStart = false) {
+  highStart = false, scanMode = 'adaptive', clusterCase = false) {
   let zoomInMoves = 0;
   let zoomInWaits = 0;
   let awaitingZoomInPause = false;
@@ -23,7 +23,17 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     }
     return nativeSetTimeout(callback, Math.min(delay, 1), ...args);
   };
-  const points = mixedLabels ? [
+  const points = clusterCase ? [
+    {lat: 50, lng: 0, number: 101},
+    {lat: 50, lng: 0.4, number: 102},
+    {lat: 50, lng: 12, number: 103},
+    {lat: 5, lng: 60, number: 9999},
+  ] : scanMode !== 'adaptive' ? [
+    {lat: 50, lng: 0, number: 101},
+    {lat: 50, lng: 3, number: 102},
+    {lat: 50, lng: 12, number: 103},
+    {lat: 5, lng: 60, number: 9999},
+  ] : mixedLabels ? [
     {lat: 50, lng: 0, number: 101},
     {lat: 50, lng: 0.5, number: 102},
     {lat: 50, lng: 1, number: 103},
@@ -142,7 +152,18 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
   const result = await extract({
     mode: 'latlng', mapContainer: '.leaflet-container',
     dynamic: '.leaflet-marker-icon.map-incident', static: '.static',
-    staticObjects: bounded ? [{lat: 50, lng: 0}, {lat: 50, lng: 12}] : [],
+    staticObjects: clusterCase ? [0, 0.2, 0.3, 0.4, 12].map(lng => ({lat: 50, lng}))
+      : bounded || scanMode === 'static_points'
+      ? [{lat: 50, lng: 0}, {lat: 50, lng: 12}] : [],
+    scanMode,
+    scanRoutePoints: scanMode === 'grouped_static' ? [
+      {lat: 50, lng: 0.225, static_count: 4},
+      {lat: 50, lng: 12, static_count: 1},
+    ] : [],
+    scanZones: scanMode === 'zones' ? [
+      {lat: 50, lng: 0, radius_km: 350},
+      {lat: 50, lng: 12, radius_km: 350},
+    ] : [],
     scanNumbers: true, captureNumbered: true,
     scanMaxZoom: bounded || highStart ? 8 : 10, scanRadiusKm: 350,
   });
@@ -151,6 +172,21 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     assert.equal(result.unnumbered_dynamics,
       document.querySelectorAll('.leaflet-marker-icon.map-incident').length);
     return;
+  }
+  if (scanMode !== 'adaptive') {
+    assert.equal(result.scan.mode, scanMode);
+    if (scanMode === 'grouped_static') {
+      assert.equal(result.scan.static_points, 5);
+      assert.equal(result.scan.static_groups, 2);
+    }
+    assert.deepEqual(result.dynamics.map((item) => item.index).sort((a, b) => a - b),
+      [101, 102, 103], JSON.stringify({scan: result.scan, moves}));
+    assert.equal(result.scan.status, 'complete');
+    assert.equal(farMoves, 0);
+    assert.deepEqual(map.center, {lat: 50, lng: 0});
+    assert.equal(map.zoom, initialZoom);
+    assert.ok(result.scan.views <= 34);
+    return {zoomInMoves, moves, scan: result.scan};
   }
   if (highStart) {
     assert.equal(minimumVisitedZoom, 4, 'search must begin at overview zoom');
@@ -213,5 +249,13 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
   await check(6, true, false, false, false, false, true); // 1000 маркеров и далёкий выброс
   await check(8, true, false, false, false, false, false, true); // подписи с разными стилями
   await check(10, true, false, false, false, false, false, false, true); // старт с сильного приближения
+  await check(6, true, false, false, false, false, false, false, false, 'static_points');
+  await check(6, true, false, false, false, false, false, false, false, 'zones');
+  const plain = await check(6, true, false, false, false, false, false, false, false,
+    'static_points', true);
+  const grouped = await check(6, true, false, false, false, false, false, false, false,
+    'grouped_static', true);
+  assert.ok(grouped.zoomInMoves < plain.zoomInMoves,
+    `grouped route must use fewer zooms: ${grouped.zoomInMoves} vs ${plain.zoomInMoves}`);
   console.log('Leaflet scan: both zoom cases passed');
 })().catch((error) => {console.error(error); process.exitCode = 1;});
