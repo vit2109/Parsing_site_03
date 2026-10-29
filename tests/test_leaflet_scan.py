@@ -139,6 +139,18 @@ class LeafletScanTest(unittest.TestCase):
         self.assertEqual(page.zoom, 5)
         self.assertAlmostEqual(page.center_lng, 40, places=3)
 
+    def test_wheel_fallback_zooms_out_from_close_initial_view(self) -> None:
+        page = _FakePage(zoom=12)
+        with patch(
+            "parsing_site.tracking.extract_scene_from_page",
+            side_effect=lambda _p, _t, **_kw: page.scene(),
+        ):
+            extract_scene_with_mouse_scan(page, TrackingConfig(
+                dynamic_selector=".leaflet-marker-icon.map-incident", scan_max_zoom=8,
+            ))
+        self.assertEqual(page.zoom_history[:8], list(range(11, 3, -1)))
+        self.assertEqual(page.zoom, 12)
+
     def test_browser_wheel_visits_dense_duplicate_group_once(self) -> None:
         page = _FakePage(duplicates=30)
         with patch(
@@ -238,6 +250,7 @@ class _FakeMouse:
         anchor = container_to_latlng(self.x, self.y, view)
         assert anchor is not None
         page.zoom += 1 if dy < 0 else -1
+        page.zoom_history.append(page.zoom)
         page.max_zoom_seen = max(page.max_zoom_seen, page.zoom)
         world_x, world_y = project_3857(*anchor, page.zoom)
         page.center_lat, page.center_lng = unproject_3857(
@@ -271,6 +284,7 @@ class _FakePage:
     def __init__(self, crowded: bool = False, offscreen: bool = False,
                  far: bool = False, zoom: int = 5, duplicates: int = 0) -> None:
         self.zoom = zoom
+        self.zoom_history: list[int] = []
         self.max_zoom_seen = zoom
         self.crowded = crowded
         self.offscreen = offscreen

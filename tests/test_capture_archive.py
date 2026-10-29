@@ -183,7 +183,7 @@ class CaptureArchiveTest(unittest.TestCase):
         self.assertEqual(capture.html, "<html>zoom-7</html>")
         self.assertEqual(page.html_zoom, 7)
         self.assertEqual(page.zoom, 4)
-        self.assertEqual(page.waits, [1500, 1500, 1500])
+        self.assertEqual(page.waits, [100, 1500, 1500, 100, 1500])
 
         session.prepare_numbered_capture((900, 600), html_enabled=True)
         page = Page(labels_after=3)
@@ -207,6 +207,30 @@ class CaptureArchiveTest(unittest.TestCase):
         self.assertEqual([capture.html for capture in captures],
                          ["<html>zoom-7</html>", None])
         self.assertEqual(page.zoom, 4)
+
+    def test_replayed_captures_travel_between_groups_at_overview_zoom(self) -> None:
+        moves: list[tuple[float, float]] = []
+
+        class Page:
+            def evaluate(self, script: str, argument: object = None) -> object:
+                if "const original =" in script:
+                    return {"lat": 50, "lng": 0, "zoom": 10, "minZoom": 4}
+                moves.append((argument["lng"], argument["zoom"]))
+                return None
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                return None
+
+        session = BrowserSession(BrowserConfig())
+        session.prepare_numbered_capture((900, 600))
+        with patch.object(session, "_capture_visible_view", return_value=True):
+            session._capture_numbered_views(Page(), TrackingConfig(), [
+                {"lat": 50, "lng": 0, "zoom": 8},
+                {"lat": 50, "lng": 12, "zoom": 8},
+            ])
+        self.assertEqual(moves, [
+            (0, 4), (0, 8), (12, 4), (12, 8), (0, 4), (0, 10),
+        ])
 
     def test_pair_capture_requires_target_number_and_restores_map(self) -> None:
         class Page:

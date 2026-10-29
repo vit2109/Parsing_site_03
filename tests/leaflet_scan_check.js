@@ -5,21 +5,21 @@ const extract = eval(fs.readFileSync(process.argv[2], 'utf8'));
 const nativeSetTimeout = global.setTimeout;
 
 async function check(initialZoom, mapDiscoverable = true, crowded = false, overlapping = false,
-  sameNumber = false, denseUnique = false, bounded = false, mixedLabels = false) {
+  sameNumber = false, denseUnique = false, bounded = false, mixedLabels = false,
+  highStart = false) {
   let zoomInMoves = 0;
   let zoomInWaits = 0;
   let awaitingZoomInPause = false;
-  let zoomInTimers = 0;
   let minimumVisitedZoom = initialZoom;
   let maximumVisitedZoom = initialZoom;
   let offRowMoves = 0;
   let farMoves = 0;
+  const moves = [];
   global.setTimeout = (callback, delay, ...args) => {
-    if (awaitingZoomInPause && ++zoomInTimers >= 2) {
+    if (awaitingZoomInPause) {
       assert.equal(delay, 1500, 'pause after zooming in');
       zoomInWaits++;
       awaitingZoomInPause = false;
-      zoomInTimers = 0;
     }
     return nativeSetTimeout(callback, Math.min(delay, 1), ...args);
   };
@@ -55,6 +55,7 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     on(_event, callback) { listeners.add(callback); },
     off(_event, callback) { listeners.delete(callback); },
     setView([lat, lng], zoom) {
+      moves.push([lat, lng, zoom]);
       minimumVisitedZoom = Math.min(minimumVisitedZoom, zoom);
       maximumVisitedZoom = Math.max(maximumVisitedZoom, zoom);
       if (Math.abs(lat - 50) > 0.01) offRowMoves++;
@@ -143,13 +144,22 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     dynamic: '.leaflet-marker-icon.map-incident', static: '.static',
     staticObjects: bounded ? [{lat: 50, lng: 0}, {lat: 50, lng: 12}] : [],
     scanNumbers: true, captureNumbered: true,
-    scanMaxZoom: bounded ? 8 : 10, scanRadiusKm: 350,
+    scanMaxZoom: bounded || highStart ? 8 : 10, scanRadiusKm: 350,
   });
   if (!mapDiscoverable) {
     assert.equal(result.scan.status, 'no_leaflet_instance');
     assert.equal(result.unnumbered_dynamics,
       document.querySelectorAll('.leaflet-marker-icon.map-incident').length);
     return;
+  }
+  if (highStart) {
+    assert.equal(minimumVisitedZoom, 4, 'search must begin at overview zoom');
+    assert.deepEqual(moves.filter((move) => move[2] > 8), [[50, 0, initialZoom]],
+      'scan zoom ceiling must apply even when the original view is closer');
+    assert.ok(moves.every((move, index) => index === 0 ||
+      moves[index - 1][2] < 8 || move[2] < 8 ||
+      Math.abs(move[1] - moves[index - 1][1]) <= 1),
+    'distant groups must never be visited by panning at high zoom');
   }
   if (bounded) {
     assert.equal(result.dynamics.length, 1000, 'remote outlier must be excluded');
@@ -163,7 +173,7 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
   if (sameNumber) {
     assert.equal(result.dynamics.length, 30);
     assert.equal(result.dynamics.filter((item) => item.index > 0).length, 1);
-    assert.equal(zoomInMoves, 1, 'one dense group needs one zoom-in');
+    assert.equal(zoomInMoves, 2, 'one dense group plus original-zoom restoration');
     assert.deepEqual(map.center, {lat: 50, lng: 0});
     assert.equal(map.zoom, initialZoom);
     return;
@@ -172,13 +182,13 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     assert.equal(result.dynamics.length, 9);
     assert.equal(result.unnumbered_dynamics, 0);
     assert.equal(result.scan.status, 'complete');
-    assert.equal(zoomInMoves, 1, 'one view should show all distinct numbers in a dense group');
+    assert.equal(zoomInMoves, 2, 'one dense view plus original-zoom restoration');
     assert.deepEqual(map.center, {lat: 50, lng: 0});
     assert.equal(map.zoom, initialZoom);
     return;
   }
   assert.deepEqual(result.dynamics.map((item) => item.index).sort((a, b) => a - b),
-    points.map((point) => point.number));
+    points.map((point) => point.number), JSON.stringify({scan: result.scan, moves}));
   assert.equal(result.unnumbered_dynamics, 0);
   assert.equal(result.scan.status, 'complete');
   assert.ok(result.scan.best_numbered_view?.count > 0);
@@ -202,5 +212,6 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
   await check(6, true, false, false, false, true); // 9 разных номеров в одной группе
   await check(6, true, false, false, false, false, true); // 1000 маркеров и далёкий выброс
   await check(8, true, false, false, false, false, false, true); // подписи с разными стилями
+  await check(10, true, false, false, false, false, false, false, true); // старт с сильного приближения
   console.log('Leaflet scan: both zoom cases passed');
 })().catch((error) => {console.error(error); process.exitCode = 1;});

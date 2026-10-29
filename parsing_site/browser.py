@@ -376,14 +376,26 @@ class BrowserSession:
                   const map = window.__parsingSiteMap;
                   if (!map || typeof map.setView !== 'function') return null;
                   const center = map.getCenter();
-                  const original = {lat: center.lat, lng: center.lng, zoom: map.getZoom()};
+                  const original = {lat: center.lat, lng: center.lng, zoom: map.getZoom(),
+                    minZoom: typeof map.getMinZoom === 'function' ? map.getMinZoom() : 4};
                   return original;
                 }""",
             )
             if original is None:
                 return
+            transit_zoom = max(
+                float(original.get("minZoom", 4)),
+                min(float(original["zoom"]), 4.0),
+            )
             for view in views:
                 try:
+                    page.evaluate(
+                        """view => window.__parsingSiteMap.setView(
+                          [view.lat, view.lng], view.zoom, {animate: false}
+                        )""",
+                        {"lat": view["lat"], "lng": view["lng"], "zoom": transit_zoom},
+                    )
+                    page.wait_for_timeout(100)
                     page.evaluate(
                         """view => window.__parsingSiteMap.setView(
                           [view.lat, view.lng], view.zoom, {animate: false}
@@ -406,6 +418,14 @@ class BrowserSession:
         finally:
             if original is not None:
                 try:
+                    page.evaluate(
+                        """view => window.__parsingSiteMap.setView(
+                          [view.lat, view.lng], view.zoom, {animate: false}
+                        )""",
+                        {"lat": original["lat"], "lng": original["lng"],
+                         "zoom": transit_zoom},
+                    )
+                    page.wait_for_timeout(100)
                     page.evaluate(
                         """view => window.__parsingSiteMap.setView(
                           [view.lat, view.lng], view.zoom, {animate: false}

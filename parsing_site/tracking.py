@@ -470,14 +470,17 @@ async (opts) => {
     }
     const reportedMaxZoom = typeof map.getMaxZoom === "function" ? map.getMaxZoom() : Infinity;
     const configuredMaxZoom = Math.max(4, Math.min(18, Number(opts.scanMaxZoom) || 10));
-    const maxZoom = Math.min(
-      Number.isFinite(reportedMaxZoom) ? reportedMaxZoom : Infinity,
-      Math.max(zoom, configuredMaxZoom),
-    );
+    const incidentMap = String(opts.dynamic || "").includes("map-incident");
     const reportedMinZoom = typeof map.getMinZoom === "function" ? map.getMinZoom() : -Infinity;
-    const minZoom = Number.isFinite(reportedMinZoom) ? reportedMinZoom : zoom - 4;
+    const minZoom = Number.isFinite(reportedMinZoom)
+      ? reportedMinZoom : incidentMap ? 4 : Math.max(0, zoom - 4);
+    const maxZoom = Math.max(minZoom, Math.min(
+      Number.isFinite(reportedMaxZoom) ? reportedMaxZoom : Infinity,
+      configuredMaxZoom,
+    ));
+    const overviewZoom = Math.max(minZoom, Math.min(zoom, incidentMap ? 4 : zoom - 4));
     const targetZoom = Math.min(
-      dynamics.some((item) => item.index > 0) ? zoom : zoom + 2, maxZoom
+      overviewZoom + 2, maxZoom
     );
     const recordNumberedView = (captureView = false) => {
       if (!opts.captureNumbered) return 0;
@@ -503,7 +506,7 @@ async (opts) => {
       return numbered.length;
     };
     recordNumberedView(true);
-    const moveTo = async (lat, lng, z, captureView = false) => {
+    const moveTo = async (lat, lng, z, captureView = false, settle = true) => {
       scan.views++;
       const zoomingIn = z > map.getZoom();
       await new Promise((resolve) => {
@@ -521,6 +524,7 @@ async (opts) => {
         catch (error) { finish(); }
         if (typeof map.on !== "function") finish();
       });
+      if (!settle) return 0;
       // Vue может перерисовать маркеры после moveend и ответа API.
       await new Promise((resolve) => setTimeout(resolve, scanWaitMs));
       return recordNumberedView(captureView);
@@ -579,13 +583,8 @@ async (opts) => {
         }
         return added;
       };
-      // В html_test/44.html правая вкладка показывает 9 нужных маркеров при zoom 4.
-      const incidentMap = String(opts.dynamic || "").includes("map-incident");
-      const overviewZoom = Math.min(maxZoom, Math.max(minZoom, zoom - 4, incidentMap ? 4 : -Infinity));
-      for (let level = zoom - 1; level >= overviewZoom && canExplore(); level--) {
-        await moveTo(originalCenter.lat, originalCenter.lng, level);
-        rememberVisible();
-      }
+      // В html_test/44.html нужные маркеры видны при zoom 4. Сразу переходим
+      // к обзорному масштабу, даже если пользователь оставил карту приближённой.
       if (map.getZoom() !== overviewZoom && canExplore()) {
         await moveTo(originalCenter.lat, originalCenter.lng, overviewZoom);
         rememberVisible();
@@ -655,15 +654,15 @@ async (opts) => {
       // Объединяем маркеры, попадающие в один безопасный прямоугольник вида.
       // Если вся группа поместится на максимальном масштабе, сразу идём туда
       // один раз: повторные заходы к копиям с тем же номером ничего не дают.
-      const finalZoom = Math.min(zoom + 6, maxZoom);
+      const finalZoom = Math.min(overviewZoom + 6, maxZoom);
       const groupAt = (items, level) => {
         const positioned = items.map((item) => ({
           item, point: project3857(item.lat, item.lng, level),
         }));
         const minX = Math.min(...positioned.map((entry) => entry.point.x));
         const minY = Math.min(...positioned.map((entry) => entry.point.y));
-        const cellW = Math.max(1, mapRect.width * 0.6);
-        const cellH = Math.max(1, mapRect.height * 0.6);
+        const cellW = Math.max(1, mapRect.width * 0.35);
+        const cellH = Math.max(1, mapRect.height * 0.35);
         const cells = new Map();
         for (const entry of positioned) {
           const key = `${Math.floor((entry.point.x - minX) / cellW)},` +
@@ -671,7 +670,23 @@ async (opts) => {
           if (!cells.has(key)) cells.set(key, []);
           cells.get(key).push(entry.item);
         }
-        return [...cells.values()].sort((a, b) => b.length - a.length);
+        const remaining = [...cells.values()];
+        const ordered = [];
+        const current = map.getCenter();
+        let cursor = project3857(current.lat, current.lng, overviewZoom);
+        while (remaining.length) {
+          let closest = 0;
+          let shortest = Infinity;
+          remaining.forEach((group, index) => {
+            const center = project3857(group[0].lat, group[0].lng, overviewZoom);
+            const distance = (center.x - cursor.x) ** 2 + (center.y - cursor.y) ** 2;
+            if (distance < shortest) { closest = index; shortest = distance; }
+          });
+          const group = remaining.splice(closest, 1)[0];
+          ordered.push(group);
+          cursor = project3857(group[0].lat, group[0].lng, overviewZoom);
+        }
+        return ordered;
       };
       const attemptedAtFinal = new Set();
       for (const level of [...new Set([targetZoom, finalZoom])]) {
@@ -689,8 +704,8 @@ async (opts) => {
           const highPoints = remaining.map((item) => project3857(item.lat, item.lng, finalZoom));
           const highX = highPoints.map((point) => point.x);
           const highY = highPoints.map((point) => point.y);
-          const fitsHigh = Math.max(...highX) - Math.min(...highX) <= mapRect.width * 0.6 &&
-            Math.max(...highY) - Math.min(...highY) <= mapRect.height * 0.6;
+          const fitsHigh = Math.max(...highX) - Math.min(...highX) <= mapRect.width * 0.35 &&
+            Math.max(...highY) - Math.min(...highY) <= mapRect.height * 0.35;
           const visitZoom = level === finalZoom || fitsHigh ? finalZoom : level;
           const points = remaining.map((item) => project3857(item.lat, item.lng, visitZoom));
           const xs = points.map((point) => point.x);
@@ -699,6 +714,14 @@ async (opts) => {
             (Math.min(...xs) + Math.max(...xs)) / 2,
             (Math.min(...ys) + Math.max(...ys)) / 2, visitZoom,
           );
+          // Между удалёнными группами перемещаем карту только на обзорном зуме.
+          const current = map.getCenter();
+          if (map.getZoom() !== overviewZoom ||
+              Math.abs(current.lat - center.lat) > 0.0001 ||
+              Math.abs(current.lng - center.lng) > 0.0001) {
+            await moveTo(center.lat, center.lng, overviewZoom, false, false);
+          }
+          if (!canExplore()) break;
           const numberedAtMove = await moveTo(center.lat, center.lng, visitZoom, true);
           const visibleIncidents = collect(opts.dynamic, "D", true).filter((item) =>
             Number.isFinite(item.lat) && Number.isFinite(item.lng) &&
@@ -720,6 +743,9 @@ async (opts) => {
       }
       scan.budget_exhausted = !canExplore();
     } finally {
+      if (map.getZoom() > overviewZoom) {
+        await moveTo(originalCenter.lat, originalCenter.lng, overviewZoom, false, false);
+      }
       await moveTo(originalCenter.lat, originalCenter.lng, zoom);
       const restored = () => {
         const actual = map.getCenter();
@@ -991,7 +1017,7 @@ def extract_scene_with_mouse_scan(
         raw["scan"] = scan
         _apply_number_cache(raw, number_cache)
         return raw
-    scan_zoom_ceiling = max(base_zoom, tracking.scan_max_zoom)
+    scan_zoom_ceiling = tracking.scan_max_zoom
     original_lat = base_view.center_lat
     original_lng = base_view.center_lng
     scan_wait_ms = round(tracking.scan_wait_seconds * 1000)
@@ -1025,7 +1051,7 @@ def extract_scene_with_mouse_scan(
     overview_moves: list[int] = []
     overview_views = 0
     target_overview = 4.0 if "map-incident" in tracking.dynamic_selector else base_zoom - 4
-    for _ in range(4):
+    for _ in range(16):
         if monotonic() >= scan_deadline:
             break
         previous_zoom = _maybe_float(overview.get("map_zoom"))
