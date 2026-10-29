@@ -176,7 +176,7 @@ class ParseWorker:
                         archive = CaptureArchive(settings)
                         session.prepare_numbered_capture(
                             (settings.screenshot_width, settings.screenshot_height)
-                            if settings.screenshot_enabled or settings.max_enabled else None,
+                            if settings.screenshot_enabled else None,
                             html_enabled=settings.archive_html_enabled,
                             on_capture=archive.save,
                         )
@@ -197,7 +197,10 @@ class ParseWorker:
                             self._status = "running"
                             self._error = ""
                         deliveries = max_alerts.collect(snapshot, settings, archive.screenshots)
-                        capture_pair = getattr(session, "capture_pair_view", None)
+                        capture_pair = (
+                            getattr(session, "capture_pair_view", None)
+                            if settings.screenshot_enabled else None
+                        )
                         attempted: set[tuple[int, tuple[float, float]]] = set()
                         dynamics = {item.index: item for item in snapshot.dynamics}
                         photo_deadline = monotonic() + 25
@@ -233,7 +236,10 @@ class ParseWorker:
                             )
                             if delivery.screenshot is not None:
                                 delivery.text = delivery.text.removesuffix("\n" + PHOTO_MISSING_NOTE)
-                        annotator = getattr(session, "annotate_static_point", None)
+                        annotator = (
+                            getattr(session, "annotate_static_point", None)
+                            if settings.screenshot_enabled else None
+                        )
                         annotated: dict[tuple[str, int], Any] = {}
                         if callable(annotator):
                             for delivery in deliveries:

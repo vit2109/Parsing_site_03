@@ -30,6 +30,7 @@ API = "https://platform-api2.max.ru"
 SEVERITY = {"ok": 0, "blue": 1, "warning": 2, "alert": 3}
 ZONE_NAME = {"blue": "синюю", "warning": "жёлтую", "alert": "красную"}
 PHOTO_MISSING_NOTE = "Скриншот с номером и ближайшей стационарной точкой не найден."
+SCREENSHOTS_DISABLED_NOTE = "СКРИНШОТЫ ОТКЛЮЧЕНЫ"
 
 
 @lru_cache(maxsize=1)
@@ -172,12 +173,16 @@ class MaxAlertEngine:
                     point for row in [*distances, *triggered]
                     if (point := self._geo(row)) is not None
                 )
-                photo = self.select_screenshot(
-                    dynamic_id, static, related, screenshots,
-                    datetime.now().astimezone(),
-                )
-                if photo is None and nearest is not None:
-                    lines.append(PHOTO_MISSING_NOTE)
+                photo = None
+                if settings.screenshot_enabled:
+                    photo = self.select_screenshot(
+                        dynamic_id, static, related, screenshots,
+                        datetime.now().astimezone(),
+                    )
+                    if photo is None and nearest is not None:
+                        lines.append(PHOTO_MISSING_NOTE)
+                else:
+                    lines.append(SCREENSHOTS_DISABLED_NOTE)
                 deliveries.append(MaxDelivery(
                     recipient.user_id, resolve_max_token(settings), "\n".join(lines)[:4000], photo,
                     dynamic_index=dynamic_id,
@@ -360,6 +365,14 @@ class MaxDispatch:
                 delivery.token = resolve_max_token(settings)
                 if not delivery.token:
                     raise ValueError("Токен MAX не настроен")
+                if not delivery.test and not settings.screenshot_enabled:
+                    delivery.screenshot = None
+                    delivery.text = delivery.text.removesuffix("\n" + PHOTO_MISSING_NOTE)
+                    if SCREENSHOTS_DISABLED_NOTE not in delivery.text:
+                        delivery.text = (
+                            delivery.text[:3999 - len(SCREENSHOTS_DISABLED_NOTE)]
+                            + "\n" + SCREENSHOTS_DISABLED_NOTE
+                        )
                 wait = 0.5 - (time.monotonic() - self._last_sent.get(delivery.user_id, 0))
                 if wait > 0:
                     time.sleep(wait)

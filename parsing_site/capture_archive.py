@@ -43,9 +43,7 @@ class CaptureArchive:
     def save(self, capture: Any) -> None:
         """Пишет JPEG вида и первый HTML обхода в выбранные папки."""
         jobs = (
-            (self.settings.screenshot_enabled or self.settings.max_enabled,
-             self.settings.screenshot_dir if self.settings.screenshot_enabled
-             else str(ROOT / "data" / "max_bot_screenshots"),
+            (self.settings.screenshot_enabled, self.settings.screenshot_dir,
              self.settings.screenshot_period_hours, "jpg", "map", capture.image),
             (self.settings.archive_html_enabled, self.settings.archive_html_dir,
              self.settings.archive_html_period_hours, "html", "page", capture.html),
@@ -92,7 +90,7 @@ class CaptureArchive:
     def finish(self, session: Any) -> tuple[list[Path], list[str]]:
         """Добавляет ошибки съёмки к ошибкам записи и возвращает результат."""
         errors = self.errors.copy()
-        if (self.settings.screenshot_enabled or self.settings.max_enabled) and session.numbered_capture_error:
+        if self.settings.screenshot_enabled and session.numbered_capture_error:
             errors.append(f"map: {session.numbered_capture_error}")
         if self.settings.archive_html_enabled and session.numbered_html_error:
             errors.append(f"page: {session.numbered_html_error}")

@@ -205,6 +205,7 @@ class MaxBotTest(unittest.TestCase):
 
     def test_entry_transitions_recipients_and_matching_screenshot(self) -> None:
         config = settings()
+        config.screenshot_enabled = True
         engine = MaxAlertEngine()
         with TemporaryDirectory() as directory:
             old = Path(directory) / "old.jpg"
@@ -241,7 +242,9 @@ class MaxBotTest(unittest.TestCase):
                 wrong, datetime.now().astimezone(), (87,),
                 MapView(1000, 800, zoom=8, center_lat=0, center_lng=30),
             )
-            message = MaxAlertEngine().collect(scene, settings(), [photo])[0]
+            config = settings()
+            config.screenshot_enabled = True
+            message = MaxAlertEngine().collect(scene, config, [photo])[0]
             self.assertIsNone(message.screenshot)
             self.assertIn("ближайшей стационарной точкой не найден", message.text)
 
@@ -404,7 +407,7 @@ class MaxBotTest(unittest.TestCase):
             self.assertIn("attachments", messages[1])
             sleep.assert_called_once_with(1)
 
-    def test_worker_captures_for_max_even_when_archive_disabled(self) -> None:
+    def test_worker_sends_text_without_creating_screenshots_when_disabled(self) -> None:
         with TemporaryDirectory() as directory:
             config = settings()
             self.assertFalse(config.screenshot_enabled)
@@ -429,6 +432,12 @@ class MaxBotTest(unittest.TestCase):
                     self.size = size
                     self.on_capture = on_capture
 
+                def capture_pair_view(self, *_args):
+                    raise AssertionError("Скриншоты отключены")
+
+                def annotate_static_point(self, *_args):
+                    raise AssertionError("Скриншоты отключены")
+
             session = Session()
 
             def capture(_session, _tracking):
@@ -443,19 +452,24 @@ class MaxBotTest(unittest.TestCase):
                     patch("parsing_site.worker.capture_snapshot", side_effect=capture), \
                     patch("parsing_site.capture_archive.ROOT", Path(directory)):
                 worker._run()
-            self.assertEqual(session.size, (config.screenshot_width, config.screenshot_height))
+            self.assertIsNone(session.size)
             delivery = worker._max_dispatch.submit.call_args.args[0]
             self.assertEqual(delivery.user_id, 111)
-            self.assertTrue(delivery.screenshot.is_file())
+            self.assertIsNone(delivery.screenshot)
+            self.assertIn("СКРИНШОТЫ ОТКЛЮЧЕНЫ", delivery.text)
+            self.assertNotIn("Скриншот с номером", delivery.text)
             self.assertEqual(worker.status["max_poll"]["prepared"], 1)
-            self.assertEqual(worker.status["max_poll"]["screenshots"], 1)
+            self.assertEqual(worker.status["max_poll"]["screenshots"], 0)
             self.assertEqual(worker.status["max_poll"]["eligible_pairs"], 1)
+            self.assertEqual(list(Path(directory).rglob("*.jpg")), [])
 
     def test_zone_poll_queues_and_sends_message_with_screenshot(self) -> None:
         with TemporaryDirectory() as directory:
             database = Database(Path(directory) / "tracking.db")
             store = Mock()
-            store.current.return_value = settings()
+            config = settings()
+            config.screenshot_enabled = True
+            store.current.return_value = config
             worker = ParseWorker(database, store, Mock())
             sent = []
             uploads = []
@@ -523,7 +537,9 @@ class MaxBotTest(unittest.TestCase):
         database = Mock()
         database.save_snapshot.return_value = 1
         store = Mock()
-        store.current.return_value = settings()
+        config = settings()
+        config.screenshot_enabled = True
+        store.current.return_value = config
         worker = ParseWorker(database, store, Mock())
         worker._max_dispatch.submit = Mock()
         scene = snapshot("blue")
@@ -579,6 +595,24 @@ class MaxBotTest(unittest.TestCase):
             dispatch.submit(MaxDelivery(111, "old-token", "Текст", None))
             dispatch._queue.join()
         sender.assert_not_called()
+
+    def test_dispatch_drops_photo_when_screenshots_are_disabled(self) -> None:
+        config = settings()
+        dispatch = MaxDispatch(Mock(), lambda: config)
+        delivery = MaxDelivery(111, "secret-token", "Вход в зону", Path("map.jpg"))
+        requests = []
+
+        def request(url, _token, body=None, _content_type="application/json"):
+            requests.append((url, json.loads(body)))
+            return {"message": {}}
+
+        with patch("parsing_site.max_bot._request_json", side_effect=request):
+            dispatch.submit(delivery)
+            dispatch._queue.join()
+        self.assertEqual(len(requests), 1)
+        self.assertNotIn("attachments", requests[0][1])
+        self.assertIsNone(delivery.screenshot)
+        self.assertTrue(requests[0][1]["text"].endswith("СКРИНШОТЫ ОТКЛЮЧЕНЫ"))
 
     def test_delivery_log_records_sent_failed_and_skipped(self) -> None:
         with TemporaryDirectory() as directory:
