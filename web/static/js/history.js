@@ -101,6 +101,7 @@ const els = {
   summary: document.getElementById("history-summary"),
   regenerateFake: document.getElementById("btn-regenerate-fake"),
   exportHistory: document.getElementById("btn-export-history"),
+  exportReport: document.getElementById("btn-export-report"),
   overviewMap: document.getElementById("history-overview-map"),
   staticCount: document.getElementById("history-static-count"),
   trajectoryModal: document.getElementById("trajectory-modal"),
@@ -168,6 +169,7 @@ els.regenerateFake.addEventListener("click", regenerateFakeHistory);
  * @param {Event} event - событие click
  */
 els.exportHistory.addEventListener("click", exportHistory);
+els.exportReport.addEventListener("click", exportReport);
 
 /**
  * Закрытие модальных окон при клике на кнопку закрытия или фон диалога.
@@ -293,6 +295,44 @@ async function exportHistory() {
   } finally {
     els.exportHistory.disabled = false;
     els.exportHistory.textContent = originalText;
+  }
+}
+
+/** Скачивает справку Word с данными и схемами карт за выбранный период. */
+async function exportReport() {
+  hideError();
+  if (!els.form.reportValidity()) return;
+  const button = els.exportReport;
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Подготовка…";
+  try {
+    const params = new URLSearchParams(new FormData(els.form));
+    if (!params.get("static_index")) params.delete("static_index");
+    const response = await fetch(`/api/history/report.docx?${params}`);
+    if (!response.ok) {
+      let message = response.statusText;
+      try {
+        const data = await response.json();
+        message = data.detail || message;
+      } catch (_) {}
+      throw new Error(message);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const filename = disposition.match(/filename="([^"]+)"/i)?.[1] || "history_report.docx";
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(link.href);
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
   }
 }
 

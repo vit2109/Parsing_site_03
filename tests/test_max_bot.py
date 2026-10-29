@@ -282,6 +282,17 @@ class MaxBotTest(unittest.TestCase):
         self.assertIn("Стационарных объектов в пределах 1 км нет", messages[0].text)
         self.assertIsNone(messages[0].screenshot)
 
+    def test_alert_rule_does_not_hide_other_nearby_statics(self) -> None:
+        payload = settings().to_dict()
+        payload["max_groups"] = [{"user_ids": "111", "rules": [
+            {"static_index": 1, "zones": ["blue"]},
+        ]}]
+        config = validate_settings(from_dict(payload))
+        message = MaxAlertEngine().collect(snapshot("blue"), config, [])[0]
+        self.assertIn("★ Пост 1", message.text)
+        self.assertIn("• Пост 2", message.text)
+        self.assertEqual(message.nearest_static_index, 2)
+
     def test_rate_limit_retries_after_server_pause(self) -> None:
         limited = urllib.error.HTTPError(
             "https://platform-api2.max.ru/messages", 429, "Too Many Requests",

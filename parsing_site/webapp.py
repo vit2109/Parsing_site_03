@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from parsing_site.config import ROOT, WEB_DIR, load_config
 from parsing_site.db import Database
 from parsing_site.history_export import build_history_workbook
+from parsing_site.history_report import build_history_report
 from parsing_site.html_probe import analyze_html_file
 from parsing_site.settings_store import SettingsStore, from_dict, resolve_max_token
 from parsing_site.table_history_db import TableHistoryDatabase
@@ -407,6 +408,70 @@ def api_history_export(
     return Response(
         content=content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/history/report.docx")
+def api_history_report(
+    static_index: int | None = Query(default=None, gt=0),
+    date_from: str = Query(min_length=10),
+    date_to: str = Query(min_length=10),
+    time_from: str = Query(default="00:00", pattern=r"^\d{2}:\d{2}$"),
+    time_to: str = Query(default="23:59", pattern=r"^\d{2}:\d{2}$"),
+    max_distance_km: float = Query(gt=0, le=20_000),
+    dynamic: str = Query(default="", max_length=200),
+    source: str = Query(default="real", pattern="^(real|fake)$"),
+) -> Response:
+    """Формирует справку Word по фильтрам хронологии с картами зон и маршрута."""
+    start, end = _history_bounds(date_from, date_to, time_from, time_to)
+    if start > end:
+        raise HTTPException(status_code=400, detail="Начало периода позже его окончания.")
+    _, dynamic = _history_search_scope(None, dynamic)
+    start_iso, end_iso = start.isoformat(timespec="seconds"), end.isoformat()
+    rows = db.list_distance_history(
+        static_index=static_index,
+        date_from=start_iso,
+        date_to=end_iso,
+        max_distance_km=max_distance_km,
+        dynamic_query=dynamic,
+        limit=20_000,
+        data_source=source,
+    )
+    settings = store.current()
+    static_scene = None
+    if static_index is not None:
+        static_scene = db.get_static_zone_trajectories(
+            static_index=static_index,
+            date_from=start_iso,
+            date_to=end_iso,
+            data_source=source,
+            limit=5_000,
+            coordinate_precision=settings.map_coordinate_precision,
+        )
+    dynamic_points = None
+    if dynamic.lstrip("-").isdigit():
+        dynamic_points = db.list_dynamic_trajectory(
+            dynamic_index=int(dynamic),
+            date_from=start_iso,
+            date_to=end_iso,
+            data_source=source,
+            limit=5_000,
+            coordinate_precision=settings.map_coordinate_precision,
+        )
+    content = build_history_report(
+        rows,
+        date_from=date_from, date_to=date_to,
+        time_from=time_from, time_to=time_to,
+        source=source, max_distance_km=max_distance_km,
+        static_index=static_index, dynamic_query=dynamic,
+        static_scene=static_scene, dynamic_points=dynamic_points,
+        statics=db.list_history_statics(source) if dynamic_points is not None else None,
+    )
+    filename = f"history_report_{date_from}_{date_to}.docx"
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 

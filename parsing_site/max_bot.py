@@ -120,8 +120,8 @@ class MaxAlertEngine:
                 entered.setdefault(dynamic_id, []).append(row)
             for dynamic_id, triggered in entered.items():
                 all_distances = sorted(
-                    (rows[(dynamic_id, rule_id)] for rule_id in rules
-                     if (dynamic_id, rule_id) in rows),
+                    (row for (row_dynamic_id, _), row in rows.items()
+                     if row_dynamic_id == dynamic_id),
                     key=lambda item: item.distance,
                 )
                 if not all_distances:
@@ -144,7 +144,7 @@ class MaxAlertEngine:
                     lines.extend([
                         (f"Ближайший объект: «{static_label(distances[0])}», "
                          f"{distances[0].distance:.1f} {unit}."),
-                        "Расстояния до наблюдаемых объектов (★ — новый вход):",
+                        "Расстояния до стационарных объектов (★ — новый вход):",
                         *(
                             f"{'★' if item.static_index in entered_ids else '•'} "
                             f"{static_label(item)}: {item.distance:.1f} {unit}"
