@@ -1,4 +1,4 @@
-"""Справка DOCX по сохранённой хронологии и схемы маршрутов."""
+"""Справка DOCX по сохранённой хронологии с картами маршрутов."""
 
 from __future__ import annotations
 
@@ -239,8 +239,10 @@ def build_history_report(
     static_scene: dict[str, Any] | None = None,
     dynamic_points: list[dict[str, Any]] | None = None,
     statics: list[dict[str, Any]] | None = None,
+    map_images: dict[str, bytes] | None = None,
 ) -> bytes:
-    """Строит справку с итогами, событиями и схемами из координат хронологии."""
+    """Строит справку с итогами, событиями и снимками карты хронологии."""
+    map_images = map_images or {}
     document = Document()
     section = document.sections[0]
     section.page_width, section.page_height = Inches(8.5), Inches(11)
@@ -305,12 +307,12 @@ def build_history_report(
             f"жёлтая — {len(counts['warning'])}, синяя — {len(counts['blue'])}. "
             "Один объект может встречаться в нескольких зонах."
         )
-        picture = _static_map(static_scene)
+        picture = map_images.get("static") or _static_map(static_scene)
         if picture:
             document.add_picture(BytesIO(picture), width=Inches(6.65))
             document.add_paragraph(
-                "Схема хронологии: круги показывают зоны стационарного объекта, "
-                "линии — сохранённые траектории, числа — номера динамических объектов."
+                "Карта хронологии: круги показывают зоны стационарного объекта, "
+                "линии — сохранённые траектории динамических объектов."
             )
 
     if dynamic_points is not None:
@@ -323,12 +325,12 @@ def build_history_report(
                 f"{_plural(len(dynamic_points), 'точка', 'точки', 'точек')}: "
                 f"с {_display_time(str(first['ts']))} по {_display_time(str(last['ts']))}."
             )
-            picture = _trajectory_map(dynamic_points, statics or [])
+            picture = map_images.get("dynamic") or _trajectory_map(dynamic_points, statics or [])
             if picture:
                 document.add_picture(BytesIO(picture), width=Inches(6.65))
                 document.add_paragraph(
-                    "Схема хронологии: 1 — первая точка, 2 — последняя точка; "
-                    "квадраты обозначают стационарные объекты."
+                    "Карта хронологии: линия показывает сохранённую траекторию; "
+                    "отмечены стационарные объекты."
                 )
         else:
             document.add_paragraph("За выбранный период географические точки маршрута не найдены.")
@@ -346,11 +348,11 @@ def build_history_report(
             (f"#{index} {item['name']}", str(item["events"]), f"{item['minimum']:.3f}")
             for index, item in sorted(summary.items(), key=lambda pair: -pair[1]["events"])[:30]
         ])
-        picture = _overview_map(rows)
+        picture = map_images.get("overview") or _overview_map(rows)
         if picture:
             document.add_picture(BytesIO(picture), width=Inches(6.65))
             document.add_paragraph(
-                "Схема хронологии: квадраты — стационарные объекты, "
+                "Карта хронологии: отмечены стационарные объекты, "
                 "цветные точки — положения динамических объектов в соответствующих зонах."
             )
 

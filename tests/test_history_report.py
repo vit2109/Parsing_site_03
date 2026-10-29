@@ -7,7 +7,9 @@ from io import BytesIO
 from zipfile import ZipFile
 
 from docx import Document
+from playwright.sync_api import Error as PlaywrightError
 
+from parsing_site.history_capture import capture_history_maps
 from parsing_site.history_report import build_history_report
 
 
@@ -63,3 +65,37 @@ class HistoryReportTest(unittest.TestCase):
         self.assertIn("1 динамический объект и 1 стационарный объект", text)
         self.assertIn("Стационарные объекты", text)
         self.assertEqual(len(document.inline_shapes), 1)
+
+    def test_browser_map_screenshot_is_embedded_in_report(self) -> None:
+        point = {
+            "ts": "2026-10-29T10:00:00+03:00", "object_date": "2026-10-29",
+            "dynamic_index": 87, "dynamic_name": "Автомобиль",
+            "lat": 55.71, "lng": 37.61, "status": "blue",
+        }
+        scene = {
+            "static_index": 1, "static_name": "Пост", "lat": 55.7, "lng": 37.6,
+            "alert_radius_km": 5, "warning_radius_km": 10,
+            "blue_radius_km": 20, "points": [point],
+        }
+        try:
+            images = capture_history_maps(
+                static_scene=scene, dynamic_points=[point],
+                statics=[{"static_index": 1, "static_name": "Пост",
+                          "static_lat": 55.7, "static_lng": 37.6}],
+                rows=[], map_mode="offline",
+            )
+        except PlaywrightError as exc:
+            self.skipTest(f"Chrome недоступен: {exc}")
+        self.assertEqual(set(images), {"static", "dynamic"})
+        self.assertTrue(all(image.startswith(b"\x89PNG\r\n\x1a\n") for image in images.values()))
+        self.assertTrue(all(len(image) > 50_000 for image in images.values()))
+        report = build_history_report(
+            [], date_from="2026-10-29", date_to="2026-10-29",
+            time_from="00:00", time_to="23:59", source="real",
+            max_distance_km=150, static_index=1, dynamic_query="87",
+            static_scene=scene, dynamic_points=[point], map_images=images,
+        )
+        with ZipFile(BytesIO(report)) as archive:
+            media = [archive.read(name) for name in archive.namelist()
+                     if name.startswith("word/media/")]
+        self.assertEqual(set(media), set(images.values()))

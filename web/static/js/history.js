@@ -298,7 +298,7 @@ async function exportHistory() {
   }
 }
 
-/** Скачивает справку Word с данными и схемами карт за выбранный период. */
+/** Скачивает справку Word со снимками карт за выбранный период. */
 async function exportReport() {
   hideError();
   if (!els.form.reportValidity()) return;
@@ -309,6 +309,7 @@ async function exportReport() {
   try {
     const params = new URLSearchParams(new FormData(els.form));
     if (!params.get("static_index")) params.delete("static_index");
+    try { params.set("map_mode", localStorage.getItem("history-map-mode") || "geographic"); } catch (_) {}
     const response = await fetch(`/api/history/report.docx?${params}`);
     if (!response.ok) {
       let message = response.statusText;

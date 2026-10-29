@@ -25,6 +25,8 @@ hiddenimports = [
     "parsing_site.db",
     "parsing_site.html_probe",
     "parsing_site.history_export",
+    "parsing_site.history_capture",
+    "parsing_site.history_report",
     "parsing_site.parser",
     "parsing_site.processor",
     "parsing_site.runner",

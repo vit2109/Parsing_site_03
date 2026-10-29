@@ -10,10 +10,12 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from playwright.sync_api import Error as PlaywrightError
 from pydantic import BaseModel, Field
 
 from parsing_site.config import ROOT, WEB_DIR, load_config
 from parsing_site.db import Database
+from parsing_site.history_capture import capture_history_maps
 from parsing_site.history_export import build_history_workbook
 from parsing_site.history_report import build_history_report
 from parsing_site.html_probe import analyze_html_file
@@ -422,6 +424,7 @@ def api_history_report(
     max_distance_km: float = Query(gt=0, le=20_000),
     dynamic: str = Query(default="", max_length=200),
     source: str = Query(default="real", pattern="^(real|fake)$"),
+    map_mode: str = Query(default="geographic", pattern="^(geographic|offline)$"),
 ) -> Response:
     """Формирует справку Word по фильтрам хронологии с картами зон и маршрута."""
     start, end = _history_bounds(date_from, date_to, time_from, time_to)
@@ -459,6 +462,15 @@ def api_history_report(
             limit=5_000,
             coordinate_precision=settings.map_coordinate_precision,
         )
+    statics = db.list_history_statics(source) if dynamic_points is not None else None
+    try:
+        map_images = capture_history_maps(
+            static_scene=static_scene, dynamic_points=dynamic_points,
+            statics=statics, rows=rows, map_mode=map_mode,
+        )
+    except (PlaywrightError, OSError, RuntimeError, ValueError) as exc:
+        db.add_log("WARNING", "history", f"Снимок карты для справки недоступен: {exc}")
+        map_images = {}
     content = build_history_report(
         rows,
         date_from=date_from, date_to=date_to,
@@ -466,7 +478,7 @@ def api_history_report(
         source=source, max_distance_km=max_distance_km,
         static_index=static_index, dynamic_query=dynamic,
         static_scene=static_scene, dynamic_points=dynamic_points,
-        statics=db.list_history_statics(source) if dynamic_points is not None else None,
+        statics=statics, map_images=map_images,
     )
     filename = f"history_report_{date_from}_{date_to}.docx"
     return Response(
