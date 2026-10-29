@@ -657,6 +657,7 @@ function fillForm(settings) {
   setFormValue("map_container_selector", settings.map_container_selector);
   setFormValue("interval_seconds", settings.interval_seconds);
   setFormValue("scan_wait_seconds", settings.scan_wait_seconds ?? 1.5);
+  setFormValue("scan_max_zoom", settings.scan_max_zoom ?? 10);
   setFormValue("screenshot_dir", settings.screenshot_dir ?? "data/screenshots");
   setFormValue("screenshot_period_hours", settings.screenshot_period_hours ?? 1);
   setFormValue("screenshot_width", settings.screenshot_width ?? 1280);
@@ -864,6 +865,7 @@ async function saveSettings(event) {
   const data = Object.fromEntries(new FormData(els.form).entries());
   data.interval_seconds = Number(data.interval_seconds);
   data.scan_wait_seconds = Number(data.scan_wait_seconds);
+  data.scan_max_zoom = Number(data.scan_max_zoom);
   data.screenshot_enabled = Boolean(els.form.elements.namedItem("screenshot_enabled")?.checked);
   data.screenshot_period_hours = Number(data.screenshot_period_hours);
   data.screenshot_width = Number(data.screenshot_width);

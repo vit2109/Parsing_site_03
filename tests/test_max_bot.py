@@ -11,6 +11,8 @@ from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
 from parsing_site.browser import NumberedCapture
+from parsing_site.capture_archive import ScreenshotRecord
+from parsing_site.coordinates import MapView
 from parsing_site.db import Database
 from parsing_site.max_bot import (
     MaxAlertEngine,
@@ -52,10 +54,12 @@ def settings():
 def snapshot(status: str) -> TrackingSnapshot:
     def row(static_id: int, distance: float, zone: str) -> DistanceRow:
         return DistanceRow(static_id, f"Пост {static_id}", 0, 0,
-                           87, "Автомобиль", 0, 0, "", distance, zone, "km")
+                           87, "Автомобиль", 0, 0, "", distance, zone, "km",
+                           static_lat=0, static_lng=static_id - 1,
+                           dynamic_lat=0, dynamic_lng=0)
 
     return TrackingSnapshot("", "", (100, 100),
-                            [SceneObject(87, "Автомобиль", 0, 0)], [],
+                            [SceneObject(87, "Автомобиль", 0, 0, lat=0, lng=0)], [],
                             [row(1, 5, status), row(2, 2, "ok")], 1, 3)
 
 
@@ -195,9 +199,14 @@ class MaxBotTest(unittest.TestCase):
             match.write_bytes(b"x")
             unrelated.write_bytes(b"x")
             now = datetime.now().astimezone()
-            photos = [(old, now - timedelta(minutes=3), (87,)),
-                      (match, now - timedelta(seconds=2), (87, 99)),
-                      (unrelated, now, (99,))]
+            photos = [
+                ScreenshotRecord(old, now - timedelta(minutes=3), (87,),
+                                 MapView(1000, 800, zoom=8, center_lat=0, center_lng=30)),
+                ScreenshotRecord(match, now - timedelta(seconds=2), (87, 99),
+                                 MapView(1000, 800, zoom=8, center_lat=0, center_lng=1)),
+                ScreenshotRecord(unrelated, now, (99,),
+                                 MapView(1000, 800, zoom=8, center_lat=0, center_lng=1)),
+            ]
             first = engine.collect(snapshot("blue"), config, photos)
             self.assertEqual([item.user_id for item in first], [111])
             self.assertEqual(first[0].screenshot, match)
@@ -207,6 +216,19 @@ class MaxBotTest(unittest.TestCase):
             self.assertEqual([item.user_id for item in second], [111, 222])
             self.assertEqual(engine.collect(snapshot("ok"), config, []), [])
             self.assertEqual(len(engine.collect(snapshot("blue"), config, [])), 1)
+
+    def test_no_screenshot_when_static_point_is_outside_frame(self) -> None:
+        with TemporaryDirectory() as directory:
+            wrong = Path(directory) / "wrong.jpg"
+            wrong.write_bytes(b"jpeg")
+            scene = snapshot("blue")
+            photo = ScreenshotRecord(
+                wrong, datetime.now().astimezone(), (87,),
+                MapView(1000, 800, zoom=8, center_lat=0, center_lng=30),
+            )
+            message = MaxAlertEngine().collect(scene, settings(), [photo])[0]
+            self.assertIsNone(message.screenshot)
+            self.assertIn("ближайшей стационарной точкой не найден", message.text)
 
     def test_same_dynamic_entering_two_zones_sends_one_message_per_user(self) -> None:
         payload = settings().to_dict()
@@ -333,6 +355,7 @@ class MaxBotTest(unittest.TestCase):
             def capture(_session, _tracking):
                 session.on_capture(NumberedCapture(
                     datetime.now().astimezone(), 7, b"jpeg", numbers=(87,),
+                    view=MapView(1000, 800, zoom=7, center_lat=0, center_lng=1),
                 ))
                 worker._stop.set()
                 return snapshot("blue")
@@ -356,6 +379,7 @@ class MaxBotTest(unittest.TestCase):
             store.current.return_value = settings()
             worker = ParseWorker(database, store, Mock())
             sent = []
+            uploads = []
 
             class Session:
                 numbered_capture_error = ""
@@ -370,11 +394,23 @@ class MaxBotTest(unittest.TestCase):
                 def prepare_numbered_capture(self, _size, html_enabled, on_capture):
                     self.on_capture = on_capture
 
+                def capture_pair_view(self, number, dynamic, static, _tracking):
+                    self.on_capture(NumberedCapture(
+                        datetime.now().astimezone(), 7, b"pair-jpeg", numbers=(number,),
+                        view=MapView(1000, 800, zoom=7, center_lat=0, center_lng=1),
+                    ))
+                    return True
+
+                def annotate_static_point(self, image, view, point, name):
+                    self.annotation = (image, view, point, name)
+                    return b"annotated-jpeg"
+
             session = Session()
 
             def capture(_session, _tracking):
                 session.on_capture(NumberedCapture(
                     datetime.now().astimezone(), 7, b"jpeg", numbers=(87,),
+                    view=MapView(1000, 800, zoom=7, center_lat=0, center_lng=30),
                 ))
                 worker._stop.set()
                 return snapshot("blue")
@@ -383,6 +419,7 @@ class MaxBotTest(unittest.TestCase):
                 if "/uploads?" in url:
                     return {"url": "https://upload.example/image"}
                 if url.startswith("https://upload.example"):
+                    uploads.append(body)
                     return {"photos": {"photo-id": {"token": "image-token"}}}
                 sent.append(json.loads(body))
                 return {"message": {}}
@@ -394,11 +431,66 @@ class MaxBotTest(unittest.TestCase):
                 worker._run()
                 worker._max_dispatch._queue.join()
             self.assertEqual(len(sent), 1)
+            self.assertIn(b"annotated-jpeg", uploads[0])
+            self.assertEqual(session.annotation[0], b"pair-jpeg")
+            self.assertEqual(session.annotation[3], "Пост 2")
             self.assertIn("Объект №87", sent[0]["text"])
             self.assertEqual(sent[0]["attachments"][0]["payload"], {"token": "image-token"})
             self.assertEqual(database.list_max_deliveries()["items"][0]["status"], "sent")
             self.assertEqual(worker.status["max_poll"]["prepared_with_screenshot"], 1)
             database.close()
+
+    def test_many_alerts_publish_table_before_limited_extra_captures(self) -> None:
+        database = Mock()
+        database.save_snapshot.return_value = 1
+        store = Mock()
+        store.current.return_value = settings()
+        worker = ParseWorker(database, store, Mock())
+        worker._max_dispatch.submit = Mock()
+        scene = snapshot("blue")
+        scene.dynamics = [
+            SceneObject(number, "Автомобиль", 0, 0, lat=0, lng=0)
+            for number in range(100, 110)
+        ]
+        scene.rows = [
+            DistanceRow(1, "Пост 1", 0, 0, number, "Автомобиль", 0, 0,
+                        "", 5, "blue", "km", static_lat=0, static_lng=0,
+                        dynamic_lat=0, dynamic_lng=0)
+            for number in range(100, 110)
+        ]
+
+        class Session:
+            numbered_capture_error = ""
+            numbered_html_error = ""
+            captures = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def prepare_numbered_capture(self, _size, html_enabled, on_capture):
+                return None
+
+            def capture_pair_view(self, *_args):
+                self.captures += 1
+                self_published = worker.status["snapshot"]
+                assert self_published is not None and self_published["poll_id"] == 1
+                return False
+
+        session = Session()
+
+        def capture(_session, _tracking):
+            worker._stop.set()
+            return scene
+
+        with patch("parsing_site.worker.BrowserSession", return_value=session), \
+                patch("parsing_site.worker.capture_snapshot", side_effect=capture):
+            worker._run()
+        self.assertEqual(session.captures, 6)
+        self.assertEqual(worker._max_dispatch.submit.call_count, 10)
+        self.assertEqual(worker.status["max_poll"]["prepared"], 10)
 
     def test_disabling_max_skips_waiting_notifications(self) -> None:
         config = settings()

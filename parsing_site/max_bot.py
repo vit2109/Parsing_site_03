@@ -17,7 +17,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from parsing_site.capture_archive import ScreenshotRecord
 from parsing_site.config import BUNDLE_ROOT, ROOT
+from parsing_site.coordinates import MapView, latlng_to_container
 from parsing_site.settings_store import RuntimeSettings, resolve_max_token
 from parsing_site.tracking import DistanceRow, TrackingSnapshot
 
@@ -27,6 +29,7 @@ if TYPE_CHECKING:
 API = "https://platform-api2.max.ru"
 SEVERITY = {"ok": 0, "blue": 1, "warning": 2, "alert": 3}
 ZONE_NAME = {"blue": "синюю", "warning": "жёлтую", "alert": "красную"}
+PHOTO_MISSING_NOTE = "Скриншот с номером и ближайшей стационарной точкой не найден."
 
 
 @lru_cache(maxsize=1)
@@ -53,6 +56,11 @@ class MaxDelivery:
     screenshot: Path | None
     test: bool = False
     log_id: int | None = None
+    dynamic_index: int = 0
+    nearest_static_index: int = 0
+    nearest_static_name: str = ""
+    nearest_static: tuple[float, float] | None = None
+    related_statics: tuple[tuple[float, float], ...] = ()
 
 
 class MaxAlertEngine:
@@ -61,20 +69,16 @@ class MaxAlertEngine:
     def __init__(self) -> None:
         self._previous: dict[tuple[int, int, int], str] = {}
         self._day: str | None = None
-        self._screenshots: list[tuple[Path, datetime, tuple[int, ...]]] = []
 
     def collect(
         self, snapshot: TrackingSnapshot, settings: RuntimeSettings,
-        screenshots: list[tuple[Path, datetime, tuple[int, ...]]],
+        screenshots: list[ScreenshotRecord],
     ) -> list[MaxDelivery]:
         """Возвращает сообщения только для входов во внутреннюю зону."""
         today = datetime.now().astimezone().date().isoformat()
         if today != self._day:
             self._previous.clear()
-            self._screenshots.clear()
             self._day = today
-        self._screenshots.extend(screenshots)
-        self._screenshots = [item for item in self._screenshots[-5000:] if item[0].is_file()]
         if not settings.max_enabled:
             self._previous.clear()
             return []
@@ -124,19 +128,63 @@ class MaxAlertEngine:
                         for item in distances
                     ),
                 ]
-                photo = self._nearest_screenshot(dynamic_id, datetime.now().astimezone())
+                nearest = distances[0]
+                static = self._geo(nearest)
+                related = tuple(
+                    point for row in distances if (point := self._geo(row)) is not None
+                )
+                photo = self.select_screenshot(
+                    dynamic_id, static, related, screenshots,
+                    datetime.now().astimezone(),
+                )
                 if photo is None:
-                    lines.append("Скриншот с видимым номером объекта не найден.")
+                    lines.append(PHOTO_MISSING_NOTE)
                 deliveries.append(MaxDelivery(
                     recipient.user_id, resolve_max_token(settings), "\n".join(lines)[:4000], photo,
+                    dynamic_index=dynamic_id,
+                    nearest_static_index=nearest.static_index,
+                    nearest_static_name=nearest.static_name,
+                    nearest_static=static,
+                    related_statics=related,
                 ))
         self._previous = {key: value for key, value in self._previous.items() if key in active}
         return deliveries
 
-    def _nearest_screenshot(self, number: int, at: datetime) -> Path | None:
-        matches = [item for item in self._screenshots if number in item[2]]
-        return min(matches, key=lambda item: abs((item[1] - at).total_seconds()))[0] \
-            if matches else None
+    @staticmethod
+    def _geo(row: DistanceRow) -> tuple[float, float] | None:
+        if row.static_lat is None or row.static_lng is None:
+            return None
+        return row.static_lat, row.static_lng
+
+    @staticmethod
+    def _visible(view: MapView | None, point: tuple[float, float]) -> bool:
+        projected = latlng_to_container(*point, view) if view is not None else None
+        return projected is not None and (
+            24 <= projected[0] <= view.width - 24
+            and 24 <= projected[1] <= view.height - 24
+        )
+
+    @classmethod
+    def select_screenshot(
+        cls, number: int, nearest: tuple[float, float] | None,
+        related: tuple[tuple[float, float], ...],
+        screenshots: list[ScreenshotRecord], at: datetime,
+    ) -> Path | None:
+        """Выбирает кадр текущего обхода с номером и ближайшей точкой."""
+        if nearest is None:
+            return None
+        matches = [
+            item for item in screenshots
+            if item.path.is_file() and number in item.numbers
+            and cls._visible(item.view, nearest)
+        ]
+        if not matches:
+            return None
+        best = max(matches, key=lambda item: (
+            sum(cls._visible(item.view, point) for point in related),
+            -abs((item.captured_at - at).total_seconds()),
+        ))
+        return best.path
 
 
 def _request_json(url: str, token: str, body: bytes | None = None,

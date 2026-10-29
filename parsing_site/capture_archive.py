@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from parsing_site.config import ROOT
+from parsing_site.coordinates import MapView
 from parsing_site.settings_store import RuntimeSettings
 
 
@@ -19,6 +21,16 @@ def period_path(directory: str, hours: int, captured_at: datetime) -> Path:
     return root / captured_at.strftime("%Y-%m-%d") / f"{start_hour:02d}-{start_hour + hours:02d}"
 
 
+@dataclass(slots=True)
+class ScreenshotRecord:
+    """Файл кадра вместе с видимыми номерами и геометрией карты."""
+
+    path: Path
+    captured_at: datetime
+    numbers: tuple[int, ...]
+    view: MapView | None
+
+
 class CaptureArchive:
     """Сохраняет каждый подписанный вид сразу, не накапливая JPEG в памяти."""
 
@@ -26,7 +38,7 @@ class CaptureArchive:
         self.settings = settings
         self.saved: list[Path] = []
         self.errors: list[str] = []
-        self.screenshots: list[tuple[Path, datetime, tuple[int, ...]]] = []
+        self.screenshots: list[ScreenshotRecord] = []
 
     def save(self, capture: Any) -> None:
         """Пишет JPEG вида и первый HTML обхода в выбранные папки."""
@@ -43,7 +55,9 @@ class CaptureArchive:
                 path = self._write(directory, hours, suffix, prefix, content,
                                    capture.captured_at, capture.zoom)
                 if path is not None and suffix == "jpg":
-                    self.screenshots.append((path, capture.captured_at, capture.numbers))
+                    self.screenshots.append(ScreenshotRecord(
+                        path, capture.captured_at, capture.numbers, capture.view,
+                    ))
 
     def _write(
         self, directory: str, hours: int, suffix: str, prefix: str,

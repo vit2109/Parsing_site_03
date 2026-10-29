@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from bs4 import BeautifulSoup
 
-from parsing_site.config import TrackingConfig
+from parsing_site.config import StaticObjectConfig, TrackingConfig
 from parsing_site.coordinates import (
     MapView,
     container_to_latlng,
@@ -105,6 +105,23 @@ class LeafletScanTest(unittest.TestCase):
         self.assertEqual(page.zoom, 5)
         self.assertGreater(page.mouse.zoom_in_calls, 0)
         self.assertEqual(page.waits.count(1500), len(page.waits))
+
+    def test_wheel_fallback_stays_near_static_points_and_obeys_zoom_cap(self) -> None:
+        page = _FakePage(offscreen=True, far=True, zoom=5)
+        tracking = TrackingConfig(
+            scan_max_zoom=7,
+            static_objects=[StaticObjectConfig(1, "Центр", 0, 0, 50, 40)],
+            coordinate_mode="latlng",
+        )
+        with patch(
+            "parsing_site.tracking.extract_scene_from_page",
+            side_effect=lambda _p, _t, **_kw: page.scene(),
+        ):
+            result = extract_scene_with_mouse_scan(page, tracking)
+        self.assertEqual(len(result["dynamics"]), 3)
+        self.assertLessEqual(page.max_zoom_seen, 7)
+        self.assertEqual(page.zoom, 5)
+        self.assertAlmostEqual(page.center_lng, 40, places=3)
 
     def test_browser_wheel_visits_dense_duplicate_group_once(self) -> None:
         page = _FakePage(duplicates=30)
@@ -205,6 +222,7 @@ class _FakeMouse:
         anchor = container_to_latlng(self.x, self.y, view)
         assert anchor is not None
         page.zoom += 1 if dy < 0 else -1
+        page.max_zoom_seen = max(page.max_zoom_seen, page.zoom)
         world_x, world_y = project_3857(*anchor, page.zoom)
         page.center_lat, page.center_lng = unproject_3857(
             world_x - (self.x - 400), world_y - (self.y - 300), page.zoom
@@ -237,6 +255,7 @@ class _FakePage:
     def __init__(self, crowded: bool = False, offscreen: bool = False,
                  far: bool = False, zoom: int = 5, duplicates: int = 0) -> None:
         self.zoom = zoom
+        self.max_zoom_seen = zoom
         self.crowded = crowded
         self.offscreen = offscreen
         self.far = far

@@ -5,13 +5,15 @@ const extract = eval(fs.readFileSync(process.argv[2], 'utf8'));
 const nativeSetTimeout = global.setTimeout;
 
 async function check(initialZoom, mapDiscoverable = true, crowded = false, overlapping = false,
-  sameNumber = false, denseUnique = false) {
+  sameNumber = false, denseUnique = false, bounded = false) {
   let zoomInMoves = 0;
   let zoomInWaits = 0;
   let awaitingZoomInPause = false;
   let zoomInTimers = 0;
   let minimumVisitedZoom = initialZoom;
+  let maximumVisitedZoom = initialZoom;
   let offRowMoves = 0;
+  let farMoves = 0;
   global.setTimeout = (callback, delay, ...args) => {
     if (awaitingZoomInPause && ++zoomInTimers >= 2) {
       assert.equal(delay, 1500, 'pause after zooming in');
@@ -21,7 +23,15 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     }
     return nativeSetTimeout(callback, Math.min(delay, 1), ...args);
   };
-  const points = denseUnique ? Array.from({length: 9}, (_, i) => (
+  const points = bounded ? [
+    ...Array.from({length: 500}, (_, i) => ({
+      lat: 50 + (i % 5) * 0.01, lng: (i % 10) * 0.02, number: 1000 + i,
+    })),
+    ...Array.from({length: 500}, (_, i) => ({
+      lat: 50 + (i % 5) * 0.01, lng: 12 + (i % 10) * 0.02, number: 2000 + i,
+    })),
+    {lat: 5, lng: 60, number: 9999},
+  ] : denseUnique ? Array.from({length: 9}, (_, i) => (
     {lat: 50, lng: i * 0.015, number: 101 + i}
   )) : sameNumber ? Array.from({length: 30}, (_, i) => (
     {lat: 50, lng: 0, number: 101, id: i + 1}
@@ -42,7 +52,9 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     off(_event, callback) { listeners.delete(callback); },
     setView([lat, lng], zoom) {
       minimumVisitedZoom = Math.min(minimumVisitedZoom, zoom);
+      maximumVisitedZoom = Math.max(maximumVisitedZoom, zoom);
       if (Math.abs(lat - 50) > 0.01) offRowMoves++;
+      if (lat < 45 || lat > 55 || lng < -6 || lng > 18) farMoves++;
       if (zoom > this.zoom) {
         zoomInMoves++;
         awaitingZoomInPause = true;
@@ -113,12 +125,23 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
   const result = await extract({
     mode: 'latlng', mapContainer: '.leaflet-container',
     dynamic: '.leaflet-marker-icon.map-incident', static: '.static',
-    staticObjects: [], scanNumbers: true, captureNumbered: true,
+    staticObjects: bounded ? [{lat: 50, lng: 0}, {lat: 50, lng: 12}] : [],
+    scanNumbers: true, captureNumbered: true,
+    scanMaxZoom: bounded ? 8 : 10, scanRadiusKm: 350,
   });
   if (!mapDiscoverable) {
     assert.equal(result.scan.status, 'no_leaflet_instance');
     assert.equal(result.unnumbered_dynamics,
       document.querySelectorAll('.leaflet-marker-icon.map-incident').length);
+    return;
+  }
+  if (bounded) {
+    assert.equal(result.dynamics.length, 1000, 'remote outlier must be excluded');
+    assert.equal(farMoves, 0, 'scan must stay near configured static areas');
+    assert.ok(maximumVisitedZoom <= 8, 'scan must obey configured zoom ceiling');
+    assert.ok(result.scan.views <= 34, 'scan must have a finite move budget');
+    assert.deepEqual(map.center, {lat: 50, lng: 0});
+    assert.equal(map.zoom, initialZoom);
     return;
   }
   if (sameNumber) {
@@ -161,5 +184,6 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
   await check(4, true, false, true); // девять значков с совпадающими координатами
   await check(6, true, false, false, true); // 30 копий одного номера — один общий вид
   await check(6, true, false, false, false, true); // 9 разных номеров в одной группе
+  await check(6, true, false, false, false, false, true); // 1000 маркеров и далёкий выброс
   console.log('Leaflet scan: both zoom cases passed');
 })().catch((error) => {console.error(error); process.exitCode = 1;});

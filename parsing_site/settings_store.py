@@ -84,6 +84,7 @@ class RuntimeSettings:
     map_container_selector: str = ".leaflet-container"
     reference_zoom: float = 0.0
     scan_wait_seconds: float = 1.5
+    scan_max_zoom: int = 10
     screenshot_enabled: bool = False
     screenshot_dir: str = "data/screenshots"
     screenshot_period_hours: int = 1
@@ -143,6 +144,7 @@ class RuntimeSettings:
                 map_container_selector=self.map_container_selector,
                 reference_zoom=self.reference_zoom,
                 scan_wait_seconds=self.scan_wait_seconds,
+                scan_max_zoom=self.scan_max_zoom,
                 lock_scale=self.lock_scale,
                 static_objects=list(self.static_objects),
             ),
@@ -211,6 +213,7 @@ def from_app_config(cfg: AppConfig) -> RuntimeSettings:
         map_container_selector=cfg.tracking.map_container_selector,
         reference_zoom=cfg.tracking.reference_zoom,
         scan_wait_seconds=cfg.tracking.scan_wait_seconds,
+        scan_max_zoom=cfg.tracking.scan_max_zoom,
         lock_scale=cfg.tracking.lock_scale,
         static_source=cfg.tracking.static_source,
         static_objects=list(cfg.tracking.static_objects),
@@ -287,6 +290,7 @@ def from_dict(data: dict[str, Any]) -> RuntimeSettings:
         ),
         reference_zoom=float(data.get("reference_zoom", 0)),
         scan_wait_seconds=float(data.get("scan_wait_seconds", 1.5)),
+        scan_max_zoom=int(data.get("scan_max_zoom", 10)),
         screenshot_enabled=bool(data.get("screenshot_enabled", False)),
         screenshot_dir=str(data.get("screenshot_dir", "data/screenshots")),
         screenshot_period_hours=int(data.get("screenshot_period_hours", 1)),
@@ -317,6 +321,8 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
         raise ValueError("Интервал парсинга должен быть не меньше 0.4 с.")
     if not 0.2 <= settings.scan_wait_seconds <= 10:
         raise ValueError("Задержка на точке должна быть от 0.2 до 10 с.")
+    if not 4 <= settings.scan_max_zoom <= 18:
+        raise ValueError("Максимальный zoom обхода должен быть от 4 до 18.")
     if settings.screenshot_period_hours not in {1, 3, 6, 12, 24} \
             or settings.archive_html_period_hours not in {1, 3, 6, 12, 24}:
         raise ValueError("Период сохранения должен быть 1, 3, 6, 12 или 24 часа.")
@@ -413,6 +419,7 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
         or ".leaflet-container",
         reference_zoom=float(settings.reference_zoom),
         scan_wait_seconds=float(settings.scan_wait_seconds),
+        scan_max_zoom=int(settings.scan_max_zoom),
         screenshot_enabled=bool(settings.screenshot_enabled),
         screenshot_dir=settings.screenshot_dir.strip(),
         screenshot_period_hours=settings.screenshot_period_hours,

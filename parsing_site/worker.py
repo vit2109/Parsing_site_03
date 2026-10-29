@@ -11,7 +11,7 @@ from parsing_site.browser import BrowserNotConnectedError, BrowserSession
 from parsing_site.capture_archive import CaptureArchive
 from parsing_site.config import load_config
 from parsing_site.db import Database
-from parsing_site.max_bot import MaxAlertEngine, MaxDispatch
+from parsing_site.max_bot import PHOTO_MISSING_NOTE, MaxAlertEngine, MaxDispatch
 from parsing_site.settings_store import SettingsStore, resolve_max_token
 from parsing_site.table_history_db import TableHistoryDatabase
 from parsing_site.tracking import capture_snapshot, snapshot_to_dict
@@ -189,12 +189,100 @@ class ParseWorker:
                             self._table_history.prune_dynamic_history()
                         poll_id = self._db.save_snapshot(snapshot, previous)
                         self._table_history.save_snapshot(snapshot)
+                        with self._lock:
+                            self._polls += 1
+                            self._latest = snapshot_to_dict(snapshot)
+                            self._latest["poll_id"] = poll_id
+                            self._max_poll = None
+                            self._status = "running"
+                            self._error = ""
+                        deliveries = max_alerts.collect(snapshot, settings, archive.screenshots)
+                        capture_pair = getattr(session, "capture_pair_view", None)
+                        attempted: set[tuple[int, tuple[float, float]]] = set()
+                        dynamics = {item.index: item for item in snapshot.dynamics}
+                        photo_deadline = monotonic() + 25
+                        priority = {"alert": 0, "warning": 1, "blue": 2}
+                        row_status = {
+                            (row.dynamic_index, row.static_index): row.status
+                            for row in snapshot.rows
+                        }
+                        for delivery in sorted(deliveries, key=lambda item: priority.get(
+                            row_status.get((item.dynamic_index, item.nearest_static_index)), 3,
+                        )):
+                            static = delivery.nearest_static
+                            dynamic = dynamics.get(delivery.dynamic_index)
+                            if (delivery.screenshot is not None or static is None
+                                    or dynamic is None or dynamic.lat is None
+                                    or dynamic.lng is None or not callable(capture_pair)):
+                                continue
+                            key = (delivery.dynamic_index, static)
+                            if key not in attempted:
+                                if len(attempted) >= 6 or monotonic() >= photo_deadline:
+                                    continue
+                                attempted.add(key)
+                                try:
+                                    capture_pair(
+                                        delivery.dynamic_index, (dynamic.lat, dynamic.lng),
+                                        static, cfg.tracking,
+                                    )
+                                except Exception as exc:  # noqa: BLE001 — текст остаётся в очереди.
+                                    archive.errors.append(f"max: дополнительный кадр: {exc}")
+                            delivery.screenshot = max_alerts.select_screenshot(
+                                delivery.dynamic_index, static, delivery.related_statics,
+                                archive.screenshots, datetime.now().astimezone(),
+                            )
+                            if delivery.screenshot is not None:
+                                delivery.text = delivery.text.removesuffix("\n" + PHOTO_MISSING_NOTE)
+                        annotator = getattr(session, "annotate_static_point", None)
+                        annotated: dict[tuple[str, int], Any] = {}
+                        if callable(annotator):
+                            for delivery in deliveries:
+                                if delivery.screenshot is None or delivery.nearest_static is None:
+                                    continue
+                                key = (str(delivery.screenshot), delivery.nearest_static_index)
+                                if key not in annotated:
+                                    if monotonic() >= photo_deadline:
+                                        delivery.screenshot = None
+                                        if PHOTO_MISSING_NOTE not in delivery.text:
+                                            note = "\nЛимит времени на подготовку скриншотов исчерпан."
+                                            delivery.text = delivery.text[:4000 - len(note)] + note
+                                        continue
+                                    source = next(
+                                        (item for item in archive.screenshots
+                                         if item.path == delivery.screenshot), None,
+                                    )
+                                    if source is None or source.view is None:
+                                        continue
+                                    target = source.path.with_name(
+                                        f"{source.path.stem}_max-{delivery.nearest_static_index}.jpg"
+                                    )
+                                    temporary = target.with_suffix(".jpg.tmp")
+                                    try:
+                                        image = annotator(
+                                            source.path.read_bytes(), source.view,
+                                            delivery.nearest_static,
+                                            delivery.nearest_static_name,
+                                        )
+                                        temporary.write_bytes(image)
+                                        temporary.replace(target)
+                                        archive.saved.append(target)
+                                        annotated[key] = target
+                                    except Exception as exc:  # noqa: BLE001 — текст доставляется без фото.
+                                        archive.errors.append(
+                                            f"max: не удалось подписать точку «{delivery.nearest_static_name}»: {exc}"
+                                        )
+                                        annotated[key] = None
+                                    finally:
+                                        temporary.unlink(missing_ok=True)
+                                delivery.screenshot = annotated[key]
+                                if delivery.screenshot is None and PHOTO_MISSING_NOTE not in delivery.text:
+                                    note = "\nНе удалось подготовить скриншот с ближайшей точкой."
+                                    delivery.text = delivery.text[:4000 - len(note)] + note
                         saved, archive_errors = archive.finish(session)
                         for path in saved:
                             self._db.add_log("INFO", "archive", f"Сохранён файл: {path}")
                         for error in archive_errors:
                             self._db.add_log("WARNING", "archive", error)
-                        deliveries = max_alerts.collect(snapshot, settings, archive.screenshots)
                         zone_pairs = {
                             zone: sum(row.status == zone for row in snapshot.rows)
                             for zone in ("blue", "warning", "alert")
@@ -245,12 +333,7 @@ class ParseWorker:
                             1 for row in snapshot.rows if row.status == "alert"
                         )
                         with self._lock:
-                            self._polls += 1
-                            self._latest = snapshot_to_dict(snapshot)
-                            self._latest["poll_id"] = poll_id
                             self._max_poll = max_poll
-                            self._status = "running"
-                            self._error = ""
                         if alerts:
                             self._db.add_log(
                                 "WARNING",

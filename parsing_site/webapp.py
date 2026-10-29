@@ -57,6 +57,7 @@ class SettingsIn(BaseModel):
     cdp_url: str = "http://127.0.0.1:9222"
     interval_seconds: float = Field(ge=0.4, le=600)
     scan_wait_seconds: float = Field(default=1.5, ge=0.2, le=10)
+    scan_max_zoom: int = Field(default=10, ge=4, le=18)
     screenshot_enabled: bool = False
     screenshot_dir: str = "data/screenshots"
     screenshot_period_hours: int = 1

@@ -164,6 +164,59 @@ class CaptureArchiveTest(unittest.TestCase):
                          ["<html>zoom-7</html>", None])
         self.assertEqual(page.zoom, 4)
 
+    def test_pair_capture_requires_target_number_and_restores_map(self) -> None:
+        class Page:
+            def __init__(self) -> None:
+                self.restored = False
+                self.fit = False
+                self.labels = [87]
+
+            def evaluate(self, script: str, argument: object = None) -> object:
+                if "fitBounds !==" in script:
+                    return {"lat": 0, "lng": 30, "zoom": 4}
+                if "fitBounds(" in script:
+                    self.fit = True
+                    self.max_zoom = argument["maxZoom"]
+                    return None
+                if "querySelectorAll" in script:
+                    return self.labels
+                if "geo_source: 'leaflet'" in script:
+                    return {"width": 1000, "height": 800, "zoom": 7,
+                            "center": {"lat": 0, "lng": 1}, "has_leaflet": True}
+                if "setView(" in script:
+                    self.restored = True
+                    return None
+                if "getZoom()" in script:
+                    return 7
+                return None
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                return None
+
+        page = Page()
+        session = BrowserSession(BrowserConfig())
+        session.prepare_numbered_capture((900, 600))
+        with patch.object(session, "_find_page", return_value=page), \
+                patch.object(session, "capture_map_image", return_value=b"jpeg"):
+            self.assertTrue(session.capture_pair_view(
+                87, (0, 0), (0, 1), TrackingConfig(),
+            ))
+        self.assertTrue(page.fit)
+        self.assertEqual(page.max_zoom, 10)
+        self.assertTrue(page.restored)
+        self.assertEqual(session.take_numbered_capture().numbers, (87,))
+
+        page = Page()
+        page.labels = [99]
+        session.prepare_numbered_capture((900, 600))
+        with patch.object(session, "_find_page", return_value=page), \
+                patch.object(session, "capture_map_image") as image:
+            self.assertFalse(session.capture_pair_view(
+                87, (0, 0), (0, 1), TrackingConfig(),
+            ))
+        image.assert_not_called()
+        self.assertTrue(page.restored)
+
     def test_period_buckets_and_saved_preferences(self) -> None:
         with TemporaryDirectory() as directory:
             settings = validate_settings(from_dict({

@@ -150,6 +150,10 @@
             Ожидание на каждой точке карты, сек
             <input name="scan_wait_seconds" type="number" min="0.2" max="10" step="0.1" required value="{{ settings.scan_wait_seconds }}" />
           </label>
+          <label>
+            Максимальное приближение при обходе (zoom)
+            <input name="scan_max_zoom" type="number" min="4" max="18" step="1" required value="{{ settings.scan_max_zoom }}" />
+          </label>
           <label class="checkbox">
             <input name="screenshot_enabled" type="checkbox" {% if settings.screenshot_enabled %}checked{% endif %} />
             Сохранять снимок при каждом приближении с видимыми номерами
@@ -267,6 +271,6 @@
     <script>
       window.__INITIAL_SETTINGS__ = {{ settings | tojson }};
     </script>
-    <script src="/static/js/app.js?v=9"></script>
+    <script src="/static/js/app.js?v=10"></script>
   </body>
 </html>

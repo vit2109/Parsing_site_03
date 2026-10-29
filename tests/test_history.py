@@ -4,7 +4,7 @@ import json
 import sqlite3
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -99,11 +99,15 @@ class HistoryDatabaseTest(unittest.TestCase):
         self.assertEqual(from_dict({}).scan_wait_seconds, 1.5)
         with self.assertRaises(ValueError):
             validate_settings(from_dict({"scan_wait_seconds": 11}))
+        self.assertEqual(from_dict({}).scan_max_zoom, 10)
+        with self.assertRaises(ValueError):
+            validate_settings(from_dict({"scan_max_zoom": 19}))
         with TemporaryDirectory() as directory:
             db = Database(Path(directory) / "settings.db")
             store = SettingsStore(db)
-            store.save(from_dict({"map_coordinate_precision": 3}))
+            store.save(from_dict({"map_coordinate_precision": 3, "scan_max_zoom": 8}))
             self.assertEqual(store.load().map_coordinate_precision, 3)
+            self.assertEqual(store.load().scan_max_zoom, 8)
             db.close()
 
     def test_trajectory_keeps_first_timestamp_until_coordinates_change(self) -> None:
@@ -329,7 +333,7 @@ class HistoryDatabaseTest(unittest.TestCase):
             )
             old_id = db.save_snapshot(snapshot)
             recent_id = db.save_snapshot(snapshot)
-            old_day = (date.today() - timedelta(days=20)).isoformat()
+            old_day = (datetime.now().astimezone().date() - timedelta(days=20)).isoformat()
             db._conn.execute("UPDATE polls SET ts = ? WHERE id = ?", (old_day, old_id))
             db._conn.commit()
             result = db.prune_dynamic_history()

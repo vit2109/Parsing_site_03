@@ -425,8 +425,37 @@ async (opts) => {
     scan.status = "running";
     const originalCenter = map.getCenter();
     const scanWaitMs = Math.max(200, Math.min(10000, Number(opts.scanWaitMs) || 1500));
+    const scanStarted = Date.now();
+    const scanMoveLimit = 32;
+    const scanTimeLimitMs = 75000;
+    const canExplore = () => scan.views < scanMoveLimit &&
+      Date.now() - scanStarted < scanTimeLimitMs;
+    const staticPoints = opts.mode === "latlng" ? (opts.staticObjects || [])
+      .filter((item) => Number.isFinite(item.lat) && Number.isFinite(item.lng) &&
+        Math.abs(item.lat) <= 85.0511287798 && Math.abs(item.lng) <= 180) : [];
+    const scanRadiusKm = Math.max(1, Number(opts.scanRadiusKm) || 350);
+    const inStaticArea = (lat, lng) => !staticPoints.length || staticPoints.some((point) => {
+      const dLat = (lat - point.lat) * Math.PI / 180;
+      const dLng = (lng - point.lng) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) ** 2 +
+        Math.cos(lat * Math.PI / 180) * Math.cos(point.lat * Math.PI / 180) *
+        Math.sin(dLng / 2) ** 2;
+      return 12742 * Math.asin(Math.min(1, Math.sqrt(a))) <= scanRadiusKm;
+    });
+    if (staticPoints.length) {
+      const nearby = dynamics.filter((item) => !Number.isFinite(item.lat) ||
+        !Number.isFinite(item.lng) || inStaticArea(item.lat, item.lng));
+      dynamics.length = 0;
+      dynamics.push(...nearby);
+      usedNumbers.clear();
+      dynamics.filter((item) => item.index > 0).forEach((item) => usedNumbers.add(item.index));
+    }
     const reportedMaxZoom = typeof map.getMaxZoom === "function" ? map.getMaxZoom() : Infinity;
-    const maxZoom = Number.isFinite(reportedMaxZoom) ? reportedMaxZoom : zoom + 6;
+    const configuredMaxZoom = Math.max(4, Math.min(18, Number(opts.scanMaxZoom) || 10));
+    const maxZoom = Math.min(
+      Number.isFinite(reportedMaxZoom) ? reportedMaxZoom : Infinity,
+      Math.max(zoom, configuredMaxZoom),
+    );
     const reportedMinZoom = typeof map.getMinZoom === "function" ? map.getMinZoom() : -Infinity;
     const minZoom = Number.isFinite(reportedMinZoom) ? reportedMinZoom : zoom - 4;
     const targetZoom = Math.min(
@@ -436,6 +465,7 @@ async (opts) => {
       if (!opts.captureNumbered) return 0;
       const numbered = collect(opts.dynamic, "D", true).filter((item) => {
         if (item.index <= 0 || !Number.isFinite(item.lat) || !Number.isFinite(item.lng)) return false;
+        if (!inStaticArea(item.lat, item.lng)) return false;
         const point = map.latLngToContainerPoint([item.lat, item.lng]);
         return point && point.x >= 0 && point.x <= mapRect.width &&
           point.y >= 0 && point.y <= mapRect.height;
@@ -479,11 +509,18 @@ async (opts) => {
     };
     const matchVisible = () => {
       const visible = collect(opts.dynamic, "D", true).filter((item) => item.index > 0);
+      const unresolvedById = new Map(dynamics.filter((item) => item.index < 0)
+        .map((item) => [item.fallback_id, item]));
       let matched = 0;
       for (const item of visible) {
-        if (usedNumbers.has(item.index) || !Number.isFinite(item.lat) || !Number.isFinite(item.lng)) continue;
+        if (usedNumbers.has(item.index) || !Number.isFinite(item.lat) ||
+            !Number.isFinite(item.lng) || !inStaticArea(item.lat, item.lng)) continue;
         let best = null;
-        for (const candidate of dynamics) {
+        const identical = unresolvedById.get(item.fallback_id);
+        if (identical && identical.object_type === item.object_type) {
+          best = {candidate: identical, distance: 0};
+        }
+        for (const candidate of best ? [] : dynamics) {
           if (candidate.index >= 0 || !Number.isFinite(candidate.lat) || !Number.isFinite(candidate.lng)) continue;
           if (candidate.object_type !== item.object_type) continue;
           let distance = Infinity;
@@ -504,14 +541,17 @@ async (opts) => {
       return matched;
     };
     try {
+      const byIdentity = new Map(dynamics.map((item) => [item.fallback_id, item]));
       const rememberVisible = (visible = collect(opts.dynamic, "D", true)) => {
         let added = 0;
         for (const item of visible) {
-          if (!Number.isFinite(item.lat) || !Number.isFinite(item.lng)) continue;
-          const existing = dynamics.find((candidate) => candidate.fallback_id === item.fallback_id);
+          if (!Number.isFinite(item.lat) || !Number.isFinite(item.lng) ||
+              !inStaticArea(item.lat, item.lng)) continue;
+          const existing = byIdentity.get(item.fallback_id);
           if (!existing) {
             applyKnownNumber(item);
             dynamics.push(item);
+            byIdentity.set(item.fallback_id, item);
             added++;
           }
           else if (existing.index < 0 && item.index > 0 && !usedNumbers.has(item.index)) {
@@ -524,54 +564,73 @@ async (opts) => {
       // В html_test/44.html правая вкладка показывает 9 нужных маркеров при zoom 4.
       const incidentMap = String(opts.dynamic || "").includes("map-incident");
       const overviewZoom = Math.min(maxZoom, Math.max(minZoom, zoom - 4, incidentMap ? 4 : -Infinity));
-      for (let level = zoom - 1; level >= overviewZoom; level--) {
+      for (let level = zoom - 1; level >= overviewZoom && canExplore(); level--) {
         await moveTo(originalCenter.lat, originalCenter.lng, level);
         rememberVisible();
       }
-      if (map.getZoom() !== overviewZoom) {
+      if (map.getZoom() !== overviewZoom && canExplore()) {
         await moveTo(originalCenter.lat, originalCenter.lng, overviewZoom);
         rememberVisible();
       }
-      // Идём к соседней области только при наличии инцидента у соответствующего
-      // края. Пустые углы карты и области без маркеров не просматриваем.
-      const centers = new Map();
-      for (let row = -4; row <= 4; row++) {
-        for (let col = -4; col <= 4; col++) {
-          const center = map.containerPointToLatLng([
-            mapRect.width * (0.5 + col * 0.75),
-            mapRect.height * (0.5 + row * 0.75),
-          ]);
-          centers.set(`${col},${row}`, center);
+      if (staticPoints.length) {
+        // Обзор строится вокруг стационарных точек; далёкие маркеры не ведут
+        // карту за пределы контролируемых зон.
+        const survey = [];
+        for (const point of staticPoints) {
+          const projected = project3857(point.lat, point.lng, overviewZoom);
+          if (!survey.some((entry) =>
+            Math.abs(entry.x - projected.x) < mapRect.width * 0.4 &&
+            Math.abs(entry.y - projected.y) < mapRect.height * 0.4)) {
+            survey.push({lat: point.lat, lng: point.lng, ...projected});
+          }
         }
-      }
-      const queue = [[0, 0]];
-      const seen = new Set();
-      while (queue.length && seen.size < 16) {
-        const [col, row] = queue.shift();
-        const key = `${col},${row}`;
-        if (seen.has(key) || !centers.has(key)) continue;
-        const center = centers.get(key);
-        if (!center || !Number.isFinite(center.lat) || !Number.isFinite(center.lng) ||
-            Math.abs(center.lat) > 85.0511287798 || Math.abs(center.lng) > 180) continue;
-        seen.add(key);
-        if (col || row) await moveTo(center.lat, center.lng, overviewZoom);
-        const visible = collect(opts.dynamic, "D", true);
-        const added = rememberVisible(visible);
-        // Расширяем обзор лишь там, где предыдущий шаг открыл новые объекты.
-        if ((col || row) && !added) continue;
-        const edges = new Set();
-        for (const item of visible) {
-          if (!Number.isFinite(item.lat) || !Number.isFinite(item.lng)) continue;
-          const p = map.latLngToContainerPoint([item.lat, item.lng]);
-          if (!p || p.x < 0 || p.x > mapRect.width || p.y < 0 || p.y > mapRect.height) continue;
-          if (p.x < mapRect.width * 0.2) edges.add(`${col - 1},${row}`);
-          if (p.x > mapRect.width * 0.8) edges.add(`${col + 1},${row}`);
-          if (p.y < mapRect.height * 0.2) edges.add(`${col},${row - 1}`);
-          if (p.y > mapRect.height * 0.8) edges.add(`${col},${row + 1}`);
+        scan.static_areas = survey.length;
+        for (const center of survey) {
+          if (!canExplore()) break;
+          await moveTo(center.lat, center.lng, overviewZoom);
+          rememberVisible();
         }
-        edges.forEach((next) => {
-          if (!seen.has(next) && centers.has(next)) queue.push(next.split(",").map(Number));
-        });
+      } else {
+        // Без географических координат статичных точек сохраняем локальный
+        // обзор, но ограничиваем число перемещений и время обхода.
+        const centers = new Map();
+        for (let row = -4; row <= 4; row++) {
+          for (let col = -4; col <= 4; col++) {
+            const center = map.containerPointToLatLng([
+              mapRect.width * (0.5 + col * 0.75),
+              mapRect.height * (0.5 + row * 0.75),
+            ]);
+            centers.set(`${col},${row}`, center);
+          }
+        }
+        const queue = [[0, 0]];
+        const seen = new Set();
+        while (queue.length && seen.size < 16 && canExplore()) {
+          const [col, row] = queue.shift();
+          const key = `${col},${row}`;
+          if (seen.has(key) || !centers.has(key)) continue;
+          const center = centers.get(key);
+          if (!center || !Number.isFinite(center.lat) || !Number.isFinite(center.lng) ||
+              Math.abs(center.lat) > 85.0511287798 || Math.abs(center.lng) > 180) continue;
+          seen.add(key);
+          if (col || row) await moveTo(center.lat, center.lng, overviewZoom);
+          const visible = collect(opts.dynamic, "D", true);
+          const added = rememberVisible(visible);
+          if ((col || row) && !added) continue;
+          const edges = new Set();
+          for (const item of visible) {
+            if (!Number.isFinite(item.lat) || !Number.isFinite(item.lng)) continue;
+            const p = map.latLngToContainerPoint([item.lat, item.lng]);
+            if (!p || p.x < 0 || p.x > mapRect.width || p.y < 0 || p.y > mapRect.height) continue;
+            if (p.x < mapRect.width * 0.2) edges.add(`${col - 1},${row}`);
+            if (p.x > mapRect.width * 0.8) edges.add(`${col + 1},${row}`);
+            if (p.y < mapRect.height * 0.2) edges.add(`${col},${row - 1}`);
+            if (p.y > mapRect.height * 0.8) edges.add(`${col},${row + 1}`);
+          }
+          edges.forEach((next) => {
+            if (!seen.has(next) && centers.has(next)) queue.push(next.split(",").map(Number));
+          });
+        }
       }
       dynamics.filter((item) => item.index > 0).forEach((item) => usedNumbers.add(item.index));
       scan.overview_count = dynamics.length;
@@ -598,11 +657,14 @@ async (opts) => {
       };
       const attemptedAtFinal = new Set();
       for (const level of [...new Set([targetZoom, finalZoom])]) {
+        if (!canExplore()) break;
         const pending = dynamics.filter((item) => item.index < 0 &&
           Number.isFinite(item.lat) && Number.isFinite(item.lng) &&
+          inStaticArea(item.lat, item.lng) &&
           !attemptedAtFinal.has(item.fallback_id));
         if (!pending.length) break;
         for (const group of groupAt(pending, level)) {
+          if (!canExplore()) break;
           const remaining = group.filter((item) => item.index < 0 &&
             !attemptedAtFinal.has(item.fallback_id));
           if (!remaining.length) continue;
@@ -620,8 +682,15 @@ async (opts) => {
             (Math.min(...ys) + Math.max(...ys)) / 2, visitZoom,
           );
           const numberedAtMove = await moveTo(center.lat, center.lng, visitZoom, true);
+          const visibleIncidents = collect(opts.dynamic, "D", true).filter((item) =>
+            Number.isFinite(item.lat) && Number.isFinite(item.lng) &&
+            inStaticArea(item.lat, item.lng));
+          if (!visibleIncidents.length) {
+            remaining.forEach((item) => attemptedAtFinal.add(item.fallback_id));
+            continue;
+          }
           const matched = matchVisible();
-          if (!matched) {
+          if (!matched && canExplore()) {
             await new Promise((resolve) => setTimeout(resolve, scanWaitMs));
             if (!numberedAtMove) recordNumberedView(true);
             matchVisible();
@@ -631,6 +700,7 @@ async (opts) => {
           }
         }
       }
+      scan.budget_exhausted = !canExplore();
     } finally {
       await moveTo(originalCenter.lat, originalCenter.lng, zoom);
       const restored = () => {
@@ -649,7 +719,8 @@ async (opts) => {
         item.y = round2(xy.y);
       }
       scan.status = !restored() ? "restore_failed" :
-        dynamics.every((item) => item.index > 0) ? "complete" : "partial";
+        !scan.budget_exhausted && dynamics.every((item) => item.index > 0)
+          ? "complete" : "partial";
     }
   } else if (map && opts.scanNumbers) {
     scan.status = "map_controls_unavailable";
@@ -796,6 +867,9 @@ def extract_scene_from_page(
             "scanNumbers": scan_numbers,
             "captureNumbered": capture_numbered,
             "scanWaitMs": round(tracking.scan_wait_seconds * 1000),
+            "scanMaxZoom": tracking.scan_max_zoom,
+            "scanRadiusKm": max(tracking.threshold, tracking.warning_limit,
+                                tracking.blue_limit),
             "knownNumbers": {
                 str(identity): {"number": number, "lat": lat, "lng": lng}
                 for identity, (number, lat, lng) in (known_numbers or {}).items()
@@ -867,6 +941,30 @@ def extract_scene_with_mouse_scan(
         _apply_number_cache(raw, number_cache)
         _remember_numbers(raw, number_cache)
         return raw
+    static_points = [
+        (item.lat, item.lng) for item in tracking.static_objects
+        if tracking.coordinate_mode == "latlng"
+        and item.lat is not None and item.lng is not None
+    ]
+    scan_radius = max(tracking.threshold, tracking.warning_limit, tracking.blue_limit)
+
+    def in_static_area(lat: float, lng: float) -> bool:
+        return not static_points or any(
+            haversine_km(lat, lng, static_lat, static_lng) <= scan_radius
+            for static_lat, static_lng in static_points
+        )
+
+    if static_points:
+        raw["dynamics"] = [
+            item for item in raw.get("dynamics") or []
+            if (lat := _maybe_float(item.get("lat"))) is None
+            or (lng := _maybe_float(item.get("lng"))) is None
+            or in_static_area(lat, lng)
+        ]
+        raw["unnumbered_dynamics"] = sum(
+            item["index"] < 0 for item in raw["dynamics"]
+        )
+    scan_deadline = monotonic() + 75
     base_map = raw.get("map") or {}
     base_view = map_view_from_raw(base_map)
     base_zoom = _maybe_float(raw.get("map_zoom"))
@@ -875,6 +973,7 @@ def extract_scene_with_mouse_scan(
         raw["scan"] = scan
         _apply_number_cache(raw, number_cache)
         return raw
+    scan_zoom_ceiling = max(base_zoom, tracking.scan_max_zoom)
     original_lat = base_view.center_lat
     original_lng = base_view.center_lng
     scan_wait_ms = round(tracking.scan_wait_seconds * 1000)
@@ -909,6 +1008,8 @@ def extract_scene_with_mouse_scan(
     overview_views = 0
     target_overview = 4.0 if "map-incident" in tracking.dynamic_selector else base_zoom - 4
     for _ in range(4):
+        if monotonic() >= scan_deadline:
+            break
         previous_zoom = _maybe_float(overview.get("map_zoom"))
         if previous_zoom is None or abs(previous_zoom - target_overview) < 0.01:
             break
@@ -923,13 +1024,14 @@ def extract_scene_with_mouse_scan(
         overview_moves.append(delta)
         overview_views += 1
         overview = candidate
-        _merge_overview_scene(raw, candidate, base_view)
+        _merge_overview_scene(raw, candidate, base_view, in_static_area)
     overview_view = map_view_from_raw(overview.get("map"))
     if overview_view is not None and overview_view.can_unproject:
         if callable(getattr(page.mouse, "down", None)) and callable(getattr(page.mouse, "up", None)):
             queue = [(0, 0)]
             seen: set[tuple[int, int]] = set()
-            while queue and len(seen) < 16:
+            while queue and len(seen) < 16 and overview_views < 32 \
+                    and monotonic() < scan_deadline:
                 column, row = queue.pop(0)
                 if (column, row) in seen or abs(column) > 4 or abs(row) > 4:
                     continue
@@ -940,11 +1042,13 @@ def extract_scene_with_mouse_scan(
                 )
                 if position is None or abs(position[0]) > 85 or abs(position[1]) > 180:
                     continue
+                if not in_static_area(*position):
+                    continue
                 seen.add((column, row))
                 if column or row:
                     overview = _pan_mouse_to(page, tracking, overview, *position)
                     overview_views += 1
-                added = _merge_overview_scene(raw, overview, base_view)
+                added = _merge_overview_scene(raw, overview, base_view, in_static_area)
                 if (column or row) and not added:
                     continue
                 current_view = map_view_from_raw(overview.get("map"))
@@ -955,7 +1059,7 @@ def extract_scene_with_mouse_scan(
                     lng = _maybe_float(item.get("lng"))
                     point = latlng_to_container(lat, lng, current_view) \
                         if lat is not None and lng is not None else None
-                    if point is None or not (0 <= point[0] <= current_view.width \
+                    if point is None or not in_static_area(lat, lng) or not (0 <= point[0] <= current_view.width \
                             and 0 <= point[1] <= current_view.height):
                         continue
                     if point[0] < current_view.width * 0.3:
@@ -975,13 +1079,17 @@ def extract_scene_with_mouse_scan(
         for item in raw["dynamics"]:
             if item["index"] > 0:
                 continue
+            if not in_static_area(item["lat"], item["lng"]):
+                continue
             point = latlng_to_container(item["lat"], item["lng"], base_view)
             if point is not None and not (0 <= point[0] <= base_view.width
                                           and 0 <= point[1] <= base_view.height):
                 offscreen.append(item)
         for group in _scan_target_groups(
-            offscreen, base_view.width, base_view.height, base_zoom + 6,
+            offscreen, base_view.width, base_view.height, scan_zoom_ceiling,
         ):
+            if overview_views >= 32 or monotonic() >= scan_deadline:
+                break
             target = group[0]
             current_view = map_view_from_raw(overview.get("map"))
             point = latlng_to_container(target["lat"], target["lng"], current_view) \
@@ -1002,8 +1110,11 @@ def extract_scene_with_mouse_scan(
             anchor_x, anchor_y = map_left + point[0], map_top + point[1]
             ticks = 0
             current = overview
-            while any(item["index"] < 0 for item in group) and ticks < 6:
+            while any(item["index"] < 0 for item in group) and ticks < 6 \
+                    and monotonic() < scan_deadline:
                 previous_zoom = _maybe_float(current.get("map_zoom"))
+                if previous_zoom is None or previous_zoom >= scan_zoom_ceiling:
+                    break
                 page.mouse.move(anchor_x, anchor_y)
                 page.mouse.wheel(0, -120)
                 page.wait_for_timeout(scan_wait_ms)
@@ -1011,6 +1122,8 @@ def extract_scene_with_mouse_scan(
                 record_numbered(current)
                 current_zoom = _maybe_float(current.get("map_zoom"))
                 if current_zoom is None or previous_zoom is None or current_zoom <= previous_zoom:
+                    break
+                if not current.get("dynamics"):
                     break
                 ticks += 1
                 _merge_numbered_scene(raw, current, used)
@@ -1053,6 +1166,7 @@ def extract_scene_with_mouse_scan(
         item for item in raw.get("dynamics") or []
         if item.get("index", 0) < 0 and _maybe_float(item.get("lat")) is not None
         and _maybe_float(item.get("lng")) is not None
+        and in_static_area(item["lat"], item["lng"])
         and (point := latlng_to_container(item["lat"], item["lng"], base_view)) is not None
         and 0 <= point[0] <= base_view.width and 0 <= point[1] <= base_view.height
     ]
@@ -1079,8 +1193,10 @@ def extract_scene_with_mouse_scan(
         return scene
 
     for group in _scan_target_groups(
-        targets, base_view.width, base_view.height, base_zoom + 6,
+        targets, base_view.width, base_view.height, scan_zoom_ceiling,
     ):
+        if views + overview_views >= 32 or monotonic() >= scan_deadline:
+            break
         if all(item["index"] > 0 for item in group):
             continue
         target = next(item for item in group if item["index"] < 0)
@@ -1098,12 +1214,17 @@ def extract_scene_with_mouse_scan(
             limit = wheel_ticks or 6
             while ticks < limit:
                 previous_zoom = _maybe_float(current.get("map_zoom"))
+                if previous_zoom is None or previous_zoom >= scan_zoom_ceiling \
+                        or monotonic() >= scan_deadline:
+                    break
                 current = scene_after_wheel(screen_x, screen_y, -120)
                 ticks += 1
                 now_zoom = _maybe_float(current.get("map_zoom"))
                 if now_zoom is not None and previous_zoom is not None and now_zoom > previous_zoom:
                     wheel_worked = True
                 if ticks == 1 and not wheel_worked:
+                    break
+                if not current.get("dynamics"):
                     break
                 if wheel_ticks is None and any(item["index"] > 0 for item in current.get("dynamics") or []):
                     wheel_ticks = ticks
@@ -1117,9 +1238,14 @@ def extract_scene_with_mouse_scan(
             max_ticks = min(10, (wheel_ticks or 6) + 4)
             while any(item["index"] < 0 for item in group) and ticks < max_ticks:
                 previous_zoom = _maybe_float(current.get("map_zoom"))
+                if previous_zoom is None or previous_zoom >= scan_zoom_ceiling \
+                        or monotonic() >= scan_deadline:
+                    break
                 current = scene_after_wheel(screen_x, screen_y, -120)
                 ticks += 1
                 _merge_numbered_scene(raw, current, used_numbers)
+                if not current.get("dynamics"):
+                    break
                 current_zoom = _maybe_float(current.get("map_zoom"))
                 if current_zoom is not None and previous_zoom is not None \
                         and current_zoom <= previous_zoom:
@@ -1154,6 +1280,9 @@ def extract_scene_with_mouse_scan(
 
     scan["views"] = overview_views + views
     scan["overview_count"] = len(raw.get("dynamics") or [])
+    if scan.get("status") == "no_leaflet_instance":
+        scan["status"] = "partial"
+    scan["budget_exhausted"] = monotonic() >= scan_deadline or scan["views"] >= 32
     raw["scan"] = scan
     _apply_number_cache(raw, number_cache)
     raw["unnumbered_dynamics"] = sum(item["index"] < 0 for item in raw["dynamics"])
@@ -1247,7 +1376,8 @@ def _scene_at_origin(scene: dict[str, Any], zoom: float, lat: float, lng: float)
 
 
 def _merge_overview_scene(
-    overview: dict[str, Any], detailed: dict[str, Any], base_view: MapView
+    overview: dict[str, Any], detailed: dict[str, Any], base_view: MapView,
+    in_area: Callable[[float, float], bool] | None = None,
 ) -> int:
     """Добавляет найденные при отдалении маркеры в координатах исходного вида."""
     items = overview.setdefault("dynamics", [])
@@ -1260,7 +1390,8 @@ def _merge_overview_scene(
         identity = item.get("fallback_id")
         lat = _maybe_float(item.get("lat"))
         lng = _maybe_float(item.get("lng"))
-        if identity is None or lat is None or lng is None:
+        if identity is None or lat is None or lng is None \
+                or (in_area is not None and not in_area(lat, lng)):
             continue
         existing = known.get(identity)
         if existing is not None:
@@ -1568,6 +1699,8 @@ def build_tracking_snapshot(
             "mouse_restore_failed": "После обхода не удалось восстановить исходный вид карты.",
             "restore_failed": "После обхода не удалось восстановить исходный вид карты.",
         }.get(scan_status, "")
+        if (raw.get("scan") or {}).get("budget_exhausted"):
+            detail = "Достигнут лимит времени или перемещений; показан частичный результат."
         number_warning = (
             f"Номера {unnumbered_dynamics} объектов не определены. {detail} "
             "Временные ID не являются номерами сайта."
