@@ -17,11 +17,27 @@ from parsing_site.coordinates import (
     project_3857,
     unproject_3857,
 )
-from parsing_site.html_probe import extract_scene_from_html
+from parsing_site.html_probe import (
+    _map_operator_numbers,
+    _number_at_marker,
+    extract_scene_from_html,
+)
 from parsing_site.tracking import _EXTRACT_SCRIPT, extract_scene_with_mouse_scan
 
 
 class LeafletScanTest(unittest.TestCase):
+    def test_saved_html_matches_current_and_unstyled_labels_per_marker(self) -> None:
+        soup = BeautifulSoup(
+            '<div class="leaflet-marker-icon map-incident-operator-number" '
+            'style="transform: translate3d(10px, 20px, 0px); margin-top: -19px">101</div>'
+            '<div class="leaflet-marker-icon map-incident-operator-number" '
+            'style="transform: translate3d(30px, 20px, 0px)">102</div>',
+            "html.parser",
+        )
+        labels = _map_operator_numbers(soup)
+        self.assertEqual(_number_at_marker((10, 20), labels), 101)
+        self.assertEqual(_number_at_marker((30, 20), labels), 102)
+
     def test_zoom_four_saved_page_has_nine_markers_on_right_tab(self) -> None:
         page = Path(__file__).resolve().parent.parent / "html_test" / "44.html"
         if not page.exists():

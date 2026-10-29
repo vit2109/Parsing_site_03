@@ -106,7 +106,9 @@ class MaxAlertEngine:
             rules = {rule.static_index: rule for rule in recipient.rules}
             entered: dict[int, list[DistanceRow]] = {}
             for (dynamic_id, static_id), row in rows.items():
-                if static_id not in rules:
+                # Временный отрицательный ID ещё нельзя привязать к номеру на
+                # кадре. Дождёмся подписи и отправим вход в зону в следующем опросе.
+                if dynamic_id <= 0 or static_id not in rules:
                     continue
                 key = (recipient.user_id, dynamic_id, static_id)
                 active.add(key)
@@ -119,6 +121,7 @@ class MaxAlertEngine:
                     continue
                 entered.setdefault(dynamic_id, []).append(row)
             for dynamic_id, triggered in entered.items():
+                triggered.sort(key=lambda item: item.distance)
                 all_distances = sorted(
                     (row for (row_dynamic_id, _), row in rows.items()
                      if row_dynamic_id == dynamic_id),
@@ -138,7 +141,12 @@ class MaxAlertEngine:
                 entered_ids = {item.static_index for item in triggered}
                 lines = [
                     f"Всего динамических объектов: {len(snapshot.dynamics)}.",
-                    f"Объект {label} ({object_name}) вошёл в выбранные зоны.",
+                    f"Объект {label} ({object_name}) вошёл в зоны следующих стационарных объектов:",
+                    *(
+                        f"★ «{static_label(item)}» — вход в {ZONE_NAME[item.status]} зону, "
+                        f"{item.distance:.1f} {unit}."
+                        for item in triggered
+                    ),
                 ]
                 if distances:
                     lines.extend([
@@ -155,13 +163,14 @@ class MaxAlertEngine:
                     ])
                 else:
                     lines.append(
-                        "Стационарных объектов в пределах "
+                        "Других стационарных объектов в пределах "
                         f"{settings.max_display_distance_km:g} км нет."
                     )
-                nearest = distances[0] if distances else None
+                nearest = distances[0] if distances else triggered[0]
                 static = self._geo(nearest) if nearest else None
                 related = tuple(
-                    point for row in distances if (point := self._geo(row)) is not None
+                    point for row in [*distances, *triggered]
+                    if (point := self._geo(row)) is not None
                 )
                 photo = self.select_screenshot(
                     dynamic_id, static, related, screenshots,

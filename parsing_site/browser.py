@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -174,6 +175,11 @@ class BrowserSession:
         if page.url != self._cache_url:
             self._number_cache.clear()
             self._cache_url = page.url
+        tracked_tab = page.get_by_role("tab", name=re.compile("сопровожда", re.IGNORECASE))
+        if tracked_tab.count():
+            tracked_tab.first.click(timeout=self._config.wait_timeout_ms)
+            # После нажатия сайт обновляет слой маркеров асинхронно.
+            page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
         snapshot = PageSnapshot(
             url=page.url,
             title=page.title(),

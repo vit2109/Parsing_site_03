@@ -242,19 +242,20 @@ def _collect_markers(
 
 def _map_operator_numbers(soup: BeautifulSoup) -> list[tuple[int, float, float]]:
     """Читает видимые номера и координаты отдельных Leaflet-подписей."""
-    labels: list[tuple[int, float, float]] = []
     current_labels: list[tuple[int, float, float]] = []
+    plain_labels: list[tuple[int, float, float]] = []
     for element in soup.select(".leaflet-marker-icon.map-incident-operator-number"):
         match = re.fullmatch(r"№?\s*(\d+)", element.get_text(" ", strip=True))
         style = element.get("style") or ""
         translate = parse_translate3d(style)
         if match and translate and int(match.group(1)) > 0:
             label = (int(match.group(1)), translate[0], translate[1])
-            labels.append(label)
             margin = re.search(r"margin-top:\s*(-?\d+(?:\.\d+)?)px", style)
-            if margin and float(margin.group(1)) <= -15:
+            if margin is None:
+                plain_labels.append(label)
+            elif float(margin.group(1)) <= -15:
                 current_labels.append(label)
-    return current_labels or labels
+    return current_labels + plain_labels
 
 
 def _fallback_index(identity: str) -> int:

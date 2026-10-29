@@ -5,7 +5,7 @@ const extract = eval(fs.readFileSync(process.argv[2], 'utf8'));
 const nativeSetTimeout = global.setTimeout;
 
 async function check(initialZoom, mapDiscoverable = true, crowded = false, overlapping = false,
-  sameNumber = false, denseUnique = false, bounded = false) {
+  sameNumber = false, denseUnique = false, bounded = false, mixedLabels = false) {
   let zoomInMoves = 0;
   let zoomInWaits = 0;
   let awaitingZoomInPause = false;
@@ -23,7 +23,11 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     }
     return nativeSetTimeout(callback, Math.min(delay, 1), ...args);
   };
-  const points = bounded ? [
+  const points = mixedLabels ? [
+    {lat: 50, lng: 0, number: 101},
+    {lat: 50, lng: 0.5, number: 102},
+    {lat: 50, lng: 1, number: 103},
+  ] : bounded ? [
     ...Array.from({length: 500}, (_, i) => ({
       lat: 50 + (i % 5) * 0.01, lng: (i % 10) * 0.02, number: 1000 + i,
     })),
@@ -80,7 +84,7 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     getBoundingClientRect: () => ({left: 0, top: 0, width: 800, height: 600}),
     querySelector: () => null,
   };
-  function element(point, number, origin = false) {
+  function element(point, number, origin = false, plain = false) {
     const p = map.latLngToContainerPoint([point.lat, point.lng]);
     const type = 'map-incident_aircraft-drone';
     return {
@@ -88,7 +92,7 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
         : ['leaflet-marker-icon', 'map-incident', type],
       dataset: overlapping ? {} : {incidentId: String(point.id || point.number)},
       id: '', textContent: number ? String(origin ? point.number + 1000 : point.number) : '',
-      style: {marginTop: number ? (origin ? '-9px' : '-19px') : '-10px'},
+      style: {marginTop: number ? (plain ? '' : origin ? '-9px' : '-19px') : '-10px'},
       getBoundingClientRect: () => ({left: p.x - 10, top: p.y - 10, width: 20, height: 20}),
       getAttribute: (name) => name === 'style'
         ? `transform: translate3d(${p.x}px, ${p.y}px, 0px)` : '',
@@ -107,11 +111,23 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
       if (selector === '.leaflet-marker-icon.map-incident-operator-number')
         return map.zoom >= 8
           ? visible.filter((p) => !crowded || map.zoom >= 10 || p.number % 2 === 0)
-              .flatMap((p) => [element(p, true, true), element(p, true)]) : [];
+              .flatMap((p) => mixedLabels && p.number === 102
+                ? [element(p, true, false, true)]
+                : [element(p, true, true), element(p, true)]) : [];
       return [];
     },
   };
   global.getComputedStyle = () => ({backgroundColor: 'red'});
+  if (mixedLabels) {
+    const raw = await extract({
+      mode: 'latlng', mapContainer: '.leaflet-container',
+      dynamic: '.leaflet-marker-icon.map-incident', static: '.static',
+      staticObjects: [], scanNumbers: false,
+    });
+    assert.deepEqual(raw.dynamics.map((item) => item.index), [101, 102, 103],
+      'an unstyled label on one marker survives current labels on other markers');
+    return;
+  }
   if (overlapping) {
     const raw = await extract({
       mode: 'latlng', mapContainer: '.leaflet-container',
@@ -185,5 +201,6 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
   await check(6, true, false, false, true); // 30 копий одного номера — один общий вид
   await check(6, true, false, false, false, true); // 9 разных номеров в одной группе
   await check(6, true, false, false, false, false, true); // 1000 маркеров и далёкий выброс
+  await check(8, true, false, false, false, false, false, true); // подписи с разными стилями
   console.log('Leaflet scan: both zoom cases passed');
 })().catch((error) => {console.error(error); process.exitCode = 1;});

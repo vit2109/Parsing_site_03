@@ -284,23 +284,40 @@ async (opts) => {
       const marginTop = Number.parseFloat(el.style?.marginTop ?? "");
       return match && transform
         ? { number: Number(match[1]), x: transform.x, y: transform.y,
-            current: Number.isFinite(marginTop) && marginTop <= -15 }
+            current: Number.isFinite(marginTop) && marginTop <= -15,
+            origin: Number.isFinite(marginTop) && marginTop > -15 }
         : null;
     })
-    .filter((item) => item && Number.isInteger(item.number) && item.number > 0);
-    return labels.some((item) => item.current)
-      ? labels.filter((item) => item.current) : labels;
+    .filter((item) => item && Number.isInteger(item.number) && item.number > 0 &&
+      !item.origin);
+    // Подпись начальной точки траектории не является номером текущего маркера.
+    // Подписи без margin-top тоже допустимы (например, в сохранённом HTML).
+    const byPosition = new Map();
+    labels.forEach((item) => {
+      const key = `${Math.floor(item.x / 2)}:${Math.floor(item.y / 2)}`;
+      if (!byPosition.has(key)) byPosition.set(key, []);
+      byPosition.get(key).push(item);
+    });
+    return byPosition;
   };
 
-  const numberAtMarker = (box) => {
-    const numbers = operatorNumbers();
-    if (!box.translate3d || !numbers.length) return null;
+  const numberAtMarker = (box, numbers) => {
+    if (!box.translate3d || !numbers.size) return null;
     let nearest = null;
-    numbers.forEach((item) => {
-      const distance = (item.x - box.translate3d.x) ** 2 + (item.y - box.translate3d.y) ** 2;
-      if (!nearest || distance < nearest.distance) nearest = { ...item, distance };
-    });
-    return nearest && nearest.distance <= 4 ? nearest.number : null;
+    const cellX = Math.floor(box.translate3d.x / 2);
+    const cellY = Math.floor(box.translate3d.y / 2);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (const item of numbers.get(`${cellX + dx}:${cellY + dy}`) || []) {
+          const distance = (item.x - box.translate3d.x) ** 2 + (item.y - box.translate3d.y) ** 2;
+          if (distance <= 4 && (!nearest || distance < nearest.distance ||
+              (distance === nearest.distance && item.current && !nearest.current))) {
+            nearest = { ...item, distance };
+          }
+        }
+      }
+    }
+    return nearest?.number ?? null;
   };
 
   // На малом масштабе сайт скрывает подписи, но сами маркеры остаются.
@@ -329,9 +346,10 @@ async (opts) => {
     if (!selector) return [];
     const occurrences = new Map();
     const seenNumbers = new Set();
+    const numbers = operatorNumbers();
     return [...document.querySelectorAll(selector)].map((el, index) => {
           const box = centerOf(el);
-          const positionedNumber = numberAtMarker(box);
+          const positionedNumber = numberAtMarker(box, numbers);
           const markerType = objectTypeFrom([...el.classList].join(" "));
           const displayedObject = Number.isInteger(positionedNumber)
             ? { number: positionedNumber, type: markerType }

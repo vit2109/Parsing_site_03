@@ -64,6 +64,21 @@ def snapshot(status: str) -> TrackingSnapshot:
 
 
 class MaxBotTest(unittest.TestCase):
+    def test_alert_waits_for_number_and_then_sends_first_zone_entry(self) -> None:
+        engine = MaxAlertEngine()
+        scene = snapshot("blue")
+        scene.dynamics[0].index = -87
+        for row in scene.rows:
+            row.dynamic_index = -87
+        self.assertEqual(engine.collect(scene, settings(), []), [])
+
+        scene.dynamics[0].index = 87
+        for row in scene.rows:
+            row.dynamic_index = 87
+        sent = engine.collect(scene, settings(), [])
+        self.assertEqual(len(sent), 1)
+        self.assertIn("Объект №87", sent[0].text)
+
     def test_first_poll_sends_existing_blue_object_once(self) -> None:
         engine = MaxAlertEngine()
         config = settings()
@@ -273,14 +288,30 @@ class MaxBotTest(unittest.TestCase):
         messages = MaxAlertEngine().collect(snapshot("blue"), config, [])
         self.assertEqual(len(messages), 1)
         self.assertIn("Пост 2", messages[0].text)
-        self.assertNotIn("Пост 1", messages[0].text)
+        self.assertIn("Пост 1", messages[0].text)
+        self.assertNotIn("• Пост 1", messages[0].text)
 
         payload["max_display_distance_km"] = 1
         config = validate_settings(from_dict(payload))
         messages = MaxAlertEngine().collect(snapshot("blue"), config, [])
         self.assertEqual(len(messages), 1)
-        self.assertIn("Стационарных объектов в пределах 1 км нет", messages[0].text)
+        self.assertIn("Других стационарных объектов в пределах 1 км нет", messages[0].text)
+        self.assertIn("вход в синюю зону, 5.0 км", messages[0].text)
+        self.assertEqual(messages[0].nearest_static_index, 1)
         self.assertIsNone(messages[0].screenshot)
+
+    def test_alert_beyond_display_radius_names_triggering_zone_and_point(self) -> None:
+        payload = settings().to_dict()
+        payload["max_display_distance_km"] = 150
+        scene = snapshot("blue")
+        scene.rows[0].distance = 500
+        scene.rows[1].distance = 600
+        messages = MaxAlertEngine().collect(scene, validate_settings(from_dict(payload)), [])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("Пост 1", messages[0].text)
+        self.assertIn("вход в синюю зону, 500.0 км", messages[0].text)
+        self.assertIn("Других стационарных объектов в пределах 150 км нет", messages[0].text)
+        self.assertEqual(messages[0].nearest_static_index, 1)
 
     def test_alert_rule_does_not_hide_other_nearby_statics(self) -> None:
         payload = settings().to_dict()

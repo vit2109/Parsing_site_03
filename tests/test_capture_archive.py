@@ -26,6 +26,50 @@ class FakeSession:
 
 
 class CaptureArchiveTest(unittest.TestCase):
+    def test_tracked_tab_is_clicked_before_every_map_scan(self) -> None:
+        events: list[str] = []
+
+        class Tab:
+            first: Tab
+
+            def __init__(self) -> None:
+                self.first = self
+
+            def count(self) -> int:
+                return 1
+
+            def click(self, *, timeout: int) -> None:
+                self_test.assertEqual(timeout, 10_000)
+                events.append("click")
+
+        class Page:
+            url = "https://example.test/map"
+
+            def title(self) -> str:
+                return "Карта"
+
+            def get_by_role(self, role: str, *, name: object) -> Tab:
+                self_test.assertEqual(role, "tab")
+                self_test.assertIsNotNone(name.search("5 сопровождается"))
+                return Tab()
+
+            def wait_for_timeout(self, milliseconds: int) -> None:
+                self_test.assertEqual(milliseconds, 1500)
+                events.append("wait")
+
+        self_test = self
+        session = BrowserSession(BrowserConfig())
+
+        def scan(*_args: object, **_kwargs: object) -> dict:
+            events.append("scan")
+            return {"scan": {}}
+
+        with patch.object(session, "_ready_page", return_value=Page()), \
+                patch("parsing_site.browser.extract_scene_with_mouse_scan", side_effect=scan):
+            session.capture_scene(TrackingConfig(scan_wait_seconds=1.5))
+            session.capture_scene(TrackingConfig(scan_wait_seconds=1.5))
+        self.assertEqual(events, ["click", "wait", "scan"] * 2)
+
     def test_each_numbered_approach_saves_a_separate_image_immediately(self) -> None:
         with TemporaryDirectory() as directory:
             settings = validate_settings(from_dict({
