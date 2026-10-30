@@ -920,6 +920,15 @@ class Database:
         return {"ts": poll["ts"], "dynamics": [dict(row) for row in dynamics],
                 "statics": [dict(row) for row in statics]}
 
+    def latest_real_map_context(self) -> dict[str, Any] | None:
+        """Координаты последнего живого опроса для автономного тренажёра."""
+        with closing(self._open_read_connection()) as read_conn:
+            row = read_conn.execute(
+                "SELECT id FROM polls WHERE data_source = 'real' "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return self.get_poll_map_context(int(row["id"])) if row else None
+
     def get_static_zone_trajectories(
         self,
         *,

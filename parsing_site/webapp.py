@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
@@ -20,6 +21,7 @@ from parsing_site.history_export import build_history_workbook
 from parsing_site.history_report import build_history_report
 from parsing_site.html_probe import analyze_html_file
 from parsing_site.settings_store import SettingsStore, from_dict, resolve_max_token
+from parsing_site.simulator import build_scenario
 from parsing_site.table_history_db import TableHistoryDatabase
 from parsing_site.worker import ParseWorker
 
@@ -103,6 +105,18 @@ class SettingsIn(BaseModel):
     static_objects: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class SimulatorIn(BaseModel):
+    count: int = Field(default=60, ge=1, le=1000)
+    area: Literal["static", "recent", "mixed", "northwest", "center", "south"] = "static"
+    distribution: Literal["balanced", "close", "wide"] = "balanced"
+    seed: int = Field(default=42, ge=0, le=999999)
+    reveal_zoom: int = Field(default=8, ge=4, le=18)
+    group_radius: float = Field(default=50, ge=1, le=500)
+    red_km: float = Field(gt=0, le=20_000)
+    yellow_km: float = Field(gt=0, le=20_000)
+    blue_km: float = Field(gt=0, le=20_000)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request) -> HTMLResponse:
     """Отдаёт основную страницу мониторинга с текущими настройками."""
@@ -118,6 +132,33 @@ def index(request: Request) -> HTMLResponse:
 def history_page(request: Request) -> HTMLResponse:
     """Отдаёт страницу фильтрации и визуализации хронологии."""
     return templates.TemplateResponse(request, "history.html", {})
+
+
+@app.get("/simulator", response_class=HTMLResponse)
+def simulator_page(request: Request) -> HTMLResponse:
+    """Отдаёт автономный стенд с картой и тестовыми сценариями."""
+    settings = store.current()
+    return templates.TemplateResponse(request, "simulator.html", {
+        "scan_mode": settings.scan_mode,
+        "group_radius": settings.scan_group_radius_km,
+        "red_km": settings.threshold,
+        "yellow_km": settings.warning_distance,
+        "blue_km": settings.blue_distance,
+    })
+
+
+@app.post("/api/simulator/generate")
+def api_simulator_generate(payload: SimulatorIn) -> dict[str, Any]:
+    """Возвращает только расчёт сценария и предпросмотр MAX; ничего не отправляет."""
+    try:
+        return build_scenario(
+            store.current(), db.latest_real_map_context(), count=payload.count,
+            area=payload.area, distribution=payload.distribution, seed=payload.seed,
+            reveal_zoom=payload.reveal_zoom, group_radius=payload.group_radius,
+            red_km=payload.red_km, yellow_km=payload.yellow_km, blue_km=payload.blue_km,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/max-logs", response_class=HTMLResponse)

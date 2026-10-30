@@ -33,6 +33,8 @@ const els = {
   pruneHistory: document.getElementById("btn-prune-history"),
   dialog: document.getElementById("settings-dialog"),
   form: document.getElementById("settings-form"),
+  settingsTabs: [...document.querySelectorAll(".settings-tab")],
+  settingsPanels: [...document.querySelectorAll(".settings-panel")],
   cancel: document.getElementById("btn-cancel"),
   formError: document.getElementById("settings-error"),
   error: document.getElementById("error-banner"),
@@ -77,6 +79,17 @@ if (els.pruneHistory) els.pruneHistory.addEventListener("click", async () => {
 });
 els.cancel.addEventListener("click", () => els.dialog.close());
 els.form.addEventListener("submit", saveSettings);
+els.settingsTabs.forEach((tab, index) => {
+  tab.addEventListener("click", () => selectSettingsTab(tab.getAttribute("aria-controls")));
+  tab.addEventListener("keydown", event => {
+    const direction = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+    if (!direction && event.key !== "Home" && event.key !== "End") return;
+    event.preventDefault();
+    const next = event.key === "Home" ? 0 : event.key === "End" ? els.settingsTabs.length - 1
+      : (index + direction + els.settingsTabs.length) % els.settingsTabs.length;
+    selectSettingsTab(els.settingsTabs[next].getAttribute("aria-controls"), true);
+  });
+});
 els.addStatic.addEventListener("click", addStaticRow);
 els.addScanZone.addEventListener("click", () => {
   scanZones = collectScanZones();
@@ -626,7 +639,20 @@ function openSettings() {
   renderStaticList();
   renderScanZones();
   showScanModeControls();
+  selectSettingsTab("panel-connection");
   els.dialog.showModal();
+}
+
+function selectSettingsTab(panelId, focus = false) {
+  els.settingsTabs.forEach(tab => {
+    const active = tab.getAttribute("aria-controls") === panelId;
+    tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+    if (active && focus) tab.focus();
+  });
+  els.settingsPanels.forEach(panel => { panel.hidden = panel.id !== panelId; });
+  const content = els.dialog.querySelector(".settings-content");
+  if (content) content.scrollTop = 0;
 }
 
 /** Получает очередное состояние сервера, историю движений и обновляет UI. */
@@ -767,7 +793,7 @@ function renderStaticList() {
     renderMaxGroups();
     return;
   }
-  els.staticList.innerHTML = staticObjects.map((item, index) => `
+  els.staticList.innerHTML = `<div class="static-row-head" aria-hidden="true"><span>Название</span><span>X / %</span><span>Y / %</span><span>Широта</span><span>Долгота</span><span></span></div>` + staticObjects.map((item, index) => `
     <div class="static-row" data-index="${index}">
       <input type="text" data-field="name" value="${escapeAttr(item.name || "")}" placeholder="Название" />
       <input type="number" step="any" data-field="x" value="${num(item.x)}" placeholder="x / % " />
@@ -881,7 +907,7 @@ function showScanModeControls() {
 }
 
 function renderScanZones() {
-  els.scanZoneList.innerHTML = scanZones.map((zone, index) => `
+  els.scanZoneList.innerHTML = (scanZones.length ? `<div class="scan-zone-head" aria-hidden="true"><span>Название</span><span>Широта</span><span>Долгота</span><span>Радиус, км</span><span></span></div>` : "") + scanZones.map((zone, index) => `
     <div class="scan-zone-row" data-index="${index}">
       <input type="text" data-field="name" value="${escapeAttr(zone.name || "")}" placeholder="Название" aria-label="Название сектора" required />
       <input type="number" data-field="lat" value="${num(zone.lat)}" min="-85" max="85" step="any" placeholder="lat" aria-label="Широта" required />
@@ -919,6 +945,14 @@ function renumberStatics() {
 async function saveSettings(event) {
   event.preventDefault();
   els.formError.hidden = true;
+  const invalid = [...els.form.elements].find(field => field.willValidate && !field.checkValidity());
+  if (invalid) {
+    const panel = invalid.closest(".settings-panel");
+    if (panel) selectSettingsTab(panel.id);
+    invalid.focus();
+    invalid.reportValidity();
+    return;
+  }
   const data = Object.fromEntries(new FormData(els.form).entries());
   data.interval_seconds = Number(data.interval_seconds);
   data.scan_wait_seconds = Number(data.scan_wait_seconds);

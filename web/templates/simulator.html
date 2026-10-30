@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Тренажёр карты — Parsing Site</title>
+  <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css" />
+  <link rel="stylesheet" href="/static/css/simulator.css?v=3" />
+</head>
+<body>
+  <main class="sim-app">
+    <header class="sim-header">
+      <div><p class="eyebrow">Parsing Site · автономное тестирование</p><h1>Тренажёр карты</h1>
+        <p>Сгенерированные объекты, маршруты обхода, зоны и текст MAX. Опрос сайта и рассылка не запускаются.</p></div>
+      <a class="sim-button sim-button--ghost" href="/">← Мониторинг</a>
+    </header>
+
+    <section class="sim-panel sim-controls" aria-label="Параметры сценария">
+      <div class="sim-controls__grid">
+        <label>Динамических объектов<input id="sim-count" type="number" min="1" max="1000" value="60" /></label>
+        <label>Район размещения<select id="sim-area">
+          <option value="static">Возле стационарных точек</option>
+          <option value="recent">Положения последнего опроса</option>
+          <option value="mixed">Смешанные районы</option>
+          <option value="northwest">Санкт-Петербург и северо-запад</option>
+          <option value="center">Москва и центр</option>
+          <option value="south">Белгород, Курск и юг</option>
+        </select></label>
+        <label>Разброс вокруг выбранных центров<select id="sim-distribution">
+          <option value="balanced">Смешанное распределение</option>
+          <option value="close">Больше рядом</option>
+          <option value="wide">Больше далеко</option>
+        </select></label>
+        <label>Режим маршрута<select id="sim-mode">
+          <option value="adaptive">Адаптивный</option>
+          <option value="static_points">По стационарным точкам</option>
+          <option value="grouped_static">По группам точек</option>
+          <option value="zones">По заданным секторам</option>
+          <option value="full_coverage">Полный охват (тест)</option>
+        </select></label>
+        <label>Радиус объединения, км<input id="sim-radius" type="number" min="1" max="500" value="{{ group_radius }}" /></label>
+        <label>Номера появляются с zoom<input id="sim-reveal" type="number" min="4" max="18" value="8" /></label>
+        <label>Пауза между шагами, сек<input id="sim-delay" type="number" min="0.2" max="5" step="0.1" value="1.5" /></label>
+        <label>Случайное зерно<input id="sim-seed" type="number" min="0" max="999999" value="42" title="Одинаковое зерно даёт те же координаты" /></label>
+        <label>Красная зона до, км<input id="sim-red-km" type="number" min="0.001" max="20000" step="any" value="{{ red_km }}" /></label>
+        <label>Жёлтая зона до, км<input id="sim-yellow-km" type="number" min="0.001" max="20000" step="any" value="{{ yellow_km }}" /></label>
+        <label>Синяя зона до, км<input id="sim-blue-km" type="number" min="0.001" max="20000" step="any" value="{{ blue_km }}" /></label>
+      </div>
+      <div class="sim-actions">
+        <button id="sim-generate" class="sim-button sim-button--primary" type="button">Сгенерировать сценарий</button>
+        <button id="sim-step" class="sim-button" type="button" disabled>Следующий переход</button>
+        <button id="sim-auto" class="sim-button" type="button" disabled>Автопроход</button>
+        <button id="sim-reset" class="sim-button" type="button" disabled>Вернуть обзор</button>
+      </div>
+      <p id="sim-error" class="sim-error" hidden></p>
+      <p id="sim-source" class="sim-note"></p>
+    </section>
+
+    <section class="sim-stats" aria-label="Итоги сценария">
+      <article><span>Всего</span><strong id="sim-total">—</strong></article>
+      <article class="is-red"><span>Красная зона</span><strong id="sim-red">—</strong></article>
+      <article class="is-yellow"><span>Жёлтая зона</span><strong id="sim-yellow">—</strong></article>
+      <article class="is-blue"><span>Синяя зона</span><strong id="sim-blue">—</strong></article>
+      <article><span>Вне зон</span><strong id="sim-outside">—</strong></article>
+      <article><span>Номеров найдено</span><strong id="sim-found">0</strong></article>
+      <article><span>Без номера</span><strong id="sim-missing">—</strong></article>
+    </section>
+
+    <div class="sim-layout">
+      <section class="sim-panel sim-map-panel">
+        <div class="sim-panel__head"><div><h2>Карта и приближения</h2><p id="sim-progress">Сгенерируйте сценарий</p></div>
+          <div class="sim-legend"><span><i class="dot red"></i> красная</span><span><i class="dot yellow"></i> жёлтая</span><span><i class="dot blue"></i> синяя</span><span><i class="dot gray"></i> вне зон</span><span><i class="dot purple"></i> сектор обхода</span></div></div>
+        <div id="sim-map" aria-label="Карта тестовых динамических и стационарных объектов"></div>
+        <p id="sim-tile-note" class="sim-tile-note" hidden>Подложка OpenStreetMap недоступна. Маркеры и зоны продолжают работать без неё.</p>
+        <p class="sim-map-hint">Номера появляются только при нужном масштабе. Перетаскивайте карту и меняйте zoom вручную либо запускайте маршрут.</p>
+      </section>
+      <aside class="sim-side">
+        <section class="sim-panel"><div class="sim-panel__head"><h2>Маршрут обхода</h2><span id="sim-route-count"></span></div>
+          <p class="sim-note">Модель переходов по выбранному режиму. Реальный опрос Chrome здесь не выполняется. В режиме «Полный охват» маршрут включает каждый объект, переходит только к ещё не найденным номерам и при необходимости повышает zoom до появления подписи. Остальные режимы ограничены 32 переходами.</p>
+          <ol id="sim-route" class="sim-route"></ol></section>
+        <section class="sim-panel"><div class="sim-panel__head"><h2>Примеры сообщений MAX</h2></div>
+          <p class="sim-note">Текст формируется действующим алгоритмом по выбранным зонам. Это только предпросмотр: сообщения и скриншоты не отправляются.</p>
+          <p id="sim-preview-source" class="sim-note"></p><div id="sim-messages" class="sim-messages"></div></section>
+      </aside>
+    </div>
+  </main>
+  <script>window.__SIM_DEFAULT_MODE__ = {{ scan_mode | tojson }};</script>
+  <script src="/static/vendor/leaflet/leaflet.js"></script>
+  <script src="/static/js/simulator.js?v=3"></script>
+</body>
+</html>

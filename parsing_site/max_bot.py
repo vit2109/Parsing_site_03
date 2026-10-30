@@ -74,6 +74,8 @@ class MaxAlertEngine:
     def collect(
         self, snapshot: TrackingSnapshot, settings: RuntimeSettings,
         screenshots: list[ScreenshotRecord],
+        *, zone_counts_override: dict[int, dict[str, int]] | None = None,
+        total_dynamics_override: int | None = None,
     ) -> list[MaxDelivery]:
         """Возвращает сообщения только для входов во внутреннюю зону."""
         today = datetime.now().astimezone().date().isoformat()
@@ -92,6 +94,8 @@ class MaxAlertEngine:
                     "alert": 0, "warning": 0, "blue": 0,
                 })
                 counts[row.status] += 1
+        if zone_counts_override is not None:
+            zone_counts = zone_counts_override
 
         def static_label(row: DistanceRow) -> str:
             counts = zone_counts.get(row.static_index, {})
@@ -141,7 +145,7 @@ class MaxAlertEngine:
                 object_name = dynamic.object_type if dynamic and dynamic.object_type else all_distances[0].dynamic_name
                 entered_ids = {item.static_index for item in triggered}
                 lines = [
-                    f"Всего динамических объектов: {len(snapshot.dynamics)}.",
+                    f"Всего динамических объектов: {total_dynamics_override if total_dynamics_override is not None else len(snapshot.dynamics)}.",
                     f"Объект {label} ({object_name}) вошёл в зоны следующих стационарных объектов:",
                     *(
                         f"★ «{static_label(item)}» — вход в {ZONE_NAME[item.status]} зону, "

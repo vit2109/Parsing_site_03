@@ -31,6 +31,7 @@ hiddenimports = [
     "parsing_site.processor",
     "parsing_site.runner",
     "parsing_site.settings_store",
+    "parsing_site.simulator",
     "parsing_site.sound",
     "parsing_site.table_history_db",
     "parsing_site.table_view",

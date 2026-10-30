@@ -5,7 +5,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Мониторинг объектов</title>
-    <link rel="stylesheet" href="/static/css/app.css?v=9" />
+    <link rel="stylesheet" href="/static/css/app.css?v=10" />
   </head>
   <body>
     <div class="app">
@@ -21,6 +21,7 @@
         <div class="topbar__actions">
           <a class="btn btn-history" href="/history">Хронология</a>
           <a class="btn btn-history" href="/max-logs">Журнал MAX</a>
+          <a class="btn btn-history" href="/simulator" target="_blank" rel="noopener">Тренажёр карты</a>
           <button id="btn-start" class="btn btn-primary" type="button">Запустить</button>
           <button id="btn-stop" class="btn" type="button" disabled>Стоп</button>
           <button id="btn-test-html" class="btn" type="button">Тест HTML</button>
@@ -107,12 +108,22 @@
     </div>
 
     <dialog id="settings-dialog">
-      <form id="settings-form" method="dialog">
-        <header>
+      <form id="settings-form" method="dialog" novalidate>
+        <header class="settings-header">
           <h2>Настройки</h2>
-          <p>Основные параметры опроса и подсветки</p>
+          <p>Выберите раздел, измените параметры и сохраните настройки один раз.</p>
         </header>
-        <div class="form-grid">
+        <nav class="settings-tabs" role="tablist" aria-label="Разделы настроек">
+          <button class="settings-tab" type="button" role="tab" id="tab-connection" aria-controls="panel-connection" aria-selected="true">Подключение</button>
+          <button class="settings-tab" type="button" role="tab" id="tab-scan" aria-controls="panel-scan" aria-selected="false" tabindex="-1">Обход карты</button>
+          <button class="settings-tab" type="button" role="tab" id="tab-archive" aria-controls="panel-archive" aria-selected="false" tabindex="-1">Снимки и HTML</button>
+          <button class="settings-tab" type="button" role="tab" id="tab-objects" aria-controls="panel-objects" aria-selected="false" tabindex="-1">Объекты и зоны</button>
+          <button class="settings-tab" type="button" role="tab" id="tab-max" aria-controls="panel-max" aria-selected="false" tabindex="-1">Оповещения MAX</button>
+        </nav>
+        <div class="settings-content">
+        <section class="settings-panel" id="panel-connection" role="tabpanel" aria-labelledby="tab-connection">
+          <div class="settings-panel__intro"><h3>Подключение и чтение карты</h3><p>Адрес сайта, селекторы и формат координат для таблицы и хронологии.</p></div>
+          <div class="form-grid">
           <label>
             Сайт для парсинга
             <input name="site" type="text" required value="{{ settings.site }}" />
@@ -146,6 +157,11 @@
             Время парсинга, сек
             <input name="interval_seconds" type="number" min="0.4" step="0.1" required value="{{ settings.interval_seconds }}" />
           </label>
+          </div>
+        </section>
+        <section class="settings-panel" id="panel-scan" role="tabpanel" aria-labelledby="tab-scan" hidden>
+          <div class="settings-panel__intro"><h3>Обход карты и поиск номеров</h3><p>Обзорный масштаб подгружает маркеры, затем программа приближается к группам и ждёт появления номеров.</p></div>
+          <div class="form-grid">
           <label>
             Ожидание на каждой точке карты, сек
             <input name="scan_wait_seconds" type="number" min="0.2" max="10" step="0.1" required value="{{ settings.scan_wait_seconds }}" />
@@ -175,6 +191,12 @@
             <p class="muted static-hint">В режиме секторов укажите центр lat/lng и радиус. Объекты вне секторов не участвуют в поиске номеров.</p>
             <div id="scan-zone-list" class="static-list"></div>
           </div>
+          </div>
+        </section>
+        <section class="settings-panel" id="panel-archive" role="tabpanel" aria-labelledby="tab-archive" hidden>
+          <div class="settings-panel__intro"><h3>Снимки и архив HTML</h3><p>Сохранение выполняется во время обхода, когда на карте появились номера объектов.</p></div>
+          <div class="form-grid">
+          <h4 class="settings-subheading">Снимки карты</h4>
           <label class="checkbox">
             <input name="screenshot_enabled" type="checkbox" {% if settings.screenshot_enabled %}checked{% endif %} />
             Сохранять снимок при каждом приближении с видимыми номерами
@@ -199,6 +221,7 @@
             Максимальная высота снимка, px
             <input name="screenshot_height" type="number" min="240" max="2160" step="1" value="{{ settings.screenshot_height }}" />
           </label>
+          <h4 class="settings-subheading">Архив HTML</h4>
           <label class="checkbox">
             <input name="archive_html_enabled" type="checkbox" {% if settings.archive_html_enabled %}checked{% endif %} />
             Сохранять HTML при каждом обходе, когда видны номера
@@ -215,6 +238,11 @@
               {% endfor %}
             </select>
           </label>
+          </div>
+        </section>
+        <section class="settings-panel" id="panel-objects" role="tabpanel" aria-labelledby="tab-objects" hidden>
+          <div class="settings-panel__intro"><h3>Стационарные объекты и зоны</h3><p>Пороги расстояний определяют цвет объектов в таблице и зоны оповещений.</p></div>
+          <div class="form-grid">
           <label>
             Красный порог (км в latlng, иначе px)
             <input name="threshold" type="number" min="0.001" step="0.1" required value="{{ settings.threshold }}" />
@@ -239,19 +267,19 @@
             Цвет красного выделения
             <input name="alert_color" type="color" required value="{{ settings.alert_color }}" />
           </label>
-                    <label>
-                      Цвет жёлтого выделения
-                      <input name="warning_color" type="color" required value="{{ settings.warning_color }}" />
-                    </label>
-                    <label>
-                      Цвет синего выделения
-                      <input name="blue_color" type="color" required value="{{ settings.blue_color }}" />
-                    </label>
-                    <label class="checkbox">
-                      <input name="sound_enabled" type="checkbox" />
-                      Включать звуковой сигнал при появлении красных записей
-                    </label>
-                  </div>
+          <label>
+            Цвет жёлтого выделения
+            <input name="warning_color" type="color" required value="{{ settings.warning_color }}" />
+          </label>
+          <label>
+            Цвет синего выделения
+            <input name="blue_color" type="color" required value="{{ settings.blue_color }}" />
+          </label>
+          <label class="checkbox">
+            <input name="sound_enabled" type="checkbox" />
+            Включать звуковой сигнал при появлении красных записей
+          </label>
+          </div>
         <div class="static-block">
           <div class="static-block__head">
             <h3>Статичные объекты (вручную)</h3>
@@ -264,9 +292,12 @@
           </p>
           <div id="static-list" class="static-list"></div>
         </div>
+        </section>
+        <section class="settings-panel" id="panel-max" role="tabpanel" aria-labelledby="tab-max" hidden>
+          <div class="settings-panel__intro"><h3>Оповещения в MAX</h3><p>Настройте получателей, стационарные объекты и зоны, при входе в которые отправлять сообщение.</p></div>
         <div class="static-block max-block">
           <div class="static-block__head">
-            <h3>Оповещения в MAX</h3>
+            <h3>Получатели и правила</h3>
             <button type="button" class="btn" id="btn-add-max-recipient">+ Группа получателей</button>
           </div>
           <label class="checkbox">
@@ -285,6 +316,8 @@
           <label class="checkbox"><input name="max_token_clear" type="checkbox" /> Удалить токен из настроек (.env останется)</label>
           <div id="max-recipient-list"></div>
         </div>
+        </section>
+        </div>
         <p id="settings-error" class="form-error" hidden></p>
         <footer>
           <button value="cancel" class="btn" type="button" id="btn-cancel">Отмена</button>
@@ -296,6 +329,6 @@
     <script>
       window.__INITIAL_SETTINGS__ = {{ settings | tojson }};
     </script>
-    <script src="/static/js/app.js?v=13"></script>
+    <script src="/static/js/app.js?v=14"></script>
   </body>
 </html>
