@@ -9,7 +9,14 @@ from unittest.mock import patch
 
 from bs4 import BeautifulSoup
 
-from parsing_site.config import ScanZoneConfig, StaticObjectConfig, TrackingConfig
+from parsing_site.browser import BrowserSession
+from parsing_site.capture_archive import CaptureArchive
+from parsing_site.config import (
+    BrowserConfig,
+    ScanZoneConfig,
+    StaticObjectConfig,
+    TrackingConfig,
+)
 from parsing_site.coordinates import (
     MapView,
     container_to_latlng,
@@ -23,7 +30,9 @@ from parsing_site.html_probe import (
     _number_at_marker,
     extract_scene_from_html,
 )
+from parsing_site.max_bot import MaxAlertEngine
 from parsing_site.scan_routes import group_static_points
+from parsing_site.settings_store import from_dict
 from parsing_site.tracking import (
     _EXTRACT_SCRIPT,
     _merge_numbered_scene,
@@ -36,6 +45,48 @@ from parsing_site.tracking import (
 
 
 class LeafletScanTest(unittest.TestCase):
+    def test_max_pair_capture_uses_mouse_when_leaflet_instance_is_hidden(self) -> None:
+        page = _FakePage(zoom=4)
+        page.mouse = _FakeDragMouse(page)
+        page.evaluate = lambda script, *_args: [101] if "querySelectorAll" in script \
+            and page.zoom >= 8 else None
+        session = BrowserSession(BrowserConfig())
+        with tempfile.TemporaryDirectory() as directory:
+            archive = CaptureArchive(from_dict({
+                "screenshot_enabled": True, "screenshot_dir": directory,
+            }))
+            session.prepare_numbered_capture((900, 600), on_capture=archive.save)
+            static = (50, 42.2)  # около 157 км от динамического объекта
+            with patch.object(session, "_find_page", return_value=page), \
+                    patch.object(session, "capture_map_image", return_value=b"jpeg"), \
+                    patch("parsing_site.browser.extract_scene_from_page",
+                          side_effect=lambda _p, _t, **_kw: page.scene()), \
+                    patch("parsing_site.tracking.extract_scene_from_page",
+                          side_effect=lambda _p, _t, **_kw: page.scene()):
+                self.assertTrue(session.capture_pair_view(
+                    101, (50, 40), static, TrackingConfig(scan_max_zoom=8),
+                ))
+            self.assertEqual(len(archive.screenshots), 1)
+            self.assertEqual(
+                MaxAlertEngine.select_screenshot(
+                    101, static, (static,), archive.screenshots,
+                    archive.screenshots[0].captured_at,
+                ), archive.screenshots[0].path,
+            )
+        self.assertEqual(page.zoom, 4)
+        self.assertAlmostEqual(page.center_lng, 40, places=3)
+        page.evaluate = lambda _script, *_args: None
+        with patch.object(session, "_find_page", return_value=page), \
+                patch("parsing_site.browser.extract_scene_from_page",
+                      side_effect=lambda _p, _t, **_kw: page.scene()), \
+                patch("parsing_site.tracking.extract_scene_from_page",
+                      side_effect=lambda _p, _t, **_kw: page.scene()):
+            self.assertFalse(session.capture_pair_view(
+                101, (50, 40), (50, 42.2), TrackingConfig(scan_max_zoom=8),
+            ))
+        self.assertEqual(page.zoom, 4)
+        self.assertAlmostEqual(page.center_lng, 40, places=3)
+
     def test_scan_merges_latest_visible_position_and_distance(self) -> None:
         view = MapView(width=800, height=600, zoom=8, center_lat=50, center_lng=40)
         proxy_x, proxy_y = project_3857(50, 40, 8)

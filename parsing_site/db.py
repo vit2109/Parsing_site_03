@@ -24,6 +24,7 @@ class Database:
     def __init__(self, path: Path | None = None) -> None:
         """Открывает БД, создаёт схему и пытается спасти данные при повреждении."""
         self.path = path or DEFAULT_DB_PATH
+        self.was_created = not self.path.exists()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self.recovery_notice: str | None = None

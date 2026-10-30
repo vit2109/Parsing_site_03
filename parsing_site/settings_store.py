@@ -7,15 +7,24 @@ import os
 import re
 from dataclasses import asdict, dataclass, field, replace
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
-from parsing_site.config import ROOT, AppConfig, ScanZoneConfig, StaticObjectConfig, load_config
+from parsing_site.config import (
+    ROOT,
+    AppConfig,
+    ScanZoneConfig,
+    StaticObjectConfig,
+    load_config,
+)
 from parsing_site.coordinates import normalize_mode
 from parsing_site.db import Database
 
 _HEX = re.compile(r"^#([0-9a-fA-F]{6})$")
 COORD_MODES = {"screen", "map_relative", "percent", "latlng"}
 MAX_ZONES = {"blue", "warning", "alert"}
+SETTINGS_EXPORT_NAME = "settings.json"
+SETTINGS_EXPORT_FORMAT = "parsing-site-settings"
 
 
 @lru_cache(maxsize=1)
@@ -163,15 +172,28 @@ class SettingsStore:
 
     KEY = "runtime"
 
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, bootstrap_path: Path | None = None) -> None:
         """Связывает хранилище настроек с открытой основной БД."""
         self._db = db
+        self._bootstrap_path = bootstrap_path or ROOT / SETTINGS_EXPORT_NAME
 
     def ensure_defaults(self, base: AppConfig | None = None) -> RuntimeSettings:
         """Возвращает настройки или впервые сохраняет значения из TOML."""
         current = self.load()
         if current is not None:
             return current
+        if self._db.was_created and self._bootstrap_path.is_file():
+            try:
+                payload = json.loads(self._bootstrap_path.read_text(encoding="utf-8-sig"))
+                if not isinstance(payload, dict) or payload.get("format") != SETTINGS_EXPORT_FORMAT \
+                        or payload.get("version") != 1 or not isinstance(payload.get("settings"), dict):
+                    raise ValueError("неверный формат или версия файла")
+                settings = self.save(from_dict(payload["settings"]))
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                self._db.add_log("ERROR", "settings", f"Не удалось загрузить {self._bootstrap_path.name}: {exc}")
+            else:
+                self._db.add_log("INFO", "settings", f"Первичные настройки загружены из {self._bootstrap_path.name}")
+                return settings
         settings = from_app_config(base or load_config())
         self.save(settings)
         return settings

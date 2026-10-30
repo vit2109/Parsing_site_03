@@ -11,8 +11,18 @@ from typing import TYPE_CHECKING, Self
 
 from parsing_site.cdp_check import cdp_endpoint_ok, format_cdp_help
 from parsing_site.config import BrowserConfig, TrackingConfig
-from parsing_site.coordinates import MapView, latlng_to_container, map_view_from_raw
-from parsing_site.tracking import extract_scene_with_mouse_scan
+from parsing_site.coordinates import (
+    MapView,
+    latlng_to_container,
+    map_view_from_raw,
+    project_3857,
+    unproject_3857,
+)
+from parsing_site.tracking import (
+    _pan_mouse_to,
+    extract_scene_from_page,
+    extract_scene_with_mouse_scan,
+)
 
 if TYPE_CHECKING:
     from playwright.sync_api import Browser, Page, Playwright
@@ -282,7 +292,7 @@ class BrowserSession:
             self.numbered_capture_error = str(exc)
             return False
         if not isinstance(original, dict):
-            return False
+            return self._capture_pair_with_mouse(page, number, dynamic, static, tracking)
         try:
             page.evaluate("""points => {
               window.__parsingSiteMap.fitBounds(
@@ -310,6 +320,85 @@ class BrowserSession:
                 )""", original)
                 page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
             except Exception as exc:  # noqa: BLE001 — восстановление карты важно для опроса.
+                self.numbered_capture_error = f"Не удалось восстановить карту: {exc}"
+        return False
+
+    def _capture_pair_with_mouse(
+        self, page: Page, number: int, dynamic: tuple[float, float],
+        static: tuple[float, float], tracking: TrackingConfig,
+    ) -> bool:
+        """Снимает общую область через proxy3857, когда экземпляр Leaflet скрыт."""
+        if not callable(getattr(page.mouse, "down", None)):
+            return False
+        original = extract_scene_from_page(page, tracking, scan_numbers=False)
+        original_view = map_view_from_raw(original.get("map"))
+        if original_view is None or not original_view.can_unproject \
+                or original_view.zoom is None or original_view.center_lat is None \
+                or original_view.center_lng is None:
+            return False
+        current = original
+        wait_ms = round(tracking.scan_wait_seconds * 1000)
+        target = None
+        for zoom in range(min(18, tracking.scan_max_zoom), 3, -1):
+            first = project_3857(*dynamic, zoom)
+            second = project_3857(*static, zoom)
+            if abs(first[0] - second[0]) <= original_view.width - 96 \
+                    and abs(first[1] - second[1]) <= original_view.height - 96:
+                target = (zoom, unproject_3857(
+                    (first[0] + second[0]) / 2, (first[1] + second[1]) / 2, zoom,
+                ))
+                break
+        if target is None:
+            return False
+        try:
+            current = _pan_mouse_to(page, tracking, current, *target[1], max_gestures=12)
+            for _ in range(16):
+                view = map_view_from_raw(current.get("map"))
+                if view is None or view.zoom is None or abs(view.zoom - target[0]) < 0.01:
+                    break
+                direction = -120 if view.zoom < target[0] else 120
+                map_raw = current["map"]
+                page.mouse.move(float(map_raw.get("left") or 0) + view.width / 2,
+                                float(map_raw.get("top") or 0) + view.height / 2)
+                page.mouse.wheel(0, direction)
+                page.wait_for_timeout(wait_ms)
+                candidate = extract_scene_from_page(page, tracking, scan_numbers=False)
+                next_view = map_view_from_raw(candidate.get("map"))
+                if next_view is None or next_view.zoom == view.zoom:
+                    break
+                current = candidate
+            for _ in range(2):
+                view = map_view_from_raw(current.get("map"))
+                dynamic_px = latlng_to_container(*dynamic, view) if view else None
+                if view and dynamic_px and 24 <= dynamic_px[0] <= view.width - 24 \
+                        and 24 <= dynamic_px[1] <= view.height - 24 \
+                        and self._capture_visible_view(
+                            page, tracking.map_container_selector, float(view.zoom),
+                            fallback_view=view, required_number=number, required_point=static,
+                        ):
+                    return True
+                page.wait_for_timeout(wait_ms)
+                current = extract_scene_from_page(page, tracking, scan_numbers=False)
+        except Exception as exc:  # noqa: BLE001 — сообщение MAX отправится без фото.
+            self.numbered_capture_error = str(exc)
+        finally:
+            try:
+                for _ in range(16):
+                    view = map_view_from_raw(current.get("map"))
+                    if view is None or view.zoom is None \
+                            or abs(view.zoom - original_view.zoom) < 0.01:
+                        break
+                    map_raw = current["map"]
+                    page.mouse.move(float(map_raw.get("left") or 0) + view.width / 2,
+                                    float(map_raw.get("top") or 0) + view.height / 2)
+                    page.mouse.wheel(0, 120 if view.zoom > original_view.zoom else -120)
+                    page.wait_for_timeout(wait_ms)
+                    current = extract_scene_from_page(page, tracking, scan_numbers=False)
+                _pan_mouse_to(
+                    page, tracking, current, original_view.center_lat,
+                    original_view.center_lng, max_gestures=12,
+                )
+            except Exception as exc:  # noqa: BLE001 — фиксируем ошибку восстановления.
                 self.numbered_capture_error = f"Не удалось восстановить карту: {exc}"
         return False
 

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
@@ -20,7 +20,13 @@ from parsing_site.history_capture import capture_history_maps
 from parsing_site.history_export import build_history_workbook
 from parsing_site.history_report import build_history_report
 from parsing_site.html_probe import analyze_html_file
-from parsing_site.settings_store import SettingsStore, from_dict, resolve_max_token
+from parsing_site.settings_store import (
+    SETTINGS_EXPORT_FORMAT,
+    SETTINGS_EXPORT_NAME,
+    SettingsStore,
+    from_dict,
+    resolve_max_token,
+)
 from parsing_site.simulator import build_scenario
 from parsing_site.table_history_db import TableHistoryDatabase
 from parsing_site.worker import ParseWorker
@@ -195,6 +201,25 @@ def api_state() -> dict[str, Any]:
 def api_get_settings() -> dict[str, Any]:
     """Возвращает сохранённые runtime-настройки."""
     return store.current().public_dict()
+
+
+@app.get("/api/settings/export.json")
+def api_export_settings() -> Response:
+    """Скачивает полный переносимый набор настроек для первой установки."""
+    settings = store.current()
+    exported = settings.to_dict()
+    exported["max_token"] = resolve_max_token(settings)
+    payload = {
+        "format": SETTINGS_EXPORT_FORMAT,
+        "version": 1,
+        "settings": exported,
+    }
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        media_type="application/json; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{SETTINGS_EXPORT_NAME}"',
+                 "Cache-Control": "no-store"},
+    )
 
 
 @app.put("/api/settings")

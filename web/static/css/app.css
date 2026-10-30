@@ -269,11 +269,14 @@ input[type="color"] { height: 42px; padding: 4px; }
 
 dialog footer {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
   padding: 14px 20px 18px;
   border-top: 1px solid var(--line);
 }
+
+#btn-export-settings { margin-right: auto; text-decoration: none; }
 
 .form-error { margin: 0 20px 12px; color: #ffb4b4; font-size: 13px; }
 
