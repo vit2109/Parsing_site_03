@@ -25,12 +25,48 @@ from parsing_site.html_probe import (
 )
 from parsing_site.scan_routes import group_static_points
 from parsing_site.tracking import (
-    _EXTRACT_SCRIPT, _scan_group_center, _scan_target_groups,
-    extract_scene_from_page, extract_scene_with_mouse_scan,
+    _EXTRACT_SCRIPT,
+    _merge_numbered_scene,
+    _merge_overview_scene,
+    _scan_group_center,
+    _scan_target_groups,
+    extract_scene_from_page,
+    extract_scene_with_mouse_scan,
 )
 
 
 class LeafletScanTest(unittest.TestCase):
+    def test_scan_merges_latest_visible_position_and_distance(self) -> None:
+        view = MapView(width=800, height=600, zoom=8, center_lat=50, center_lng=40)
+        proxy_x, proxy_y = project_3857(50, 40, 8)
+        map_raw = {
+            "width": 800, "height": 600, "zoom": 8,
+            "geo_source": "proxy3857",
+            "proxy": {"x": proxy_x, "y": proxy_y},
+            "center": {"lat": 50, "lng": 40},
+        }
+        old_x, old_y = latlng_to_container(50, 40, view)
+        overview = {
+            "coordinate_mode": "latlng", "map": map_raw,
+            "dynamics": [{"fallback_id": -1, "index": -1, "lat": 50, "lng": 40,
+                          "x": old_x, "y": old_y, "object_type": "БПЛА"}],
+        }
+        new_x, new_y = latlng_to_container(50, 40.1, view)
+        detailed = {
+            "map": map_raw, "map_zoom": 8,
+            "dynamics": [{"fallback_id": -1, "index": 101, "lat": 50,
+                          "lng": 40.1, "x": new_x, "y": new_y,
+                          "object_type": "БПЛА"}],
+        }
+        _merge_overview_scene(overview, detailed, view)
+        self.assertEqual(overview["dynamics"][0]["index"], 101)
+        self.assertAlmostEqual(overview["dynamics"][0]["lng"], 40.1)
+        self.assertAlmostEqual(overview["dynamics"][0]["x"], new_x, places=1)
+        overview["dynamics"][0]["index"] = -1
+        _merge_numbered_scene(overview, detailed, set())
+        self.assertEqual(overview["dynamics"][0]["index"], 101)
+        self.assertAlmostEqual(overview["dynamics"][0]["lng"], 40.1)
+
     def test_static_group_centers_obey_radius_without_chain_expansion(self) -> None:
         points = [
             StaticObjectConfig(index, str(index), 0, 0, 50, lng)

@@ -418,7 +418,19 @@ async (opts) => {
     };
   });
 
-  const dynamics = collect(opts.dynamic, "D", true);
+  const visibleOnMap = (item) => {
+    if (!mapRect) return true;
+    if (Number.isFinite(item.lat) && Number.isFinite(item.lng)) {
+      const point = latLngToContainer(item.lat, item.lng);
+      return point && point.x >= 0 && point.x <= mapRect.width &&
+        point.y >= 0 && point.y <= mapRect.height;
+    }
+    const x = mode === "screen" ? item.x - mapRect.left : item.x;
+    const y = mode === "screen" ? item.y - mapRect.top : item.y;
+    return Number.isFinite(x) && Number.isFinite(y) &&
+      x >= 0 && x <= mapRect.width && y >= 0 && y <= mapRect.height;
+  };
+  const dynamics = collect(opts.dynamic, "D", true).filter(visibleOnMap);
   const statics = collect(opts.static, "S");
   const usedNumbers = new Set(dynamics.filter((item) => item.index > 0).map((item) => item.index));
   const applyKnownNumber = (item) => {
@@ -451,9 +463,9 @@ async (opts) => {
     const scanTimeLimitMs = 75000;
     const canExplore = () => scan.views < scanMoveLimit &&
       Date.now() - scanStarted < scanTimeLimitMs;
-    const staticPoints = opts.mode === "latlng" ? (opts.staticObjects || [])
+    const staticPoints = (opts.staticObjects || [])
       .filter((item) => Number.isFinite(item.lat) && Number.isFinite(item.lng) &&
-        Math.abs(item.lat) <= 85.0511287798 && Math.abs(item.lng) <= 180) : [];
+        Math.abs(item.lat) <= 85.0511287798 && Math.abs(item.lng) <= 180);
     const scanMode = ["adaptive", "static_points", "grouped_static", "zones"].includes(opts.scanMode)
       ? opts.scanMode : "adaptive";
     const groupedRoute = scanMode === "grouped_static" ? (opts.scanRoutePoints || [])
@@ -548,7 +560,8 @@ async (opts) => {
       return recordNumberedView(captureView);
     };
     const matchVisible = () => {
-      const visible = collect(opts.dynamic, "D", true).filter((item) => item.index > 0);
+      const visible = collect(opts.dynamic, "D", true).filter((item) =>
+        item.index > 0 && visibleOnMap(item));
       const unresolvedById = new Map(dynamics.filter((item) => item.index < 0)
         .map((item) => [item.fallback_id, item]));
       let matched = 0;
@@ -574,6 +587,8 @@ async (opts) => {
         }
         if (best) {
           best.candidate.index = item.index;
+          best.candidate.lat = item.lat;
+          best.candidate.lng = item.lng;
           usedNumbers.add(item.index);
           matched++;
         }
@@ -586,7 +601,7 @@ async (opts) => {
         let added = 0;
         for (const item of visible) {
           if (!Number.isFinite(item.lat) || !Number.isFinite(item.lng) ||
-              !inStaticArea(item.lat, item.lng)) continue;
+              !visibleOnMap(item) || !inStaticArea(item.lat, item.lng)) continue;
           const existing = byIdentity.get(item.fallback_id);
           if (!existing) {
             applyKnownNumber(item);
@@ -594,9 +609,13 @@ async (opts) => {
             byIdentity.set(item.fallback_id, item);
             added++;
           }
-          else if (existing.index < 0 && item.index > 0 && !usedNumbers.has(item.index)) {
-            existing.index = item.index;
-            usedNumbers.add(item.index);
+          else {
+            existing.lat = item.lat;
+            existing.lng = item.lng;
+            if (existing.index < 0 && item.index > 0 && !usedNumbers.has(item.index)) {
+              existing.index = item.index;
+              usedNumbers.add(item.index);
+            }
           }
         }
         return added;
@@ -631,7 +650,7 @@ async (opts) => {
           await moveTo(center.lat, center.lng, overviewZoom);
           rememberVisible();
         }
-      } else {
+      } else if (scanMode === "adaptive") {
         // Без географических координат статичных точек сохраняем локальный
         // обзор, но ограничиваем число перемещений и время обхода.
         const centers = new Map();
@@ -655,7 +674,7 @@ async (opts) => {
               Math.abs(center.lat) > 85.0511287798 || Math.abs(center.lng) > 180) continue;
           seen.add(key);
           if (col || row) await moveTo(center.lat, center.lng, overviewZoom);
-          const visible = collect(opts.dynamic, "D", true);
+          const visible = collect(opts.dynamic, "D", true).filter(visibleOnMap);
           const added = rememberVisible(visible);
           if ((col || row) && !added) continue;
           const edges = new Set();
@@ -813,15 +832,20 @@ async (opts) => {
           }
           if (!canExplore()) break;
           const numberedAtMove = await moveTo(center.lat, center.lng, visitZoom, true);
-          const visibleIncidents = collect(opts.dynamic, "D", true).filter((item) =>
-            Number.isFinite(item.lat) && Number.isFinite(item.lng) &&
+          const readVisibleIncidents = () => collect(opts.dynamic, "D", true).filter((item) =>
+            visibleOnMap(item) && Number.isFinite(item.lat) && Number.isFinite(item.lng) &&
             inStaticArea(item.lat, item.lng));
+          let visibleIncidents = readVisibleIncidents();
+          if (!visibleIncidents.length && canExplore()) {
+            await new Promise((resolve) => setTimeout(resolve, scanWaitMs));
+            visibleIncidents = readVisibleIncidents();
+          }
           if (!visibleIncidents.length) {
             remaining.forEach((item) => attemptedAtFinal.add(item.fallback_id));
             continue;
           }
           const matched = matchVisible();
-          if (!matched && canExplore()) {
+          if (remaining.some((item) => item.index < 0) && canExplore()) {
             await new Promise((resolve) => setTimeout(resolve, scanWaitMs));
             if (!numberedAtMove) recordNumberedView(true);
             matchVisible();
@@ -1141,8 +1165,7 @@ def extract_scene_with_mouse_scan(
         return raw
     static_points = [
         (item.lat, item.lng) for item in tracking.static_objects
-        if tracking.coordinate_mode == "latlng"
-        and item.lat is not None and item.lng is not None
+        if item.lat is not None and item.lng is not None
     ]
     scan_zones = tracking.scan_zones if tracking.scan_mode == "zones" else []
     scan["mode"] = tracking.scan_mode
@@ -1185,6 +1208,17 @@ def extract_scene_with_mouse_scan(
         raw["scan"] = scan
         _apply_number_cache(raw, number_cache)
         return raw
+    raw["dynamics"] = [
+        item for item in raw.get("dynamics") or []
+        if (lat := _maybe_float(item.get("lat"))) is not None
+        and (lng := _maybe_float(item.get("lng"))) is not None
+        and (point := latlng_to_container(lat, lng, base_view)) is not None
+        and 0 <= point[0] <= base_view.width
+        and 0 <= point[1] <= base_view.height
+    ]
+    raw["unnumbered_dynamics"] = sum(
+        item["index"] < 0 for item in raw["dynamics"]
+    )
     scan_zoom_ceiling = tracking.scan_max_zoom
     original_lat = base_view.center_lat
     original_lng = base_view.center_lng
@@ -1245,7 +1279,8 @@ def extract_scene_with_mouse_scan(
                 if tracking.scan_mode == "zones" else static_points
                 if tracking.scan_mode == "static_points" else
                 [(group.lat, group.lng) for group in grouped_route]
-                if tracking.scan_mode == "grouped_static" else []
+                if tracking.scan_mode == "grouped_static" else static_points
+                if tracking.scan_mode == "adaptive" else []
             )
             for lat, lng in route_points:
                 if overview_views >= 32 or monotonic() >= scan_deadline:
@@ -1617,6 +1652,7 @@ def _merge_overview_scene(
     known = {item.get("fallback_id"): item for item in items}
     used_numbers = {item["index"] for item in items if item.get("index", 0) > 0}
     map_raw = overview.get("map") or {}
+    detailed_view = map_view_from_raw(detailed.get("map"))
     mode = overview.get("coordinate_mode") or "latlng"
     added = 0
     for item in detailed.get("dynamics") or []:
@@ -1626,8 +1662,24 @@ def _merge_overview_scene(
         if identity is None or lat is None or lng is None \
                 or (in_area is not None and not in_area(lat, lng)):
             continue
+        if detailed_view is not None:
+            visible = latlng_to_container(lat, lng, detailed_view)
+            if visible is None or not (0 <= visible[0] <= detailed_view.width
+                                       and 0 <= visible[1] <= detailed_view.height):
+                continue
         existing = known.get(identity)
         if existing is not None:
+            existing["lat"], existing["lng"] = lat, lng
+            point = latlng_to_container(lat, lng, base_view)
+            if point is not None:
+                x, y = point
+                if mode == "screen":
+                    x += float(map_raw.get("left") or 0)
+                    y += float(map_raw.get("top") or 0)
+                elif mode == "percent":
+                    x = x / base_view.width * 100
+                    y = y / base_view.height * 100
+                existing["x"], existing["y"] = round(x, 2), round(y, 2)
             if existing.get("index", 0) < 0 and item.get("index", 0) > 0 \
                     and item["index"] not in used_numbers:
                 existing["index"] = item["index"]
@@ -1690,7 +1742,23 @@ def _merge_numbered_scene(
             if distance <= 8 and (best is None or distance < best[0]):
                 best = (distance, candidate)
         if best:
-            best[1]["index"] = number
+            matched = best[1]
+            matched["index"] = number
+            matched["lat"], matched["lng"] = lat, lng
+            base_view = map_view_from_raw(overview.get("map"))
+            if base_view is not None:
+                point = latlng_to_container(lat, lng, base_view)
+                if point is not None:
+                    x, y = point
+                    mode = overview.get("coordinate_mode") or "latlng"
+                    if mode == "screen":
+                        map_raw = overview.get("map") or {}
+                        x += float(map_raw.get("left") or 0)
+                        y += float(map_raw.get("top") or 0)
+                    elif mode == "percent":
+                        x = x / base_view.width * 100
+                        y = y / base_view.height * 100
+                    matched["x"], matched["y"] = round(x, 2), round(y, 2)
             used_numbers.add(number)
 
 

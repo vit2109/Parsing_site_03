@@ -6,7 +6,8 @@ const nativeSetTimeout = global.setTimeout;
 
 async function check(initialZoom, mapDiscoverable = true, crowded = false, overlapping = false,
   sameNumber = false, denseUnique = false, bounded = false, mixedLabels = false,
-  highStart = false, scanMode = 'adaptive', clusterCase = false) {
+  highStart = false, scanMode = 'adaptive', clusterCase = false,
+  persistentDom = false, delayedLabels = false) {
   let zoomInMoves = 0;
   let zoomInWaits = 0;
   let awaitingZoomInPause = false;
@@ -14,6 +15,7 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
   let maximumVisitedZoom = initialZoom;
   let offRowMoves = 0;
   let farMoves = 0;
+  let labelReadsAtView = 0;
   const moves = [];
   global.setTimeout = (callback, delay, ...args) => {
     if (awaitingZoomInPause) {
@@ -55,6 +57,8 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     ...Array.from({length: 12}, (_, i) => ({lat: 50, lng: i * 0.5, number: 101 + i})),
     {lat: 50, lng: 12, number: 113}, // В исходном HTML и центральном обзорном окне отсутствует.
   ];
+  const domPoints = persistentDom
+    ? [...points, {lat: 65, lng: -150, number: 9999}] : points;
   const listeners = new Set();
   const map = {
     zoom: initialZoom, center: {lat: 50, lng: 0},
@@ -65,6 +69,7 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     on(_event, callback) { listeners.add(callback); },
     off(_event, callback) { listeners.delete(callback); },
     setView([lat, lng], zoom) {
+      labelReadsAtView = 0;
       moves.push([lat, lng, zoom]);
       minimumVisitedZoom = Math.min(minimumVisitedZoom, zoom);
       maximumVisitedZoom = Math.max(maximumVisitedZoom, zoom);
@@ -114,17 +119,19 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
   global.document = {
     querySelector: () => mapEl,
     querySelectorAll(selector) {
-      const visible = points.filter((point) => {
+      const visible = domPoints.filter((point) => {
         const p = map.latLngToContainerPoint([point.lat, point.lng]);
-        return p.x >= 0 && p.x <= 800 && p.y >= 0 && p.y <= 600;
+        return persistentDom || p.x >= 0 && p.x <= 800 && p.y >= 0 && p.y <= 600;
       });
       if (selector === '.leaflet-marker-icon.map-incident') return visible.map((p) => element(p, false));
-      if (selector === '.leaflet-marker-icon.map-incident-operator-number')
+      if (selector === '.leaflet-marker-icon.map-incident-operator-number') {
+        if (delayedLabels && map.zoom >= 8 && ++labelReadsAtView <= 3) return [];
         return map.zoom >= 8
           ? visible.filter((p) => !crowded || map.zoom >= 10 || p.number % 2 === 0)
               .flatMap((p) => mixedLabels && p.number === 102
                 ? [element(p, true, false, true)]
                 : [element(p, true, true), element(p, true)]) : [];
+      }
       return [];
     },
   };
@@ -249,8 +256,12 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
   await check(6, true, false, false, false, false, true); // 1000 маркеров и далёкий выброс
   await check(8, true, false, false, false, false, false, true); // подписи с разными стилями
   await check(10, true, false, false, false, false, false, false, true); // старт с сильного приближения
+  await check(6, true, false, false, false, false, false, false, false,
+    'adaptive', false, true); // DOM сохраняет маркер с другого края карты
   await check(6, true, false, false, false, false, false, false, false, 'static_points');
   await check(6, true, false, false, false, false, false, false, false, 'zones');
+  await check(6, true, false, false, false, false, false, false, false,
+    'zones', false, false, true); // подписи появляются после загрузки вида
   const plain = await check(6, true, false, false, false, false, false, false, false,
     'static_points', true);
   const grouped = await check(6, true, false, false, false, false, false, false, false,
