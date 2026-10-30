@@ -626,7 +626,8 @@ async (opts) => {
         await moveTo(originalCenter.lat, originalCenter.lng, overviewZoom);
         rememberVisible();
       }
-      const routePoints = scanMode === "zones" ? scanZones
+      const routePoints = scanMode === "adaptive" ? []
+        : scanMode === "zones" ? scanZones
         : scanMode === "grouped_static" && groupedRoute.length ? groupedRoute : staticPoints;
       if (scanMode === "grouped_static") {
         scan.static_groups = routePoints.length;
@@ -649,47 +650,6 @@ async (opts) => {
           if (!canExplore()) break;
           await moveTo(center.lat, center.lng, overviewZoom);
           rememberVisible();
-        }
-      } else if (scanMode === "adaptive") {
-        // Без географических координат статичных точек сохраняем локальный
-        // обзор, но ограничиваем число перемещений и время обхода.
-        const centers = new Map();
-        for (let row = -4; row <= 4; row++) {
-          for (let col = -4; col <= 4; col++) {
-            const center = map.containerPointToLatLng([
-              mapRect.width * (0.5 + col * 0.75),
-              mapRect.height * (0.5 + row * 0.75),
-            ]);
-            centers.set(`${col},${row}`, center);
-          }
-        }
-        const queue = [[0, 0]];
-        const seen = new Set();
-        while (queue.length && seen.size < 16 && canExplore()) {
-          const [col, row] = queue.shift();
-          const key = `${col},${row}`;
-          if (seen.has(key) || !centers.has(key)) continue;
-          const center = centers.get(key);
-          if (!center || !Number.isFinite(center.lat) || !Number.isFinite(center.lng) ||
-              Math.abs(center.lat) > 85.0511287798 || Math.abs(center.lng) > 180) continue;
-          seen.add(key);
-          if (col || row) await moveTo(center.lat, center.lng, overviewZoom);
-          const visible = collect(opts.dynamic, "D", true).filter(visibleOnMap);
-          const added = rememberVisible(visible);
-          if ((col || row) && !added) continue;
-          const edges = new Set();
-          for (const item of visible) {
-            if (!Number.isFinite(item.lat) || !Number.isFinite(item.lng)) continue;
-            const p = map.latLngToContainerPoint([item.lat, item.lng]);
-            if (!p || p.x < 0 || p.x > mapRect.width || p.y < 0 || p.y > mapRect.height) continue;
-            if (p.x < mapRect.width * 0.2) edges.add(`${col - 1},${row}`);
-            if (p.x > mapRect.width * 0.8) edges.add(`${col + 1},${row}`);
-            if (p.y < mapRect.height * 0.2) edges.add(`${col},${row - 1}`);
-            if (p.y > mapRect.height * 0.8) edges.add(`${col},${row + 1}`);
-          }
-          edges.forEach((next) => {
-            if (!seen.has(next) && centers.has(next)) queue.push(next.split(",").map(Number));
-          });
         }
       }
       dynamics.filter((item) => item.index > 0).forEach((item) => usedNumbers.add(item.index));
@@ -1279,8 +1239,7 @@ def extract_scene_with_mouse_scan(
                 if tracking.scan_mode == "zones" else static_points
                 if tracking.scan_mode == "static_points" else
                 [(group.lat, group.lng) for group in grouped_route]
-                if tracking.scan_mode == "grouped_static" else static_points
-                if tracking.scan_mode == "adaptive" else []
+                if tracking.scan_mode == "grouped_static" else []
             )
             for lat, lng in route_points:
                 if overview_views >= 32 or monotonic() >= scan_deadline:
@@ -1288,48 +1247,6 @@ def extract_scene_with_mouse_scan(
                 overview = _pan_mouse_to(page, tracking, overview, lat, lng)
                 overview_views += 1
                 _merge_overview_scene(raw, overview, base_view, in_static_area)
-            queue = [] if route_points else [(0, 0)]
-            seen: set[tuple[int, int]] = set()
-            while queue and len(seen) < 16 and overview_views < 32 \
-                    and monotonic() < scan_deadline:
-                column, row = queue.pop(0)
-                if (column, row) in seen or abs(column) > 4 or abs(row) > 4:
-                    continue
-                position = container_to_latlng(
-                    overview_view.width * (0.5 + column * 0.75),
-                    overview_view.height * (0.5 + row * 0.75),
-                    overview_view,
-                )
-                if position is None or abs(position[0]) > 85 or abs(position[1]) > 180:
-                    continue
-                if not in_static_area(*position):
-                    continue
-                seen.add((column, row))
-                if column or row:
-                    overview = _pan_mouse_to(page, tracking, overview, *position)
-                    overview_views += 1
-                added = _merge_overview_scene(raw, overview, base_view, in_static_area)
-                if (column or row) and not added:
-                    continue
-                current_view = map_view_from_raw(overview.get("map"))
-                if current_view is None:
-                    continue
-                for item in overview.get("dynamics") or []:
-                    lat = _maybe_float(item.get("lat"))
-                    lng = _maybe_float(item.get("lng"))
-                    point = latlng_to_container(lat, lng, current_view) \
-                        if lat is not None and lng is not None else None
-                    if point is None or not in_static_area(lat, lng) or not (0 <= point[0] <= current_view.width \
-                            and 0 <= point[1] <= current_view.height):
-                        continue
-                    if point[0] < current_view.width * 0.3:
-                        queue.append((column - 1, row))
-                    if point[0] > current_view.width * 0.7:
-                        queue.append((column + 1, row))
-                    if point[1] < current_view.height * 0.3:
-                        queue.append((column, row - 1))
-                    if point[1] > current_view.height * 0.7:
-                        queue.append((column, row + 1))
             overview = _pan_mouse_to(
                 page, tracking, overview, overview_view.center_lat, overview_view.center_lng,
                 max_gestures=24,

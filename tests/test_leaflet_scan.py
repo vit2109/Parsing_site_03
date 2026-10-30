@@ -229,6 +229,26 @@ class LeafletScanTest(unittest.TestCase):
         self.assertEqual(page.zoom, 5)
         self.assertAlmostEqual(page.center_lng, 40, places=3)
 
+    def test_adaptive_mouse_scan_skips_empty_remote_static_points(self) -> None:
+        page = _FakePage(zoom=7)
+        page.mouse = _FakeDragMouse(page)
+        tracking = TrackingConfig(
+            scan_mode="adaptive", scan_max_zoom=8, coordinate_mode="latlng",
+            static_objects=[
+                StaticObjectConfig(index, str(index), 0, 0, 50, float(lng))
+                for index, lng in enumerate(range(40, 120, 2), start=1)
+            ],
+        )
+        with patch(
+            "parsing_site.tracking.extract_scene_from_page",
+            side_effect=lambda _p, _t, **_kw: page.scene(),
+        ):
+            result = extract_scene_with_mouse_scan(page, tracking)
+        self.assertEqual(result["scan"]["status"], "complete")
+        self.assertEqual(len(result["dynamics"]), 3)
+        self.assertLess(result["scan"]["views"], 12)
+        self.assertAlmostEqual(page.center_lng, 40, places=3)
+
     def test_wheel_fallback_uses_configured_sector_route(self) -> None:
         page = _FakePage(offscreen=True, far=True, zoom=7)
         tracking = TrackingConfig(

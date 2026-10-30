@@ -7,7 +7,7 @@ const nativeSetTimeout = global.setTimeout;
 async function check(initialZoom, mapDiscoverable = true, crowded = false, overlapping = false,
   sameNumber = false, denseUnique = false, bounded = false, mixedLabels = false,
   highStart = false, scanMode = 'adaptive', clusterCase = false,
-  persistentDom = false, delayedLabels = false) {
+  persistentDom = false, delayedLabels = false, remoteStatics = false) {
   let zoomInMoves = 0;
   let zoomInWaits = 0;
   let awaitingZoomInPause = false;
@@ -159,7 +159,8 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
   const result = await extract({
     mode: 'latlng', mapContainer: '.leaflet-container',
     dynamic: '.leaflet-marker-icon.map-incident', static: '.static',
-    staticObjects: clusterCase ? [0, 0.2, 0.3, 0.4, 12].map(lng => ({lat: 50, lng}))
+    staticObjects: remoteStatics ? [0, 80].map(lng => ({lat: 50, lng}))
+      : clusterCase ? [0, 0.2, 0.3, 0.4, 12].map(lng => ({lat: 50, lng}))
       : bounded || scanMode === 'static_points'
       ? [{lat: 50, lng: 0}, {lat: 50, lng: 12}] : [],
     scanMode,
@@ -172,7 +173,8 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
       {lat: 50, lng: 12, radius_km: 350},
     ] : [],
     scanNumbers: true, captureNumbered: true,
-    scanMaxZoom: bounded || highStart ? 8 : 10, scanRadiusKm: 350,
+    scanMaxZoom: bounded || highStart ? 8 : 10,
+    scanRadiusKm: remoteStatics ? 2000 : 350,
   });
   if (!mapDiscoverable) {
     assert.equal(result.scan.status, 'no_leaflet_instance');
@@ -258,6 +260,8 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
   await check(10, true, false, false, false, false, false, false, true); // старт с сильного приближения
   await check(6, true, false, false, false, false, false, false, false,
     'adaptive', false, true); // DOM сохраняет маркер с другого края карты
+  await check(6, true, false, false, false, false, false, false, false,
+    'adaptive', false, false, false, true); // удалённые стационарные точки без объектов
   await check(6, true, false, false, false, false, false, false, false, 'static_points');
   await check(6, true, false, false, false, false, false, false, false, 'zones');
   await check(6, true, false, false, false, false, false, false, false,
