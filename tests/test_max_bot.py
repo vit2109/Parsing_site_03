@@ -587,6 +587,55 @@ class MaxBotTest(unittest.TestCase):
         self.assertEqual(worker._max_dispatch.submit.call_count, 10)
         self.assertEqual(worker.status["max_poll"]["prepared"], 10)
 
+    def test_worker_attempts_extra_photo_once_per_dynamic_object(self) -> None:
+        database = Mock()
+        database.save_snapshot.return_value = 1
+        store = Mock()
+        config = settings()
+        config.screenshot_enabled = True
+        store.current.return_value = config
+        worker = ParseWorker(database, store, Mock())
+        worker._max_dispatch.submit = Mock()
+        scene = snapshot("blue")
+        deliveries = [
+            MaxDelivery(111, "token", "Текст", None, dynamic_index=87,
+                        nearest_static_index=index, nearest_static=(0, float(index)))
+            for index in (1, 2)
+        ]
+
+        class Session:
+            numbered_capture_error = ""
+            numbered_html_error = ""
+
+            def __init__(self) -> None:
+                self.captures: list[tuple[float, float]] = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            def prepare_numbered_capture(self, _size, html_enabled, on_capture):
+                pass
+
+            def capture_pair_view(self, _number, _dynamic, static, _tracking):
+                self.captures.append(static)
+                return False
+
+        session = Session()
+
+        def capture(_session, _tracking):
+            worker._stop.set()
+            return scene
+
+        with patch("parsing_site.worker.BrowserSession", return_value=session), \
+                patch("parsing_site.worker.capture_snapshot", side_effect=capture), \
+                patch("parsing_site.worker.MaxAlertEngine.collect", return_value=deliveries):
+            worker._run()
+        self.assertEqual(session.captures, [(0, 1.0)])
+        self.assertEqual(worker._max_dispatch.submit.call_count, 2)
+
     def test_disabling_max_skips_waiting_notifications(self) -> None:
         config = settings()
         config.max_enabled = False

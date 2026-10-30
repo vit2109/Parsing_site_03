@@ -509,9 +509,7 @@ async (opts) => {
       configuredMaxZoom,
     ));
     const overviewZoom = Math.max(minZoom, Math.min(zoom, incidentMap ? 4 : zoom - 4));
-    const targetZoom = Math.min(
-      overviewZoom + 2, maxZoom
-    );
+    const capturedNumbers = new Set();
     const recordNumberedView = (captureView = false) => {
       if (!opts.captureNumbered) return 0;
       const numbered = collect(opts.dynamic, "D", true).filter((item) => {
@@ -529,8 +527,12 @@ async (opts) => {
         if (numbered.length > (scan.best_numbered_view?.count || 0)) {
           scan.best_numbered_view = view;
         }
-        if (captureView) {
+        const numbers = [...new Set(numbered.map((item) => item.index))];
+        if (captureView && view.zoom <= maxZoom &&
+            numbers.some((number) => !capturedNumbers.has(number))) {
+          view.numbers = numbers;
           (scan.numbered_views ||= []).push(view);
+          numbers.forEach((number) => capturedNumbers.add(number));
         }
       }
       return numbered.length;
@@ -745,8 +747,7 @@ async (opts) => {
         return ordered;
       };
       const attemptedAtFinal = new Set();
-      const levels = scanMode === "adaptive"
-        ? [...new Set([targetZoom, finalZoom])] : [finalZoom];
+      const levels = [finalZoom];
       for (const level of levels) {
         if (!canExplore()) break;
         const pending = dynamics.filter((item) => item.index < 0 &&
@@ -791,7 +792,7 @@ async (opts) => {
             await moveTo(center.lat, center.lng, overviewZoom, false, false);
           }
           if (!canExplore()) break;
-          const numberedAtMove = await moveTo(center.lat, center.lng, visitZoom, true);
+          await moveTo(center.lat, center.lng, visitZoom, true);
           const readVisibleIncidents = () => collect(opts.dynamic, "D", true).filter((item) =>
             visibleOnMap(item) && Number.isFinite(item.lat) && Number.isFinite(item.lng) &&
             inStaticArea(item.lat, item.lng));
@@ -804,15 +805,16 @@ async (opts) => {
             remaining.forEach((item) => attemptedAtFinal.add(item.fallback_id));
             continue;
           }
-          const matched = matchVisible();
+          matchVisible();
           if (remaining.some((item) => item.index < 0) && canExplore()) {
-            await new Promise((resolve) => setTimeout(resolve, scanWaitMs));
-            if (!numberedAtMove) recordNumberedView(true);
-            matchVisible();
+            for (let retry = 0; retry < 3 && canExplore() &&
+                 remaining.some((item) => item.index < 0); retry++) {
+              await new Promise((resolve) => setTimeout(resolve, scanWaitMs));
+              recordNumberedView(true);
+              matchVisible();
+            }
           }
-          if (visitZoom === finalZoom || scanMode !== "adaptive") {
-            remaining.forEach((item) => attemptedAtFinal.add(item.fallback_id));
-          }
+          remaining.forEach((item) => attemptedAtFinal.add(item.fallback_id));
         }
       }
       scan.budget_exhausted = !canExplore();

@@ -7,7 +7,8 @@ const nativeSetTimeout = global.setTimeout;
 async function check(initialZoom, mapDiscoverable = true, crowded = false, overlapping = false,
   sameNumber = false, denseUnique = false, bounded = false, mixedLabels = false,
   highStart = false, scanMode = 'adaptive', clusterCase = false,
-  persistentDom = false, delayedLabels = false, remoteStatics = false) {
+  persistentDom = false, delayedLabels = false, remoteStatics = false,
+  twoPoints = false, configuredZoom = 8) {
   let zoomInMoves = 0;
   let zoomInWaits = 0;
   let awaitingZoomInPause = false;
@@ -25,7 +26,10 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     }
     return nativeSetTimeout(callback, Math.min(delay, 1), ...args);
   };
-  const points = clusterCase ? [
+  const points = twoPoints ? [
+    {lat: 50, lng: 0, number: 101},
+    {lat: 50, lng: 12, number: 102},
+  ] : clusterCase ? [
     {lat: 50, lng: 0, number: 101},
     {lat: 50, lng: 0.4, number: 102},
     {lat: 50, lng: 12, number: 103},
@@ -173,7 +177,7 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
       {lat: 50, lng: 12, radius_km: 350},
     ] : [],
     scanNumbers: true, captureNumbered: true,
-    scanMaxZoom: bounded || highStart ? 8 : 10,
+    scanMaxZoom: twoPoints ? configuredZoom : bounded || highStart ? 8 : 10,
     scanRadiusKm: remoteStatics ? 2000 : 350,
   });
   if (!mapDiscoverable) {
@@ -196,6 +200,25 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     assert.equal(map.zoom, initialZoom);
     assert.ok(result.scan.views <= 34);
     return {zoomInMoves, moves, scan: result.scan};
+  }
+  if (twoPoints) {
+    const detailed = moves.filter((move) => move[2] === configuredZoom);
+    assert.equal(detailed.length, 2, 'each object area is visited once');
+    assert.ok(maximumVisitedZoom <= configuredZoom, 'configured zoom is a ceiling');
+    assert.ok(detailed.every((move) => Math.abs(move[0] - 50) < 0.01 &&
+      (Math.abs(move[1]) < 1 || Math.abs(move[1] - 12) < 1)),
+    'detailed scan only visits object areas');
+    if (configuredZoom >= 8) {
+      assert.deepEqual(result.dynamics.map((item) => item.index).sort(), [101, 102]);
+      assert.equal(result.scan.numbered_views.length, 2,
+        'each newly found number produces one archive view');
+      assert.deepEqual(result.scan.numbered_views.flatMap((view) => view.numbers).sort(),
+        [101, 102]);
+    } else {
+      assert.equal(result.unnumbered_dynamics, 2,
+        'unavailable numbers do not cause a second scan pass');
+    }
+    return;
   }
   if (highStart) {
     assert.equal(minimumVisitedZoom, 4, 'search must begin at overview zoom');
@@ -258,6 +281,10 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
   await check(6, true, false, false, false, false, true); // 1000 маркеров и далёкий выброс
   await check(8, true, false, false, false, false, false, true); // подписи с разными стилями
   await check(10, true, false, false, false, false, false, false, true); // старт с сильного приближения
+  await check(6, true, false, false, false, false, false, false, false,
+    'adaptive', false, false, false, false, true, 7);
+  await check(6, true, false, false, false, false, false, false, false,
+    'adaptive', false, false, false, false, true, 9);
   await check(6, true, false, false, false, false, false, false, false,
     'adaptive', false, true); // DOM сохраняет маркер с другого края карты
   await check(6, true, false, false, false, false, false, false, false,

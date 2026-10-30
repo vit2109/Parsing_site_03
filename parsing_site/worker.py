@@ -201,7 +201,7 @@ class ParseWorker:
                             getattr(session, "capture_pair_view", None)
                             if settings.screenshot_enabled else None
                         )
-                        attempted: set[tuple[int, tuple[float, float]]] = set()
+                        attempted: set[int] = set()
                         dynamics = {item.index: item for item in snapshot.dynamics}
                         photo_deadline = monotonic() + 25
                         priority = {"alert": 0, "warning": 1, "blue": 2}
@@ -218,7 +218,7 @@ class ParseWorker:
                                     or dynamic is None or dynamic.lat is None
                                     or dynamic.lng is None or not callable(capture_pair)):
                                 continue
-                            key = (delivery.dynamic_index, static)
+                            key = delivery.dynamic_index
                             if key not in attempted:
                                 if len(attempted) >= 6 or monotonic() >= photo_deadline:
                                     continue

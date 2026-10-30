@@ -232,6 +232,30 @@ class CaptureArchiveTest(unittest.TestCase):
             (0, 4), (0, 8), (12, 4), (12, 8), (0, 4), (0, 10),
         ])
 
+    def test_replayed_views_obey_zoom_limit_and_skip_captured_numbers(self) -> None:
+        moves: list[tuple[float, float]] = []
+
+        class Page:
+            def evaluate(self, script: str, argument: object = None) -> object:
+                if "const original =" in script:
+                    return {"lat": 50, "lng": 0, "zoom": 4, "minZoom": 4}
+                moves.append((argument["lng"], argument["zoom"]))
+                return None
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                pass
+
+        session = BrowserSession(BrowserConfig())
+        session.prepare_numbered_capture((900, 600))
+        with patch.object(session, "_capture_visible_view", return_value=True) as capture:
+            session._capture_numbered_views(Page(), TrackingConfig(scan_max_zoom=8), [
+                {"lat": 50, "lng": 0, "zoom": 8, "numbers": [101]},
+                {"lat": 50, "lng": 2, "zoom": 8, "numbers": [101]},
+                {"lat": 50, "lng": 4, "zoom": 9, "numbers": [102]},
+            ])
+        self.assertEqual(capture.call_count, 1)
+        self.assertEqual(moves, [(0, 4), (0, 8), (0, 4), (0, 4)])
+
     def test_pair_capture_requires_target_number_and_restores_map(self) -> None:
         class Page:
             def __init__(self) -> None:

@@ -476,8 +476,15 @@ class BrowserSession:
                 float(original.get("minZoom", 4)),
                 min(float(original["zoom"]), 4.0),
             )
+            captured_numbers: set[int] = set()
             for view in views:
                 try:
+                    zoom = float(view["zoom"])
+                    if zoom > tracking.scan_max_zoom:
+                        continue
+                    numbers = {int(number) for number in view.get("numbers", [])}
+                    if numbers and numbers <= captured_numbers:
+                        continue
                     page.evaluate(
                         """view => window.__parsingSiteMap.setView(
                           [view.lat, view.lng], view.zoom, {animate: false}
@@ -495,8 +502,9 @@ class BrowserSession:
                         page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
                         if self._capture_visible_view(
                             page, tracking.map_container_selector,
-                            float(view["zoom"]),
+                            zoom,
                         ):
+                            captured_numbers.update(numbers)
                             break
                 except Exception as exc:  # noqa: BLE001 — остальные виды ещё можно снять.
                     self.numbered_capture_error = str(exc)
