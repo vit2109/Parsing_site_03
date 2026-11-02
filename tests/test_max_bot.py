@@ -450,7 +450,7 @@ class MaxBotTest(unittest.TestCase):
 
             with patch("parsing_site.worker.BrowserSession", return_value=session), \
                     patch("parsing_site.worker.capture_snapshot", side_effect=capture), \
-                    patch("parsing_site.capture_archive.ROOT", Path(directory)):
+                    patch("parsing_site.config.ROOT", Path(directory)):
                 worker._run()
             self.assertIsNone(session.size)
             delivery = worker._max_dispatch.submit.call_args.args[0]
@@ -463,7 +463,7 @@ class MaxBotTest(unittest.TestCase):
             self.assertEqual(worker.status["max_poll"]["eligible_pairs"], 1)
             self.assertEqual(list(Path(directory).rglob("*.jpg")), [])
 
-    def test_zone_poll_queues_and_sends_message_with_screenshot(self) -> None:
+    def test_zone_poll_keeps_captured_screenshot_after_search_deadline(self) -> None:
         with TemporaryDirectory() as directory:
             database = Database(Path(directory) / "tracking.db")
             store = Mock()
@@ -519,7 +519,8 @@ class MaxBotTest(unittest.TestCase):
 
             with patch("parsing_site.worker.BrowserSession", return_value=session), \
                     patch("parsing_site.worker.capture_snapshot", side_effect=capture), \
-                    patch("parsing_site.capture_archive.ROOT", Path(directory)), \
+                    patch("parsing_site.worker.monotonic", side_effect=[0, 0, 1, 100, 100]), \
+                    patch("parsing_site.config.ROOT", Path(directory)), \
                     patch("parsing_site.max_bot._request_json", side_effect=request):
                 worker._run()
                 worker._max_dispatch._queue.join()
@@ -528,6 +529,7 @@ class MaxBotTest(unittest.TestCase):
             self.assertEqual(session.annotation[0], b"pair-jpeg")
             self.assertEqual(session.annotation[3], "Пост 2")
             self.assertIn("Объект №87", sent[0]["text"])
+            self.assertNotIn("Лимит времени", sent[0]["text"])
             self.assertEqual(sent[0]["attachments"][0]["payload"], {"token": "image-token"})
             self.assertEqual(database.list_max_deliveries()["items"][0]["status"], "sent")
             self.assertEqual(worker.status["max_poll"]["prepared_with_screenshot"], 1)

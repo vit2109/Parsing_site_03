@@ -251,12 +251,6 @@ class ParseWorker:
                                     continue
                                 key = (str(delivery.screenshot), delivery.nearest_static_index)
                                 if key not in annotated:
-                                    if monotonic() >= photo_deadline:
-                                        delivery.screenshot = None
-                                        if PHOTO_MISSING_NOTE not in delivery.text:
-                                            note = "\nЛимит времени на подготовку скриншотов исчерпан."
-                                            delivery.text = delivery.text[:4000 - len(note)] + note
-                                        continue
                                     source = next(
                                         (item for item in archive.screenshots
                                          if item.path == delivery.screenshot), None,
