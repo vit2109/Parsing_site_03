@@ -201,8 +201,12 @@ def _web(extra: list[str]) -> int:
     if not 1 <= port <= 65535:
         raise ValueError("Порт интерфейса должен быть от 1 до 65535")
 
+    from parsing_site.webapp import app
+
     print(f"Интерфейс: http://127.0.0.1:{port}")
-    uvicorn.run("parsing_site.webapp:app", host="127.0.0.1", port=port, reload=False)
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, reload=False))
+    app.state.uvicorn_server = server
+    server.run()
     return 0
 
 

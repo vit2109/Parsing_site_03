@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Literal
@@ -256,6 +258,33 @@ def api_stop() -> dict[str, Any]:
     """Останавливает фоновый опрос и возвращает его состояние."""
     worker.stop()
     return worker.status
+
+
+@app.get("/api/launcher/status")
+def api_launcher_status(request: Request) -> dict[str, bool]:
+    """Подтверждает, что локальный запускатель управляет этим процессом."""
+    _check_launcher_token(request)
+    return {"managed": True}
+
+
+@app.post("/api/launcher/stop")
+def api_launcher_stop(request: Request) -> dict[str, bool]:
+    """Просит Uvicorn завершиться штатно через FastAPI lifespan."""
+    _check_launcher_token(request)
+    server = getattr(app.state, "uvicorn_server", None)
+    if server is None:
+        raise HTTPException(status_code=503, detail="Сервер не готов к остановке")
+    server.should_exit = True
+    return {"stopping": True}
+
+
+def _check_launcher_token(request: Request) -> None:
+    token = os.environ.get("PARSING_SITE_LAUNCHER_TOKEN", "")
+    if not token:
+        raise HTTPException(status_code=404, detail="Управление запускателем выключено")
+    received = request.headers.get("x-launcher-token", "")
+    if not secrets.compare_digest(received, token):
+        raise HTTPException(status_code=403, detail="Неверный ключ запуска")
 
 
 @app.get("/api/logs")

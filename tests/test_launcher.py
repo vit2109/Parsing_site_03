@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+from fastapi import HTTPException
+from starlette.requests import Request
 
 import launcher
 
@@ -57,6 +61,32 @@ class LauncherTest(unittest.TestCase):
             self.assertIn("--instance", events[2][1])
             self.assertIn("algorithm_a", events[2][1])
             self.assertIn("algorithm_b", events[3][1])
+
+    def test_stop_request_needs_its_launch_token(self) -> None:
+        from parsing_site import webapp
+
+        server = SimpleNamespace(should_exit=False)
+        scope = {"type": "http", "headers": [(b"x-launcher-token", b"correct")]}
+        with patch.dict(webapp.os.environ, {"PARSING_SITE_LAUNCHER_TOKEN": "correct"}), \
+                patch.object(webapp.app.state, "uvicorn_server", server, create=True):
+            self.assertEqual(webapp.api_launcher_stop(Request(scope)), {"stopping": True})
+            self.assertTrue(server.should_exit)
+            scope["headers"] = [(b"x-launcher-token", b"wrong")]
+            with self.assertRaises(HTTPException) as rejected:
+                webapp.api_launcher_stop(Request(scope))
+            self.assertEqual(rejected.exception.status_code, 403)
+
+    def test_stop_target_requests_shutdown_and_waits_for_exit(self) -> None:
+        process = MagicMock()
+        process.poll.side_effect = [None, 0]
+        managed = launcher.ManagedTarget(
+            launcher.Target("Программа 1", 8082, 9222, "algorithm_a"),
+            "token", process,
+        )
+        with patch.object(launcher, "launcher_request", return_value=True) as request, \
+                patch.object(launcher.time, "sleep"):
+            launcher.stop_target(managed)
+        request.assert_called_once_with(managed, "stop")
 
 
 if __name__ == "__main__":

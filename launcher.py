@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -19,6 +21,7 @@ from tkinter import filedialog, messagebox, ttk
 DEFAULT_WEB_PORT = 8082
 DEFAULT_CDP_PORT = 9222
 SETTINGS_NAME = "launcher_settings.json"
+PROCESSES_NAME = "launcher_processes.json"
 
 
 @dataclass(frozen=True)
@@ -27,6 +30,13 @@ class Target:
     web_port: int
     cdp_port: int
     instance: str | None = None
+
+
+@dataclass
+class ManagedTarget:
+    target: Target
+    token: str
+    process: subprocess.Popen | None = None
 
 
 def port(value: str, label: str) -> int:
@@ -76,6 +86,42 @@ def settings_path() -> Path:
     return Path(__file__).resolve().with_name(SETTINGS_NAME)
 
 
+def processes_path() -> Path:
+    return settings_path().with_name(PROCESSES_NAME)
+
+
+def launcher_request(managed: ManagedTarget, action: str, timeout: float = 2) -> bool:
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{managed.target.web_port}/api/launcher/{action}",
+        headers={"X-Launcher-Token": managed.token},
+        method="POST" if action == "stop" else "GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status == 200
+    except (OSError, urllib.error.URLError):
+        return False
+
+
+def stop_target(managed: ManagedTarget) -> None:
+    """Штатно завершает только процесс, запущенный с данным ключом."""
+    if not launcher_request(managed, "stop"):
+        raise RuntimeError(
+            f"Не удалось остановить программу на порту {managed.target.web_port}."
+        )
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        if managed.process is not None:
+            if managed.process.poll() is not None:
+                return
+        elif not port_occupied(managed.target.web_port):
+            return
+        time.sleep(0.25)
+    raise RuntimeError(
+        f"Программа на порту {managed.target.web_port} ещё завершает работу."
+    )
+
+
 def cdp_ready(cdp_port: int) -> bool:
     try:
         with urllib.request.urlopen(
@@ -113,7 +159,7 @@ def log_path(backend: Path, target: Target) -> Path:
 def start_targets(
     backend: Path, targets: list[Target], start_browser: bool,
     report: Callable[[str], None],
-) -> list[tuple[Target, subprocess.Popen]]:
+) -> list[ManagedTarget]:
     """Запускает Chrome, затем веб-серверы; при ошибке убирает свои серверы."""
     base_command = backend_command(backend)
     for target in targets:
@@ -135,7 +181,7 @@ def start_targets(
                     f"Chrome на порту {target.cdp_port} не запустился. {details}"
                 )
 
-    started: list[tuple[Target, subprocess.Popen]] = []
+    started: list[ManagedTarget] = []
     try:
         for target in targets:
             report(f"Запуск: {target.label} (порт {target.web_port})…")
@@ -143,14 +189,19 @@ def start_targets(
             if target.instance:
                 arguments.extend(["--instance", target.instance,
                                   "--cdp-port", str(target.cdp_port)])
+            token = secrets.token_urlsafe(32)
+            environment = os.environ.copy()
+            environment["PARSING_SITE_LAUNCHER_TOKEN"] = token
             with log_path(backend, target).open("a", encoding="utf-8") as log:
                 process = subprocess.Popen(
                     arguments, cwd=backend.parent, stdout=log, stderr=subprocess.STDOUT,
+                    env=environment,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
-            started.append((target, process))
+            started.append(ManagedTarget(target, token, process))
 
-        for target, process in started:
+        for managed in started:
+            target, process = managed.target, managed.process
             deadline = time.monotonic() + 90
             while time.monotonic() < deadline:
                 if process.poll() is not None:
@@ -165,7 +216,8 @@ def start_targets(
                     f"{target.label} не ответила за 90 секунд. Журнал: {log_path(backend, target)}"
                 )
     except Exception:
-        for _target, process in started:
+        for managed in started:
+            process = managed.process
             if process.poll() is None:
                 process.terminate()
         raise
@@ -190,8 +242,11 @@ class LauncherApp:
         self.cdp_b = tk.StringVar(value=str(saved.get("cdp_b", 9223)))
         self.status = tk.StringVar(value="Готово к запуску")
         self._launching = False
+        self._stopping = False
+        self._managed = self._read_managed()
         self._build()
         self._mode_changed()
+        self._refresh_stop_buttons()
         self.root.protocol("WM_DELETE_WINDOW", self._close)
 
     def _configure_style(self) -> None:
@@ -242,6 +297,8 @@ class LauncherApp:
         self.start_button.pack(side="right")
         ttk.Label(bottom, textvariable=self.status, wraplength=390,
                   style="Hint.TLabel").pack(side="left", fill="x", expand=True)
+        self.stop_frame = ttk.Frame(body)
+        self.stop_frame.pack(side="bottom", fill="x", pady=(0, 5))
 
     @staticmethod
     def _target_fields(parent: ttk.Frame, title: str, web: tk.StringVar,
@@ -291,6 +348,76 @@ class LauncherApp:
         except OSError:
             pass  # Параметры запуска остаются доступны в текущем окне.
 
+    def _read_managed(self) -> list[ManagedTarget]:
+        try:
+            entries = json.loads(processes_path().read_text(encoding="utf-8"))
+            managed = [
+                ManagedTarget(Target(
+                    str(item["label"]), int(item["web_port"]),
+                    int(item["cdp_port"]), item.get("instance"),
+                ), str(item["token"]))
+                for item in entries
+            ]
+        except (OSError, ValueError, TypeError, KeyError):
+            return []
+        return [item for item in managed if launcher_request(item, "status")]
+
+    def _save_managed(self) -> None:
+        entries = [
+            {"label": item.target.label, "web_port": item.target.web_port,
+             "cdp_port": item.target.cdp_port, "instance": item.target.instance,
+             "token": item.token}
+            for item in self._managed
+        ]
+        try:
+            processes_path().write_text(json.dumps(entries, ensure_ascii=False, indent=2),
+                                        encoding="utf-8")
+        except OSError:
+            pass
+
+    def _refresh_stop_buttons(self) -> None:
+        for child in self.stop_frame.winfo_children():
+            child.destroy()
+        self._managed = [
+            item for item in self._managed
+            if item.process is None or item.process.poll() is None
+        ]
+        for item in self._managed:
+            ttk.Button(
+                self.stop_frame,
+                text=f"Остановить {item.target.label} · {item.target.web_port}",
+                command=lambda selected=item: self._stop(selected),
+            ).pack(side="left", padx=(0, 8))
+        self._save_managed()
+
+    def _stop(self, managed: ManagedTarget) -> None:
+        if self._launching or self._stopping:
+            return
+        self._stopping = True
+        self.start_button.configure(state="disabled")
+        self.status.set(f"Остановка {managed.target.label}…")
+
+        def run() -> None:
+            try:
+                stop_target(managed)
+            except Exception as exc:  # noqa: BLE001 — ошибка показывается в окне.
+                self.root.after(0, self._stopped, managed, str(exc))
+            else:
+                self.root.after(0, self._stopped, managed, None)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _stopped(self, managed: ManagedTarget, error: str | None) -> None:
+        self._stopping = False
+        self.start_button.configure(state="normal")
+        if error:
+            self.status.set("Ошибка остановки")
+            messagebox.showerror("Не удалось остановить", error, parent=self.root)
+            return
+        self._managed = [item for item in self._managed if item is not managed]
+        self._refresh_stop_buttons()
+        self.status.set(f"{managed.target.label} остановлена. Chrome остаётся открытым.")
+
     def _start(self) -> None:
         try:
             targets = build_targets(self.two.get(), (
@@ -303,6 +430,8 @@ class LauncherApp:
             return
         self._save_settings()
         start_browser = self.browser.get()
+        if self._stopping:
+            return
         self._launching = True
         self.start_button.configure(state="disabled")
         self.status.set("Подготовка запуска…")
@@ -320,7 +449,7 @@ class LauncherApp:
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _finished(self, started: list[tuple[Target, subprocess.Popen]] | None,
+    def _finished(self, started: list[ManagedTarget] | None,
                   error: str | None) -> None:
         self._launching = False
         self.start_button.configure(state="normal")
@@ -328,16 +457,21 @@ class LauncherApp:
             self.status.set("Ошибка запуска")
             messagebox.showerror("Не удалось запустить", error, parent=self.root)
             return
-        urls = ", ".join(f"http://127.0.0.1:{target.web_port}" for target, _ in started or [])
+        self._managed.extend(started or [])
+        self._refresh_stop_buttons()
+        urls = ", ".join(
+            f"http://127.0.0.1:{item.target.web_port}" for item in started or []
+        )
         self.status.set(f"Работает: {urls}")
         messagebox.showinfo("Программы запущены", f"Откройте интерфейс: {urls}",
                             parent=self.root)
 
     def _close(self) -> None:
-        if self._launching:
-            messagebox.showinfo("Запуск", "Дождитесь завершения запуска.", parent=self.root)
+        if self._launching or self._stopping:
+            messagebox.showinfo("Операция", "Дождитесь завершения операции.", parent=self.root)
             return
         self._save_settings()
+        self._save_managed()
         self.root.destroy()
 
 
