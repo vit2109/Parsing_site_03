@@ -10,11 +10,11 @@ from math import cos, pi, sin
 from pathlib import Path
 from typing import Any
 
-from parsing_site.config import ROOT
+from parsing_site.config import instance_data_dir
 from parsing_site.coordinates import haversine_km
 from parsing_site.tracking import BLUE_ZONE_KM, TrackingSnapshot
 
-DEFAULT_DB_PATH = ROOT / "data" / "tracking.db"
+DEFAULT_DB_PATH = instance_data_dir() / "tracking.db"
 ORIGIN_TOLERANCE_KM = 0.05
 
 
@@ -23,7 +23,7 @@ class Database:
 
     def __init__(self, path: Path | None = None) -> None:
         """Открывает БД, создаёт схему и пытается спасти данные при повреждении."""
-        self.path = path or DEFAULT_DB_PATH
+        self.path = path or instance_data_dir() / "tracking.db"
         self.was_created = not self.path.exists()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()

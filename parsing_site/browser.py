@@ -94,6 +94,7 @@ class BrowserSession:
         self._config = config
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
+        self._page: Page | None = None
         self._number_cache: dict[int, tuple[int, float, float, float]] = {}
         self._cache_day = datetime.now().astimezone().date()
         self._cache_url = ""
@@ -163,6 +164,7 @@ class BrowserSession:
         """Останавливает Playwright, оставляя окно Chrome открытым."""
         # Не вызываем browser.close(): для CDP это закрыло бы окно пользователя.
         self._browser = None
+        self._page = None
         if self._playwright is not None:
             self._playwright.stop()
             self._playwright = None
@@ -741,11 +743,16 @@ class BrowserSession:
             )
 
         needle = self._config.url_contains.strip().lower()
+        if any(page is self._page for page in pages) and \
+                (not needle or needle in self._page.url.lower()):
+            return self._page
         if not needle:
-            return pages[0]
+            self._page = pages[0]
+            return self._page
 
         for page in pages:
             if needle in page.url.lower():
+                self._page = page
                 return page
 
         available = "\n".join(f"  - {page.url}" for page in pages)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from time import monotonic, sleep
 from typing import TYPE_CHECKING
@@ -17,9 +18,11 @@ logger = logging.getLogger("parsing_site")
 
 USAGE = """\
 Использование:
-  python main.py web       — веб-интерфейс FastAPI (таблица, настройки, логи)
+  python main.py web       — веб-интерфейс на порту 8082
+  python main.py web --port 8082 --instance a --cdp-port 9222
+  python main.py web --port 8083 --instance b --cdp-port 9223
   python main.py test-server — тестовая SVG-карта с движущимися объектами
-  python main.py chrome    — запустить Chrome с CDP (без PowerShell)
+  python main.py chrome --port 9222 — отдельный профиль Chrome для порта
   python main.py check     — проверить CDP-подключение к Chrome на порту 9222
   python main.py probe     — таблица расстояний по HTML из data_test (без сайта)
   python main.py inspect   — координаты объектов и таблица расстояний (один снимок)
@@ -44,6 +47,24 @@ def main(argv: list[str] | None = None) -> int:
         print(USAGE)
         return 2
 
+    if command == "web":
+        try:
+            instance = _parse_option(args[1:], "--instance")
+            cdp_port = _parse_option(args[1:], "--cdp-port")
+            if instance:
+                os.environ["PARSING_SITE_INSTANCE"] = instance
+                from parsing_site.config import instance_data_dir
+                instance_data_dir()  # проверяет имя до загрузки приложения
+            if cdp_port:
+                port_number = int(cdp_port)
+                if not 1 <= port_number <= 65535:
+                    raise ValueError("CDP-порт должен быть от 1 до 65535")
+                os.environ["PARSING_SITE_CDP_URL"] = f"http://127.0.0.1:{port_number}"
+            if instance and not cdp_port:
+                raise ValueError("Для --instance укажите --cdp-port отдельного Chrome.")
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            return 2
     config = load_config()
     try:
         if command == "inspect":
@@ -92,6 +113,21 @@ def _parse_port(extra: list[str], default: int) -> int:
             except ValueError:
                 raise SystemExit(f"Некорректный порт: {value!r}")
     return default
+
+
+def _parse_option(extra: list[str], name: str) -> str | None:
+    """Читает строковый параметр в формах --имя значение и --имя=значение."""
+    for index, item in enumerate(extra):
+        if item == name:
+            if index + 1 >= len(extra) or extra[index + 1].startswith("--"):
+                raise ValueError(f"Не указано значение для {name}")
+            return extra[index + 1]
+        if item.startswith(name + "="):
+            value = item.split("=", 1)[1]
+            if not value:
+                raise ValueError(f"Не указано значение для {name}")
+            return value
+    return None
 
 
 def _inspect(config: AppConfig) -> int:
@@ -162,8 +198,10 @@ def _web(extra: list[str]) -> int:
     import uvicorn
 
     port = _parse_port(extra, 8082)
+    if not 1 <= port <= 65535:
+        raise ValueError("Порт интерфейса должен быть от 1 до 65535")
 
-    print("Интерфейс: http://127.0.0.1:8082")
+    print(f"Интерфейс: http://127.0.0.1:{port}")
     uvicorn.run("parsing_site.webapp:app", host="127.0.0.1", port=port, reload=False)
     return 0
 

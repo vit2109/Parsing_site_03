@@ -4,11 +4,16 @@ setlocal EnableExtensions
 
 rem Запуск Chrome с CDP. PowerShell не нужен.
 rem   start_chrome.bat
+rem   start_chrome.bat 9223  (отдельный профиль второго экземпляра)
 rem   start_chrome.bat force
 
-set "PORT=9222"
+set "PORT=%~1"
+if not defined PORT set "PORT=9222"
+if /I "%PORT%"=="force" set "PORT=9222"
+if /I "%PORT%"=="-force" set "PORT=9222"
 set "ROOT=%~dp0"
 set "PROFILE=%ROOT%.chrome-profile"
+if not "%PORT%"=="9222" set "PROFILE=%ROOT%.chrome-profile-%PORT%"
 
 if /I "%~1"=="force" goto force
 if /I "%~1"=="-force" goto force

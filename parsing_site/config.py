@@ -7,6 +7,8 @@ config.toml лежит в корне проекта (или рядом с exe). 
 
 from __future__ import annotations
 
+import os
+import re
 import shutil
 import sys
 import tomllib
@@ -37,6 +39,30 @@ ROOT = app_root()
 BUNDLE_ROOT = bundle_root()
 WEB_DIR = BUNDLE_ROOT / "web"
 DEFAULT_CONFIG_PATH = ROOT / "config.toml"
+
+
+def instance_data_dir() -> Path:
+    """Каталог данных выбранного экземпляра; пустое имя сохраняет старый путь."""
+    name = os.environ.get("PARSING_SITE_INSTANCE", "").strip()
+    if not name:
+        return ROOT / "data"
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,40}", name):
+        raise ValueError("Имя экземпляра: 1–40 латинских букв, цифр, _ или -.")
+    return ROOT / "data" / "instances" / name
+
+
+def instance_output_path(directory: str) -> Path:
+    """Размещает относительные выходные файлы экземпляра в его каталоге."""
+    path = Path(directory).expanduser()
+    if path.is_absolute():
+        return path
+    if not os.environ.get("PARSING_SITE_INSTANCE"):
+        return ROOT / path
+    parts = path.parts[1:] if path.parts and path.parts[0].lower() == "data" else path.parts
+    target = instance_data_dir().joinpath(*parts).resolve()
+    if not target.is_relative_to(instance_data_dir().resolve()):
+        raise ValueError("Относительный путь вывода должен находиться в каталоге экземпляра.")
+    return target
 
 
 def ensure_runtime_files() -> None:
@@ -82,7 +108,7 @@ class ExtractConfig:
 class OutputConfig:
     """Каталог и форматы файлов универсального HTML-парсера."""
 
-    data_dir: Path = field(default_factory=lambda: ROOT / "data")
+    data_dir: Path = field(default_factory=instance_data_dir)
     save_jsonl: bool = True
     save_csv: bool = True
     save_html: bool = False
@@ -185,9 +211,7 @@ def load_config(path: Path | None = None) -> AppConfig:
     output_raw = raw.get("output", {})
     tracking_raw = raw.get("tracking", {})
 
-    data_dir = Path(output_raw.get("data_dir", "data"))
-    if not data_dir.is_absolute():
-        data_dir = ROOT / data_dir
+    data_dir = instance_output_path(str(output_raw.get("data_dir", "data")))
 
     static_objects: list[StaticObjectConfig] = []
     for index, item in enumerate(tracking_raw.get("static_objects") or [], start=1):
@@ -218,7 +242,8 @@ def load_config(path: Path | None = None) -> AppConfig:
 
     cfg = AppConfig(
         browser=BrowserConfig(
-            cdp_url=str(browser_raw.get("cdp_url", "http://127.0.0.1:9222")),
+            cdp_url=os.environ.get("PARSING_SITE_CDP_URL")
+            or str(browser_raw.get("cdp_url", "http://127.0.0.1:9222")),
             url_contains=str(browser_raw.get("url_contains", "")),
             wait_for_selector=str(browser_raw.get("wait_for_selector", "")),
             wait_timeout_ms=int(browser_raw.get("wait_timeout_ms", 10_000)),

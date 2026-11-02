@@ -45,7 +45,8 @@ def launch_chrome(
     force: bool = False,
 ) -> Path:
     """Запускает Chrome с отдельным профилем и включённым CDP-портом."""
-    profile = profile_dir or (ROOT / ".chrome-profile")
+    profile = profile_dir or (ROOT / (".chrome-profile" if port == DEFAULT_PORT
+                                   else f".chrome-profile-{port}"))
     profile.mkdir(parents=True, exist_ok=True)
     cdp_url = f"http://127.0.0.1:{port}"
 
@@ -85,7 +86,7 @@ def launch_chrome(
     else:
         print(
             "Chrome запущен, но CDP пока не ответил.\n"
-            "Закройте все окна Chrome и повторите: python main.py chrome --force"
+            f"Проверьте порт {port} и профиль {profile}; затем повторите запуск."
         )
     print(f"Профиль: {profile}")
     return profile
@@ -99,6 +100,8 @@ def main(argv: list[str] | None = None) -> int:
     for index, item in enumerate(args):
         if item in {"--port", "-p"} and index + 1 < len(args):
             port = int(args[index + 1])
+        elif item.startswith("--port="):
+            port = int(item.split("=", 1)[1])
     try:
         launch_chrome(port=port, force=force)
     # CLI-граница обязана преобразовать любую ошибку запуска в ненулевой exit code.

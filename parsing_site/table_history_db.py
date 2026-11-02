@@ -8,10 +8,10 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from parsing_site.config import ROOT
+from parsing_site.config import instance_data_dir
 from parsing_site.tracking import TrackingSnapshot, row_to_dict
 
-DEFAULT_TABLE_HISTORY_PATH = ROOT / "data" / "table_history.db"
+DEFAULT_TABLE_HISTORY_PATH = instance_data_dir() / "table_history.db"
 SECONDS_PER_DAY = 86_400
 DEFAULT_BYTES_PER_ROW = 320
 SNAPSHOT_OVERHEAD_BYTES = 256
@@ -22,7 +22,7 @@ class TableHistoryDatabase:
 
     def __init__(self, path: Path | None = None) -> None:
         """Открывает отдельную SQLite-базу в WAL-режиме и создаёт схему."""
-        self.path = path or DEFAULT_TABLE_HISTORY_PATH
+        self.path = path or instance_data_dir() / "table_history.db"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False)

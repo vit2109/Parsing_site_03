@@ -5,7 +5,7 @@
 #   .\start_chrome.ps1
 #   .\start_chrome.ps1 -Browser edge
 #   .\start_chrome.ps1 -Browser yandex
-#   .\start_chrome.ps1 -Port 9222
+#   .\start_chrome.ps1 -Port 9223  # отдельный профиль для второго экземпляра
 #   .\start_chrome.ps1 -Force   # закрыть chrome.exe и запустить заново
 
 param(
@@ -17,7 +17,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$profileDir = Join-Path $projectRoot ".chrome-profile"
+$profileName = if ($Port -eq 9222) { ".chrome-profile" } else { ".chrome-profile-$Port" }
+$profileDir = Join-Path $projectRoot $profileName
 
 function Test-CdpReady {
     param([int]$CheckPort)

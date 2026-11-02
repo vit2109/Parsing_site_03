@@ -8,16 +8,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from parsing_site.config import ROOT
+from parsing_site.config import instance_data_dir, instance_output_path
 from parsing_site.coordinates import MapView
 from parsing_site.settings_store import RuntimeSettings
 
 
 def period_path(directory: str, hours: int, captured_at: datetime) -> Path:
     """Папка календарного периода по местному времени компьютера."""
-    root = Path(directory).expanduser()
-    if not root.is_absolute():
-        root = ROOT / root
+    root = instance_output_path(directory)
     start_hour = captured_at.hour // hours * hours
     return root / captured_at.strftime("%Y-%m-%d") / f"{start_hour:02d}-{start_hour + hours:02d}"
 
@@ -103,7 +101,7 @@ class ScanDebugArchive:
 
     def __init__(self, started_at: datetime | None = None) -> None:
         started_at = started_at or datetime.now().astimezone()
-        self.folder = (ROOT / "data" / "scan_debug" / started_at.strftime("%Y-%m-%d")
+        self.folder = (instance_data_dir() / "scan_debug" / started_at.strftime("%Y-%m-%d")
                        / started_at.strftime("%H-%M-%S-%f"))
         self.saved: list[Path] = []
         self.errors: list[str] = []

@@ -15,6 +15,7 @@ from parsing_site.config import (
     AppConfig,
     ScanZoneConfig,
     StaticObjectConfig,
+    instance_data_dir,
     load_config,
 )
 from parsing_site.coordinates import normalize_mode
@@ -180,12 +181,17 @@ class SettingsStore:
     def __init__(self, db: Database, bootstrap_path: Path | None = None) -> None:
         """Связывает хранилище настроек с открытой основной БД."""
         self._db = db
-        self._bootstrap_path = bootstrap_path or ROOT / SETTINGS_EXPORT_NAME
+        default_bootstrap = (ROOT if not os.environ.get("PARSING_SITE_INSTANCE")
+                             else instance_data_dir()) / SETTINGS_EXPORT_NAME
+        self._bootstrap_path = bootstrap_path or default_bootstrap
 
     def ensure_defaults(self, base: AppConfig | None = None) -> RuntimeSettings:
         """Возвращает настройки или впервые сохраняет значения из TOML."""
         current = self.load()
         if current is not None:
+            explicit_cdp = os.environ.get("PARSING_SITE_CDP_URL")
+            if explicit_cdp and current.cdp_url != explicit_cdp:
+                return self.save(replace(current, cdp_url=explicit_cdp))
             return current
         if self._db.was_created and self._bootstrap_path.is_file():
             try:
@@ -193,7 +199,11 @@ class SettingsStore:
                 if not isinstance(payload, dict) or payload.get("format") != SETTINGS_EXPORT_FORMAT \
                         or payload.get("version") != 1 or not isinstance(payload.get("settings"), dict):
                     raise ValueError("неверный формат или версия файла")
-                settings = self.save(from_dict(payload["settings"]))
+                settings = from_dict(payload["settings"])
+                explicit_cdp = os.environ.get("PARSING_SITE_CDP_URL")
+                if explicit_cdp:
+                    settings.cdp_url = explicit_cdp
+                settings = self.save(settings)
             except (OSError, ValueError, TypeError, KeyError) as exc:
                 self._db.add_log("ERROR", "settings", f"Не удалось загрузить {self._bootstrap_path.name}: {exc}")
             else:
