@@ -124,6 +124,8 @@ class TrackingConfig:
     scan_wait_seconds: float = 1.5
     scan_max_zoom: int = 10
     scan_mode: str = "adaptive"
+    scan_followed_click_interval_seconds: float = 1.0
+    scan_empty_zoom: int = 4
     scan_group_radius_km: float = 50.0
     scan_zones: list[ScanZoneConfig] = field(default_factory=list)
     lock_scale: bool = False
@@ -252,6 +254,10 @@ def load_config(path: Path | None = None) -> AppConfig:
             scan_wait_seconds=float(tracking_raw.get("scan_wait_seconds", 1.5)),
             scan_max_zoom=int(tracking_raw.get("scan_max_zoom", 10)),
             scan_mode=str(tracking_raw.get("scan_mode", "adaptive")),
+            scan_followed_click_interval_seconds=float(
+                tracking_raw.get("scan_followed_click_interval_seconds", 1.0)
+            ),
+            scan_empty_zoom=int(tracking_raw.get("scan_empty_zoom", 4)),
             scan_group_radius_km=float(tracking_raw.get("scan_group_radius_km", 50)),
             scan_zones=scan_zones,
             lock_scale=bool(tracking_raw.get("lock_scale", False)),

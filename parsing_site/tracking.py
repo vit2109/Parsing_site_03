@@ -459,14 +459,25 @@ async (opts) => {
     const originalCenter = map.getCenter();
     const scanWaitMs = Math.max(200, Math.min(10000, Number(opts.scanWaitMs) || 1500));
     const scanStarted = Date.now();
-    const scanMoveLimit = 32;
-    const scanTimeLimitMs = 75000;
+    const scanMoveLimit = opts.scanMode === "followed_grid" ? Infinity : 32;
+    const scanTimeLimitMs = opts.scanMode === "followed_grid" ? 180000 : 75000;
     const canExplore = () => scan.views < scanMoveLimit &&
       Date.now() - scanStarted < scanTimeLimitMs;
+    const debugViews = opts.debugScan ? [] : null;
+    const recordDebug = (phase) => {
+      if (!debugViews) return;
+      const current = map.getCenter();
+      debugViews.push({phase, zoom: map.getZoom(),
+        lat: current.lat, lng: current.lng, url: location.href,
+        dynamic_count: collect(opts.dynamic, "D", true).filter(visibleOnMap).length,
+        html: document.documentElement.outerHTML});
+    };
+    recordDebug("initial");
     const staticPoints = (opts.staticObjects || [])
       .filter((item) => Number.isFinite(item.lat) && Number.isFinite(item.lng) &&
         Math.abs(item.lat) <= 85.0511287798 && Math.abs(item.lng) <= 180);
-    const scanMode = ["adaptive", "static_points", "grouped_static", "zones"].includes(opts.scanMode)
+    const scanMode = ["adaptive", "static_points", "grouped_static", "zones",
+      "followed_grid"].includes(opts.scanMode)
       ? opts.scanMode : "adaptive";
     const groupedRoute = scanMode === "grouped_static" ? (opts.scanRoutePoints || [])
       .filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng) &&
@@ -485,11 +496,11 @@ async (opts) => {
         Math.sin(dLng / 2) ** 2;
       return 12742 * Math.asin(Math.min(1, Math.sqrt(a)));
     };
-    const inStaticArea = (lat, lng) =>
-      (!staticPoints.length || staticPoints.some((point) =>
+    const inStaticArea = (lat, lng) => scanMode === "followed_grid" ||
+      ((!staticPoints.length || staticPoints.some((point) =>
         distanceKm(lat, lng, point) <= scanRadiusKm)) &&
       (!scanZones.length || scanZones.some((zone) =>
-        distanceKm(lat, lng, zone) <= zone.radius_km));
+        distanceKm(lat, lng, zone) <= zone.radius_km)));
     if (staticPoints.length || scanZones.length) {
       const nearby = dynamics.filter((item) => !Number.isFinite(item.lat) ||
         !Number.isFinite(item.lng) || inStaticArea(item.lat, item.lng));
@@ -508,7 +519,9 @@ async (opts) => {
       Number.isFinite(reportedMaxZoom) ? reportedMaxZoom : Infinity,
       configuredMaxZoom,
     ));
-    const overviewZoom = Math.max(minZoom, Math.min(zoom, incidentMap ? 4 : zoom - 4));
+    const overviewZoom = scanMode === "followed_grid"
+      ? Math.min(zoom, maxZoom)
+      : Math.max(minZoom, Math.min(zoom, incidentMap ? 4 : zoom - 4));
     const capturedNumbers = new Set();
     const recordNumberedView = (captureView = false) => {
       if (!opts.captureNumbered) return 0;
@@ -541,6 +554,7 @@ async (opts) => {
     const moveTo = async (lat, lng, z, captureView = false, settle = true) => {
       scan.views++;
       const zoomingIn = z > map.getZoom();
+      const phase = zoomingIn ? "zoom_in" : z < map.getZoom() ? "zoom_out" : "pan";
       await new Promise((resolve) => {
         let done = false;
         const finish = () => {
@@ -556,9 +570,11 @@ async (opts) => {
         catch (error) { finish(); }
         if (typeof map.on !== "function") finish();
       });
-      if (!settle) return 0;
+      if (!settle && !debugViews) return 0;
       // Vue может перерисовать маркеры после moveend и ответа API.
       await new Promise((resolve) => setTimeout(resolve, scanWaitMs));
+      recordDebug(phase);
+      if (!settle) return 0;
       return recordNumberedView(captureView);
     };
     const matchVisible = () => {
@@ -625,10 +641,11 @@ async (opts) => {
       // В html_test/44.html нужные маркеры видны при zoom 4. Сразу переходим
       // к обзорному масштабу, даже если пользователь оставил карту приближённой.
       if (map.getZoom() !== overviewZoom && canExplore()) {
-        await moveTo(originalCenter.lat, originalCenter.lng, overviewZoom);
+        await moveTo(originalCenter.lat, originalCenter.lng, overviewZoom,
+          scanMode === "followed_grid");
         rememberVisible();
       }
-      const routePoints = scanMode === "adaptive" ? []
+      const routePoints = scanMode === "adaptive" || scanMode === "followed_grid" ? []
         : scanMode === "zones" ? scanZones
         : scanMode === "grouped_static" && groupedRoute.length ? groupedRoute : staticPoints;
       if (scanMode === "grouped_static") {
@@ -659,13 +676,32 @@ async (opts) => {
       // Объединяем маркеры, попадающие в один безопасный прямоугольник вида.
       // Если вся группа поместится на максимальном масштабе, сразу идём туда
       // один раз: повторные заходы к копиям с тем же номером ничего не дают.
-      const finalZoom = Math.min(overviewZoom + 6, maxZoom);
+      const finalZoom = scanMode === "followed_grid"
+        ? maxZoom : Math.min(overviewZoom + 6, maxZoom);
       const groupAt = (items, level) => {
         const positioned = items.map((item) => ({
           item, point: project3857(item.lat, item.lng, level),
         }));
         const cells = new Map();
-        if (scanMode === "grouped_static") {
+        if (scanMode === "followed_grid") {
+          const side = Math.max(1, Math.min(mapRect.width, mapRect.height) * 0.7);
+          const minX = Math.min(...positioned.map((entry) => entry.point.x));
+          const minY = Math.min(...positioned.map((entry) => entry.point.y));
+          let best = null;
+          for (const shiftX of [0, side / 2]) {
+            for (const shiftY of [0, side / 2]) {
+              const candidate = new Map();
+              for (const entry of positioned) {
+                const key = `${Math.floor((entry.point.x - minX + shiftX) / side)},` +
+                  `${Math.floor((entry.point.y - minY + shiftY) / side)}`;
+                if (!candidate.has(key)) candidate.set(key, []);
+                candidate.get(key).push(entry.item);
+              }
+              if (!best || candidate.size < best.size) best = candidate;
+            }
+          }
+          best.forEach((items, key) => cells.set(key, items));
+        } else if (scanMode === "grouped_static") {
           // Один вид может вместить маркеры по разные стороны границы обычной
           // сетки. Собираем их по ближайшей группе стационарных точек и
           // проверяем фактические размеры кадра на выбранном масштабе.
@@ -732,7 +768,8 @@ async (opts) => {
         while (remaining.length) {
           let closest = 0;
           let shortest = Infinity;
-          const firstRoute = scanMode === "adaptive" || !routePoints.length ? null
+          const firstRoute = scanMode === "adaptive" || scanMode === "followed_grid" ||
+            !routePoints.length ? null
             : Math.min(...remaining.map((group) => routeIndexes.get(group)));
           remaining.forEach((group, index) => {
             if (firstRoute !== null && routeIndexes.get(group) !== firstRoute) return;
@@ -786,9 +823,9 @@ async (opts) => {
           const center = unproject3857(centerX, centerY, visitZoom);
           // Между удалёнными группами перемещаем карту только на обзорном зуме.
           const current = map.getCenter();
-          if (map.getZoom() !== overviewZoom ||
+          if (scanMode !== "followed_grid" && (map.getZoom() !== overviewZoom ||
               Math.abs(current.lat - center.lat) > 0.0001 ||
-              Math.abs(current.lng - center.lng) > 0.0001) {
+              Math.abs(current.lng - center.lng) > 0.0001)) {
             await moveTo(center.lat, center.lng, overviewZoom, false, false);
           }
           if (!canExplore()) break;
@@ -807,7 +844,8 @@ async (opts) => {
           }
           matchVisible();
           if (remaining.some((item) => item.index < 0) && canExplore()) {
-            for (let retry = 0; retry < 3 && canExplore() &&
+            const retries = scanMode === "followed_grid" ? 1 : 3;
+            for (let retry = 0; retry < retries && canExplore() &&
                  remaining.some((item) => item.index < 0); retry++) {
               await new Promise((resolve) => setTimeout(resolve, scanWaitMs));
               recordNumberedView(true);
@@ -819,7 +857,7 @@ async (opts) => {
       }
       scan.budget_exhausted = !canExplore();
     } finally {
-      if (map.getZoom() > overviewZoom) {
+      if (scanMode !== "followed_grid" && map.getZoom() > overviewZoom) {
         await moveTo(originalCenter.lat, originalCenter.lng, overviewZoom, false, false);
       }
       await moveTo(originalCenter.lat, originalCenter.lng, zoom);
@@ -842,6 +880,7 @@ async (opts) => {
         !scan.budget_exhausted && dynamics.every((item) => item.index > 0)
           ? "complete" : "partial";
     }
+    if (debugViews) scan.debug_views = debugViews;
   } else if (map && opts.scanNumbers) {
     scan.status = "map_controls_unavailable";
   }
@@ -975,6 +1014,7 @@ def extract_scene_from_page(
     page: Any, tracking: TrackingConfig, *, scan_numbers: bool = True,
     known_numbers: dict[int, tuple[int, float, float]] | None = None,
     capture_numbered: bool = False,
+    debug_scan: bool = False,
 ) -> dict[str, Any]:
     """Снимает маркеры и вид карты из живой вкладки (JS _EXTRACT_SCRIPT)."""
     grouped_route = group_static_points(
@@ -989,6 +1029,7 @@ def extract_scene_from_page(
             "mapContainer": tracking.map_container_selector,
             "scanNumbers": scan_numbers,
             "captureNumbered": capture_numbered,
+            "debugScan": debug_scan,
             "scanWaitMs": round(tracking.scan_wait_seconds * 1000),
             "scanMaxZoom": tracking.scan_max_zoom,
             "scanMode": tracking.scan_mode,
@@ -1100,6 +1141,7 @@ def extract_scene_with_mouse_scan(
     tracking: TrackingConfig,
     number_cache: dict[int, tuple[int, float, float, float]] | None = None,
     on_numbered_view: Callable[[dict[str, Any]], bool] | None = None,
+    on_debug_view: Callable[[dict[str, Any], str], None] | None = None,
 ) -> dict[str, Any]:
     """Обходит карту колесом браузера, если Vue не отдаёт экземпляр L.Map."""
     raw = extract_scene_from_page(page, tracking, scan_numbers=False)
@@ -1117,6 +1159,7 @@ def extract_scene_with_mouse_scan(
         raw = extract_scene_from_page(
             page, tracking, scan_numbers=True, known_numbers=recent_numbers,
             capture_numbered=on_numbered_view is not None,
+            debug_scan=on_debug_view is not None,
         )
         _apply_number_cache(raw, number_cache)
         _remember_numbers(raw, number_cache)
@@ -1125,6 +1168,12 @@ def extract_scene_with_mouse_scan(
         _apply_number_cache(raw, number_cache)
         _remember_numbers(raw, number_cache)
         return raw
+    def emit_debug(scene: dict[str, Any], phase: str) -> None:
+        if on_debug_view is not None:
+            on_debug_view(scene, phase)
+
+    emit_debug(raw, "initial")
+    debug_pan = (lambda scene: emit_debug(scene, "pan")) if on_debug_view else None
     static_points = [
         (item.lat, item.lng) for item in tracking.static_objects
         if item.lat is not None and item.lng is not None
@@ -1141,6 +1190,8 @@ def extract_scene_with_mouse_scan(
     scan_radius = max(tracking.threshold, tracking.warning_limit, tracking.blue_limit)
 
     def in_static_area(lat: float, lng: float) -> bool:
+        if tracking.scan_mode == "followed_grid":
+            return True
         near_static = not static_points or any(
             haversine_km(lat, lng, static_lat, static_lng) <= scan_radius
             for static_lat, static_lng in static_points
@@ -1161,7 +1212,8 @@ def extract_scene_with_mouse_scan(
         raw["unnumbered_dynamics"] = sum(
             item["index"] < 0 for item in raw["dynamics"]
         )
-    scan_deadline = monotonic() + 75
+    scan_deadline = monotonic() + (180 if tracking.scan_mode == "followed_grid" else 75)
+    scan_view_limit = 512 if tracking.scan_mode == "followed_grid" else 32
     base_map = raw.get("map") or {}
     base_view = map_view_from_raw(base_map)
     base_zoom = _maybe_float(raw.get("map_zoom"))
@@ -1214,7 +1266,10 @@ def extract_scene_with_mouse_scan(
     overview = raw
     overview_moves: list[int] = []
     overview_views = 0
-    target_overview = 4.0 if "map-incident" in tracking.dynamic_selector else base_zoom - 4
+    target_overview = (min(base_zoom, scan_zoom_ceiling)
+                       if tracking.scan_mode == "followed_grid" else
+                       4.0 if "map-incident" in tracking.dynamic_selector
+                       else base_zoom - 4)
     for _ in range(16):
         if monotonic() >= scan_deadline:
             break
@@ -1226,6 +1281,7 @@ def extract_scene_with_mouse_scan(
         page.mouse.wheel(0, delta)
         page.wait_for_timeout(scan_wait_ms)
         candidate = extract_scene_from_page(page, tracking, scan_numbers=False)
+        emit_debug(candidate, "zoom_out" if delta > 0 else "zoom_in")
         current_zoom = _maybe_float(candidate.get("map_zoom"))
         if current_zoom is None or (current_zoom - previous_zoom) * delta >= 0:
             break
@@ -1244,14 +1300,15 @@ def extract_scene_with_mouse_scan(
                 if tracking.scan_mode == "grouped_static" else []
             )
             for lat, lng in route_points:
-                if overview_views >= 32 or monotonic() >= scan_deadline:
+                if overview_views >= scan_view_limit or monotonic() >= scan_deadline:
                     break
-                overview = _pan_mouse_to(page, tracking, overview, lat, lng)
+                overview = _pan_mouse_to(page, tracking, overview, lat, lng,
+                                         on_view=debug_pan)
                 overview_views += 1
                 _merge_overview_scene(raw, overview, base_view, in_static_area)
             overview = _pan_mouse_to(
                 page, tracking, overview, overview_view.center_lat, overview_view.center_lng,
-                max_gestures=24,
+                max_gestures=24, on_view=debug_pan,
             )
         used = {item["index"] for item in raw["dynamics"] if item["index"] > 0}
         offscreen = []
@@ -1268,7 +1325,7 @@ def extract_scene_with_mouse_scan(
             offscreen, base_view.width, base_view.height, scan_zoom_ceiling,
             grouped_centers,
         ):
-            if overview_views >= 32 or monotonic() >= scan_deadline:
+            if overview_views >= scan_view_limit or monotonic() >= scan_deadline:
                 break
             target_lat, target_lng = _scan_group_center(
                 group, base_view.width, base_view.height, scan_zoom_ceiling,
@@ -1282,7 +1339,8 @@ def extract_scene_with_mouse_scan(
             if not (0 <= point[0] <= current_view.width and 0 <= point[1] <= current_view.height):
                 if not callable(getattr(page.mouse, "down", None)):
                     continue
-                overview = _pan_mouse_to(page, tracking, overview, target_lat, target_lng)
+                overview = _pan_mouse_to(page, tracking, overview, target_lat, target_lng,
+                                         on_view=debug_pan)
                 current_view = map_view_from_raw(overview.get("map"))
                 if current_view is None:
                     continue
@@ -1302,6 +1360,7 @@ def extract_scene_with_mouse_scan(
                 page.mouse.wheel(0, -120)
                 page.wait_for_timeout(scan_wait_ms)
                 current = extract_scene_from_page(page, tracking, scan_numbers=False)
+                emit_debug(current, "zoom_in")
                 record_numbered(current)
                 current_zoom = _maybe_float(current.get("map_zoom"))
                 if current_zoom is None or previous_zoom is None or current_zoom <= previous_zoom:
@@ -1316,16 +1375,19 @@ def extract_scene_with_mouse_scan(
                 page.mouse.wheel(0, 120)
                 page.wait_for_timeout(scan_wait_ms)
                 current = extract_scene_from_page(page, tracking, scan_numbers=False)
+                emit_debug(current, "zoom_out")
             overview = current
             if callable(getattr(page.mouse, "down", None)):
                 overview = _pan_mouse_to(
-                    page, tracking, overview, overview_view.center_lat, overview_view.center_lng
+                    page, tracking, overview, overview_view.center_lat, overview_view.center_lng,
+                    on_view=debug_pan,
                 )
     for delta in reversed(overview_moves):
         page.mouse.move(center_x, center_y)
         page.mouse.wheel(0, -delta)
         page.wait_for_timeout(scan_wait_ms)
         overview = extract_scene_from_page(page, tracking, scan_numbers=False)
+        emit_debug(overview, "zoom_out" if delta < 0 else "zoom_in")
     restored_zoom = _maybe_float(overview.get("map_zoom"))
     if restored_zoom is None or abs(restored_zoom - base_zoom) > 0.01:
         scan["status"] = "mouse_restore_failed"
@@ -1337,7 +1399,7 @@ def extract_scene_with_mouse_scan(
         if callable(getattr(page.mouse, "down", None)) and original_lat is not None \
                 and original_lng is not None:
             overview = _pan_mouse_to(page, tracking, overview, original_lat, original_lng,
-                                     max_gestures=24)
+                                     max_gestures=24, on_view=debug_pan)
         scan["status"] = "complete" if _scene_at_origin(overview, base_zoom, original_lat,
                                                           original_lng) else "mouse_restore_failed"
         scan["views"] = overview_views
@@ -1363,6 +1425,7 @@ def extract_scene_with_mouse_scan(
         page.mouse.wheel(0, delta)
         page.wait_for_timeout(scan_wait_ms)
         scene = extract_scene_from_page(page, tracking, scan_numbers=False)
+        emit_debug(scene, "zoom_in" if delta < 0 else "zoom_out")
         if delta < 0:
             record_numbered(scene)
         zoom_after = _maybe_float(scene.get("map_zoom"))
@@ -1379,7 +1442,7 @@ def extract_scene_with_mouse_scan(
         targets, base_view.width, base_view.height, scan_zoom_ceiling,
         grouped_centers,
     ):
-        if views + overview_views >= 32 or monotonic() >= scan_deadline:
+        if views + overview_views >= scan_view_limit or monotonic() >= scan_deadline:
             break
         if all(item["index"] > 0 for item in group):
             continue
@@ -1461,7 +1524,7 @@ def extract_scene_with_mouse_scan(
             and original_lng is not None:
         current = extract_scene_from_page(page, tracking, scan_numbers=False)
         current = _pan_mouse_to(page, tracking, current, original_lat, original_lng,
-                                max_gestures=24)
+                                max_gestures=24, on_view=debug_pan)
         if not _scene_at_origin(current, base_zoom, original_lat, original_lng):
             scan["status"] = "mouse_restore_failed"
 
@@ -1469,7 +1532,8 @@ def extract_scene_with_mouse_scan(
     scan["overview_count"] = len(raw.get("dynamics") or [])
     if scan.get("status") == "no_leaflet_instance":
         scan["status"] = "partial"
-    scan["budget_exhausted"] = monotonic() >= scan_deadline or scan["views"] >= 32
+    scan["budget_exhausted"] = (monotonic() >= scan_deadline
+                                or scan["views"] >= scan_view_limit)
     raw["scan"] = scan
     _apply_number_cache(raw, number_cache)
     raw["unnumbered_dynamics"] = sum(item["index"] < 0 for item in raw["dynamics"])
@@ -1515,6 +1579,7 @@ def _remember_numbers(
 def _pan_mouse_to(
     page: Any, tracking: TrackingConfig, scene: dict[str, Any], lat: float, lng: float,
     max_gestures: int = 8,
+    on_view: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Перетаскивает карту к центру, ограничивая каждый жест размером окна."""
     current = scene
@@ -1540,6 +1605,8 @@ def _pan_mouse_to(
             page.mouse.up()
         page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
         candidate = extract_scene_from_page(page, tracking, scan_numbers=False)
+        if on_view is not None:
+            on_view(candidate)
         next_view = map_view_from_raw(candidate.get("map"))
         current = candidate
         if next_view is None or next_view.center_lat is None or next_view.center_lng is None:

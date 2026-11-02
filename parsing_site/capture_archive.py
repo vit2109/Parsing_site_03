@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -95,6 +96,38 @@ class CaptureArchive:
         if self.settings.archive_html_enabled and session.numbered_html_error:
             errors.append(f"page: {session.numbered_html_error}")
         return self.saved, errors
+
+
+class ScanDebugArchive:
+    """Отдельный HTML-снимок каждого шага обхода в папке одного опроса."""
+
+    def __init__(self, started_at: datetime | None = None) -> None:
+        started_at = started_at or datetime.now().astimezone()
+        self.folder = (ROOT / "data" / "scan_debug" / started_at.strftime("%Y-%m-%d")
+                       / started_at.strftime("%H-%M-%S-%f"))
+        self.saved: list[Path] = []
+        self.errors: list[str] = []
+
+    def record(self, html: str, details: dict[str, Any]) -> None:
+        """Пишет HTML и строку манифеста сразу после полученного вида."""
+        step = len(self.saved) + 1
+        phase = str(details.get("phase") or "view")
+        phase = "".join(char if char.isalnum() or char == "_" else "_"
+                        for char in phase)[:32]
+        zoom = details.get("zoom")
+        zoom_label = str(zoom).replace(".", "_") if zoom is not None else "unknown"
+        filename = f"{step:03d}_{phase}_zoom-{zoom_label}.html"
+        target = self.folder / filename
+        try:
+            self.folder.mkdir(parents=True, exist_ok=True)
+            target.write_text(html, encoding="utf-8")
+            entry = {"step": step, "file": filename,
+                     "captured_at": datetime.now().astimezone().isoformat(), **details}
+            with (self.folder / "manifest.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            self.saved.append(target)
+        except Exception as exc:  # noqa: BLE001 — отладка не должна прерывать обход.
+            self.errors.append(f"scan_debug: {exc}")
 
 
 def capture_due(session: Any, settings: RuntimeSettings) -> tuple[list[Path], list[str]]:

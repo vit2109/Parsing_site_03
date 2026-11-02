@@ -170,14 +170,28 @@
             Максимальное приближение при обходе (zoom)
             <input name="scan_max_zoom" type="number" min="4" max="18" step="1" required value="{{ settings.scan_max_zoom }}" />
           </label>
+          <label class="checkbox">
+            <input name="scan_debug_html_enabled" type="checkbox" {% if settings.scan_debug_html_enabled %}checked{% endif %} />
+            Сохранять HTML каждого шага обхода для отладки
+          </label>
+          <p class="muted">Файлы каждого опроса сохраняются отдельно в data/scan_debug.</p>
           <label>
             Режим обхода карты
             <select name="scan_mode">
               <option value="adaptive" {% if settings.scan_mode == 'adaptive' %}selected{% endif %}>Адаптивный — обзор и группы объектов</option>
+              <option value="followed_grid" {% if settings.scan_mode == 'followed_grid' %}selected{% endif %}>Сопровождаемые — занятые квадраты</option>
               <option value="static_points" {% if settings.scan_mode == 'static_points' %}selected{% endif %}>По стационарным точкам — один проход групп</option>
               <option value="grouped_static" {% if settings.scan_mode == 'grouped_static' %}selected{% endif %}>По группам стационарных точек</option>
               <option value="zones" {% if settings.scan_mode == 'zones' %}selected{% endif %}>По заданным секторам — один проход групп</option>
             </select>
+          </label>
+          <label id="scan-followed-interval-control">
+            Интервал повторного нажатия «сопровождается», сек
+            <input name="scan_followed_click_interval_seconds" type="number" min="0.2" max="10" step="0.1" required value="{{ settings.scan_followed_click_interval_seconds }}" />
+          </label>
+          <label id="scan-empty-zoom-control">
+            Zoom общего вида при 0 объектах
+            <input name="scan_empty_zoom" type="number" min="4" max="18" step="1" required value="{{ settings.scan_empty_zoom }}" />
           </label>
           <label id="scan-group-radius-control">
             Радиус объединения стационарных точек, км

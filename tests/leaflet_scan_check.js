@@ -8,7 +8,7 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
   sameNumber = false, denseUnique = false, bounded = false, mixedLabels = false,
   highStart = false, scanMode = 'adaptive', clusterCase = false,
   persistentDom = false, delayedLabels = false, remoteStatics = false,
-  twoPoints = false, configuredZoom = 8) {
+  twoPoints = false, configuredZoom = 8, debugScan = false) {
   let zoomInMoves = 0;
   let zoomInWaits = 0;
   let awaitingZoomInPause = false;
@@ -26,7 +26,11 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     }
     return nativeSetTimeout(callback, Math.min(delay, 1), ...args);
   };
-  const points = twoPoints ? [
+  const points = scanMode === 'followed_grid' ? [
+    {lat: 50, lng: 0, number: 101},
+    {lat: 50, lng: 0.5, number: 102},
+    {lat: 50, lng: 12, number: 103},
+  ] : twoPoints ? [
     {lat: 50, lng: 0, number: 101},
     {lat: 50, lng: 12, number: 102},
   ] : clusterCase ? [
@@ -120,7 +124,11 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     };
   }
   global.window = {innerWidth: 800, innerHeight: 600};
+  global.location = {href: 'https://example.test/map'};
   global.document = {
+    documentElement: {get outerHTML() {
+      return `<html data-zoom="${map.zoom}" data-lng="${map.center.lng}"></html>`;
+    }},
     querySelector: () => mapEl,
     querySelectorAll(selector) {
       const visible = domPoints.filter((point) => {
@@ -176,7 +184,7 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
       {lat: 50, lng: 0, radius_km: 350},
       {lat: 50, lng: 12, radius_km: 350},
     ] : [],
-    scanNumbers: true, captureNumbered: true,
+    scanNumbers: true, captureNumbered: true, debugScan,
     scanMaxZoom: twoPoints ? configuredZoom : bounded || highStart ? 8 : 10,
     scanRadiusKm: remoteStatics ? 2000 : 350,
   });
@@ -184,6 +192,21 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     assert.equal(result.scan.status, 'no_leaflet_instance');
     assert.equal(result.unnumbered_dynamics,
       document.querySelectorAll('.leaflet-marker-icon.map-incident').length);
+    return;
+  }
+  if (scanMode === 'followed_grid') {
+    const detailed = moves.filter((move) => move[2] === configuredZoom);
+    assert.equal(result.scan.mode, 'followed_grid');
+    assert.deepEqual(result.dynamics.map((item) => item.index).sort(), [101, 102, 103]);
+    assert.equal(detailed.length, 2, 'two occupied squares need two detailed views');
+    assert.equal(moves.length, 3,
+      'two occupied squares and one final restore need only three map moves');
+    assert.ok(maximumVisitedZoom <= configuredZoom);
+    assert.ok(minimumVisitedZoom >= initialZoom,
+      'the fitted followed view is the starting point');
+    assert.equal(result.scan.numbered_views.length, 2);
+    assert.deepEqual(map.center, {lat: 50, lng: 0});
+    assert.equal(map.zoom, initialZoom);
     return;
   }
   if (scanMode !== 'adaptive') {
@@ -202,6 +225,15 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     return {zoomInMoves, moves, scan: result.scan};
   }
   if (twoPoints) {
+    if (debugScan) {
+      assert.equal(result.scan.debug_views.length, moves.length + 1,
+        'debug HTML is captured at the initial view and after every map move');
+      assert.equal(result.scan.debug_views[0].phase, 'initial');
+      for (const view of result.scan.debug_views) {
+        assert.ok(view.html.includes(`data-zoom="${view.zoom}"`));
+        assert.ok(view.html.includes(`data-lng="${view.lng}"`));
+      }
+    }
     const detailed = moves.filter((move) => move[2] === configuredZoom);
     assert.equal(detailed.length, 2, 'each object area is visited once');
     assert.ok(maximumVisitedZoom <= configuredZoom, 'configured zoom is a ceiling');
@@ -285,6 +317,10 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     'adaptive', false, false, false, false, true, 7);
   await check(6, true, false, false, false, false, false, false, false,
     'adaptive', false, false, false, false, true, 9);
+  await check(6, true, false, false, false, false, false, false, false,
+    'adaptive', false, false, false, false, true, 9, true);
+  await check(4, true, false, false, false, false, false, false, false,
+    'followed_grid', false, false, false, false, true, 9);
   await check(6, true, false, false, false, false, false, false, false,
     'adaptive', false, true); // DOM сохраняет маркер с другого края карты
   await check(6, true, false, false, false, false, false, false, false,

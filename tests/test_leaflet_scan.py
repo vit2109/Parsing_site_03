@@ -300,6 +300,39 @@ class LeafletScanTest(unittest.TestCase):
         self.assertLess(result["scan"]["views"], 12)
         self.assertAlmostEqual(page.center_lng, 40, places=3)
 
+    def test_mouse_debug_records_zoom_steps(self) -> None:
+        page = _FakePage(zoom=5)
+        views: list[tuple[str, float]] = []
+        with patch(
+            "parsing_site.tracking.extract_scene_from_page",
+            side_effect=lambda _p, _t, **_kw: page.scene(),
+        ):
+            extract_scene_with_mouse_scan(
+                page, TrackingConfig(scan_max_zoom=8),
+                on_debug_view=lambda scene, phase: views.append(
+                    (phase, scene["map_zoom"])),
+            )
+        self.assertEqual(views[0], ("initial", 5))
+        self.assertTrue(any(phase == "zoom_in" for phase, _zoom in views))
+        self.assertTrue(any(phase == "zoom_out" for phase, _zoom in views))
+        self.assertEqual(views[-1][1], page.zoom)
+
+    def test_followed_grid_mouse_starts_from_fitted_view(self) -> None:
+        page = _FakePage(zoom=4)
+        tracking = TrackingConfig(
+            scan_mode="followed_grid", scan_max_zoom=8,
+            static_objects=[StaticObjectConfig(1, "Далёкая", 0, 0, 50, 100)],
+            coordinate_mode="latlng",
+        )
+        with patch("parsing_site.tracking.extract_scene_from_page",
+                   side_effect=lambda _p, _t, **_kw: page.scene()):
+            result = extract_scene_with_mouse_scan(page, tracking)
+        self.assertEqual([item["index"] for item in result["dynamics"]],
+                         [101, 102, 103])
+        self.assertEqual(result["scan"]["status"], "complete")
+        self.assertGreaterEqual(min(page.zoom_history), 4)
+        self.assertLessEqual(page.max_zoom_seen, 8)
+
     def test_wheel_fallback_uses_configured_sector_route(self) -> None:
         page = _FakePage(offscreen=True, far=True, zoom=7)
         tracking = TrackingConfig(

@@ -33,6 +33,7 @@
         </select></label>
         <label>Режим маршрута<select id="sim-mode">
           <option value="adaptive">Адаптивный</option>
+          <option value="followed_grid">Сопровождаемые — занятые квадраты</option>
           <option value="static_points">По стационарным точкам</option>
           <option value="grouped_static">По группам точек</option>
           <option value="zones">По заданным секторам</option>
@@ -76,7 +77,7 @@
       </section>
       <aside class="sim-side">
         <section class="sim-panel"><div class="sim-panel__head"><h2>Маршрут обхода</h2><span id="sim-route-count"></span></div>
-          <p class="sim-note">Модель переходов по выбранному режиму. Реальный опрос Chrome здесь не выполняется. В режиме «Полный охват» маршрут включает каждый объект, переходит только к ещё не найденным номерам и при необходимости повышает zoom до появления подписи. Остальные режимы ограничены 32 переходами.</p>
+          <p class="sim-note">Модель переходов по выбранному режиму. Реальный опрос Chrome здесь не выполняется. Режим «Сопровождаемые — занятые квадраты» посещает все занятые квадраты без лимита 32 переходов, но не превышает заданный zoom. Если после маршрута остались доступные на этом zoom номера, тренажёр строит дополнительные квадраты и проверяет отдельные точки. В режиме «Полный охват» маршрут включает каждый объект и при необходимости повышает zoom до появления подписи. Остальные режимы ограничены 32 переходами.</p>
           <ol id="sim-route" class="sim-route"></ol></section>
         <section class="sim-panel"><div class="sim-panel__head"><h2>Примеры сообщений MAX</h2></div>
           <p class="sim-note">Текст формируется действующим алгоритмом по выбранным зонам. Это только предпросмотр: сообщения и скриншоты не отправляются.</p>
@@ -86,6 +87,6 @@
   </main>
   <script>window.__SIM_DEFAULT_MODE__ = {{ scan_mode | tojson }};</script>
   <script src="/static/vendor/leaflet/leaflet.js"></script>
-  <script src="/static/js/simulator.js?v=3"></script>
+  <script src="/static/js/simulator.js?v=5"></script>
 </body>
 </html>

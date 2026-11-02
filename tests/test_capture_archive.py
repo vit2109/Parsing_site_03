@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
@@ -7,7 +8,12 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from parsing_site.browser import BrowserSession, NumberedCapture
-from parsing_site.capture_archive import CaptureArchive, capture_due, period_path
+from parsing_site.capture_archive import (
+    CaptureArchive,
+    ScanDebugArchive,
+    capture_due,
+    period_path,
+)
 from parsing_site.config import BrowserConfig, TrackingConfig
 from parsing_site.db import Database
 from parsing_site.settings_store import SettingsStore, from_dict, validate_settings
@@ -26,6 +32,156 @@ class FakeSession:
 
 
 class CaptureArchiveTest(unittest.TestCase):
+    def test_followed_grid_refits_tab_twice_and_reports_missing_number(self) -> None:
+        class Tab:
+            first: Tab
+
+            def __init__(self) -> None:
+                self.first = self
+                self.clicks = 0
+
+            def count(self) -> int:
+                return 1
+
+            def inner_text(self) -> str:
+                return "2 сопровождается"
+
+            def click(self, **_kwargs: object) -> None:
+                self.clicks += 1
+
+        class Page:
+            url = "https://example.test/map"
+
+            def __init__(self) -> None:
+                self.tab = Tab()
+                self.waits: list[int] = []
+
+            def title(self) -> str:
+                return "Карта"
+
+            def get_by_role(self, *_args: object, **_kwargs: object) -> Tab:
+                return self.tab
+
+            def wait_for_timeout(self, milliseconds: int) -> None:
+                self.waits.append(milliseconds)
+
+        page = Page()
+        session = BrowserSession(BrowserConfig())
+        raw = {"scan": {"status": "complete"},
+               "dynamics": [{"index": 101}]}
+        with patch.object(session, "_ready_page", return_value=page), \
+                patch("parsing_site.browser.extract_scene_from_page",
+                      return_value={"dynamics": [{"index": 101}, {"index": 102}]}), \
+                patch("parsing_site.browser.extract_scene_with_mouse_scan",
+                      return_value=raw):
+            _snapshot, result = session.capture_scene(TrackingConfig(
+                scan_mode="followed_grid", scan_wait_seconds=1.5,
+                scan_followed_click_interval_seconds=1.0,
+            ))
+        self.assertEqual(page.tab.clicks, 3)
+        self.assertEqual(page.waits, [1500, 1000, 1500])
+        self.assertEqual(result["scan"]["expected_count"], 2)
+        self.assertEqual(result["scan"]["status"], "partial")
+
+    def test_followed_grid_zero_uses_general_tab_without_scanning(self) -> None:
+        class Tab:
+            first: Tab
+
+            def __init__(self, label: str) -> None:
+                self.first = self
+                self.label = label
+                self.clicks = 0
+
+            def count(self) -> int:
+                return 1
+
+            def inner_text(self) -> str:
+                return self.label
+
+            def click(self, **_kwargs: object) -> None:
+                self.clicks += 1
+
+        class Page:
+            url = "https://example.test/map"
+
+            def __init__(self) -> None:
+                self.followed = Tab("0 сопровождается")
+                self.general = Tab("Общая обстановка")
+                self.zoom_target: int | None = None
+
+            def title(self) -> str:
+                return "Карта"
+
+            def get_by_role(self, _role: str, *, name: object) -> Tab:
+                return self.general if name.search("Общая обстановка") else self.followed
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                pass
+
+            def evaluate(self, _script: str, target: int) -> bool:
+                self.zoom_target = target
+                return True
+
+        page = Page()
+        session = BrowserSession(BrowserConfig())
+        raw = {"map_zoom": 4, "dynamics": [{"index": 999}]}
+        zoomed = {"map_zoom": 5, "dynamics": [{"index": 999}]}
+        with patch.object(session, "_ready_page", return_value=page), \
+                patch("parsing_site.browser.extract_scene_from_page",
+                      side_effect=[raw, zoomed]), \
+                patch("parsing_site.browser.extract_scene_with_mouse_scan") as scan:
+            _snapshot, result = session.capture_scene(TrackingConfig(
+                scan_mode="followed_grid", scan_empty_zoom=5,
+            ))
+        scan.assert_not_called()
+        self.assertEqual(page.zoom_target, 5)
+        self.assertEqual(result["map_zoom"], 5)
+        self.assertEqual(page.followed.clicks, 0)
+        self.assertEqual(page.general.clicks, 1)
+        self.assertEqual(result["dynamics"], [])
+        self.assertEqual(result["scan"]["status"], "complete")
+
+    def test_scan_debug_saves_each_view_in_separate_poll_folder(self) -> None:
+        class Tab:
+            def count(self) -> int:
+                return 0
+
+        class Page:
+            url = "https://example.test/map"
+
+            def title(self) -> str:
+                return "Карта"
+
+            def get_by_role(self, *_args: object, **_kwargs: object) -> Tab:
+                return Tab()
+
+        with TemporaryDirectory() as directory, \
+                patch("parsing_site.capture_archive.ROOT", Path(directory)):
+            archive = ScanDebugArchive(datetime(2026, 10, 30, 12, 0, tzinfo=UTC))
+            session = BrowserSession(BrowserConfig())
+            session.prepare_scan_debug(archive.record)
+            raw = {"scan": {"debug_views": [
+                {"phase": "initial", "zoom": 4, "lat": 50, "lng": 30,
+                 "html": "<html>initial</html>"},
+                {"phase": "zoom_in", "zoom": 8, "lat": 51, "lng": 31,
+                 "html": "<html>zoomed</html>"},
+            ]}}
+            with patch.object(session, "_ready_page", return_value=Page()), \
+                    patch("parsing_site.browser.extract_scene_with_mouse_scan",
+                          return_value=raw):
+                _snapshot, result = session.capture_scene(TrackingConfig())
+            self.assertEqual(len(archive.saved), 2)
+            self.assertEqual([path.read_text(encoding="utf-8")
+                              for path in archive.saved],
+                             ["<html>initial</html>", "<html>zoomed</html>"])
+            entries = [json.loads(line) for line in
+                       (archive.folder / "manifest.jsonl").read_text(
+                           encoding="utf-8").splitlines()]
+            self.assertEqual([entry["phase"] for entry in entries],
+                             ["initial", "zoom_in"])
+            self.assertEqual([entry["zoom"] for entry in entries], [4, 8])
+            self.assertNotIn("debug_views", result["scan"])
+
     def test_tracked_tab_is_clicked_before_every_map_scan(self) -> None:
         events: list[str] = []
 

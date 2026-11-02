@@ -21,8 +21,8 @@ class SimulatorTests(unittest.TestCase):
         )
 
     def scenario(self, count=60, **overrides):
-        arguments = dict(count=count, area="static", distribution="balanced", seed=42,
-                         reveal_zoom=8, group_radius=10)
+        arguments = {"count": count, "area": "static", "distribution": "balanced",
+                     "seed": 42, "reveal_zoom": 8, "group_radius": 10}
         arguments.update(overrides)
         return build_scenario(self.settings, None, **arguments)
 
@@ -36,12 +36,21 @@ class SimulatorTests(unittest.TestCase):
         self.assertGreater(first["zone_counts"]["blue"], 0)
         self.assertEqual(len(first["routes"]["static_points"]), 3)
         self.assertEqual(len(first["routes"]["grouped_static"]), 2)
+        self.assertTrue(first["routes"]["followed_grid"])
+        self.assertTrue(all(step["zoom"] == self.settings.scan_max_zoom
+                            for step in first["routes"]["followed_grid"]))
         self.assertIn("Всего динамических объектов: 60", first["preview"][0]["text"])
 
     def test_large_scenario_respects_route_limit(self):
         result = self.scenario(count=1000)
         self.assertEqual(len(result["objects"]), 1000)
         self.assertLessEqual(len(result["routes"]["adaptive"]), 32)
+        followed = result["routes"]["followed_grid"]
+        self.assertGreater(len(followed), 32)
+        self.assertEqual(
+            {item_id for step in followed for item_id in step["object_ids"]},
+            {item["id"] for item in result["objects"]},
+        )
         self.assertEqual(sum(result["zone_counts"].values()), 1000)
         complete = result["routes"]["full_coverage"]
         self.assertEqual(len(complete), 1000)
@@ -51,6 +60,14 @@ class SimulatorTests(unittest.TestCase):
             target = by_id[step["target_id"]]
             self.assertEqual((step["lat"], step["lng"]), (target["lat"], target["lng"]))
             self.assertGreaterEqual(step["zoom"], target["reveal_zoom"])
+
+    def test_followed_grid_uses_actual_map_dimensions(self):
+        result = self.scenario(count=120, map_width=360, map_height=420)
+        route = result["routes"]["followed_grid"]
+        self.assertEqual(
+            {item_id for step in route for item_id in step["object_ids"]},
+            {item["id"] for item in result["objects"]},
+        )
 
     def test_complete_mode_reaches_numbers_above_normal_zoom(self):
         self.settings.scan_max_zoom = 6

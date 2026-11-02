@@ -8,12 +8,15 @@ from random import Random
 from typing import Any
 
 from parsing_site.config import StaticObjectConfig
-from parsing_site.coordinates import haversine_km
-from parsing_site.max_bot import MaxAlertEngine, SCREENSHOTS_DISABLED_NOTE
+from parsing_site.coordinates import haversine_km, project_3857, unproject_3857
+from parsing_site.max_bot import SCREENSHOTS_DISABLED_NOTE, MaxAlertEngine
 from parsing_site.scan_routes import group_static_points
 from parsing_site.settings_store import MaxObjectRule, MaxRecipient, RuntimeSettings
 from parsing_site.tracking import (
-    DistanceRow, SceneObject, TrackingSnapshot, classify_distance,
+    DistanceRow,
+    SceneObject,
+    TrackingSnapshot,
+    classify_distance,
 )
 
 PRESETS = {
@@ -84,7 +87,8 @@ def _band_distance(band: int, settings: RuntimeSettings, rng: Random) -> float:
 
 
 def _make_routes(objects: list[dict[str, Any]], statics: list[StaticObjectConfig],
-                 settings: RuntimeSettings, group_radius: float) -> dict[str, list[dict[str, Any]]]:
+                 settings: RuntimeSettings, group_radius: float,
+                 map_width: float, map_height: float) -> dict[str, list[dict[str, Any]]]:
     zoom = settings.scan_max_zoom
     radius = max(20.0, 70.0 * 2 ** (10 - zoom))
     entries: dict[str, list[tuple[str, float, float]]] = {
@@ -106,6 +110,35 @@ def _make_routes(objects: list[dict[str, Any]], statics: list[StaticObjectConfig
                             sum(item["lat"] for item in cluster) / len(cluster),
                             sum(item["lng"] for item in cluster) / len(cluster))
                            for i, cluster in enumerate(clusters)]
+    if objects:
+        projected = [(item, project_3857(item["lat"], item["lng"], zoom))
+                     for item in objects]
+        min_x = min(point[0] for _item, point in projected)
+        min_y = min(point[1] for _item, point in projected)
+        side = max(1.0, min(map_width, map_height) * 0.7)
+        layouts = []
+        for shift_x in (0.0, side / 2):
+            for shift_y in (0.0, side / 2):
+                cells: dict[tuple[int, int], list[dict[str, Any]]] = {}
+                for item, (x, y) in projected:
+                    key = (int((x - min_x + shift_x) // side),
+                           int((y - min_y + shift_y) // side))
+                    cells.setdefault(key, []).append(item)
+                layouts.append(cells)
+        best = min(layouts, key=len)
+        entries["followed_grid"] = []
+        for i, cell in enumerate(best.values()):
+            points = [project_3857(item["lat"], item["lng"], zoom) for item in cell]
+            center = unproject_3857(
+                (min(x for x, _ in points) + max(x for x, _ in points)) / 2,
+                (min(y for _, y in points) + max(y for _, y in points)) / 2,
+                zoom,
+            )
+            entries["followed_grid"].append(
+                (f"Занятый квадрат {i + 1} · {len(cell)} объектов", *center),
+            )
+    else:
+        entries["followed_grid"] = []
     routes: dict[str, list[dict[str, Any]]] = {}
     for mode, centers in entries.items():
         if centers:
@@ -118,9 +151,15 @@ def _make_routes(objects: list[dict[str, Any]], statics: list[StaticObjectConfig
                 ordered.append(remaining.pop(nearest))
             centers = ordered
         steps = []
-        for title, lat, lng in centers[:32]:
-            covered = [item["id"] for item in objects
-                       if haversine_km(lat, lng, item["lat"], item["lng"]) <= radius]
+        for title, lat, lng in centers if mode == "followed_grid" else centers[:32]:
+            if mode == "followed_grid":
+                center_x, center_y = project_3857(lat, lng, zoom)
+                covered = [item["id"] for item, point in projected
+                           if abs(point[0] - center_x) <= map_width / 2
+                           and abs(point[1] - center_y) <= map_height / 2]
+            else:
+                covered = [item["id"] for item in objects
+                           if haversine_km(lat, lng, item["lat"], item["lng"]) <= radius]
             steps.append({"title": title, "lat": lat, "lng": lng, "zoom": zoom,
                           "radius_km": round(radius, 1), "object_ids": covered})
         routes[mode] = steps
@@ -156,13 +195,16 @@ def build_scenario(settings: RuntimeSettings, recent: dict[str, Any] | None, *,
                    count: int, area: str, distribution: str, seed: int,
                    reveal_zoom: int, group_radius: float,
                    red_km: float | None = None, yellow_km: float | None = None,
-                   blue_km: float | None = None) -> dict[str, Any]:
+                   blue_km: float | None = None,
+                   map_width: float = 800, map_height: float = 600) -> dict[str, Any]:
     """Создаёт воспроизводимый сценарий; не пишет данные и не отправляет MAX."""
     red = settings.threshold if red_km is None else red_km
     yellow = settings.warning_distance if yellow_km is None else yellow_km
     blue = settings.blue_distance if blue_km is None else blue_km
     if not 0 < red <= yellow <= blue <= 20_000:
         raise ValueError("Укажите пороги зон по возрастанию: красная ≤ жёлтая ≤ синяя.")
+    if not 200 <= map_width <= 5000 or not 200 <= map_height <= 5000:
+        raise ValueError("Размер карты должен быть от 200 до 5000 пикселей.")
     settings = replace(settings, threshold=red, warning_distance=yellow, blue_distance=blue)
     rng = Random(seed)
     statics, static_source = _valid_statics(settings, recent)
@@ -234,7 +276,7 @@ def build_scenario(settings: RuntimeSettings, recent: dict[str, Any] | None, *,
     preview = [{"user_id": item.user_id if item.user_id else None,
                 "text": item.text.removesuffix("\n" + SCREENSHOTS_DISABLED_NOTE),
                 "dynamic_id": item.dynamic_index} for item in previews[:3]]
-    routes = _make_routes(objects, statics, settings, group_radius)
+    routes = _make_routes(objects, statics, settings, group_radius, map_width, map_height)
     display_zones = ([{"name": zone.name, "lat": zone.lat, "lng": zone.lng,
                        "radius_km": zone.radius_km} for zone in settings.scan_zones]
                      if settings.scan_zones else [

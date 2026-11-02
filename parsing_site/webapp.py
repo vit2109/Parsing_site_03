@@ -76,7 +76,10 @@ class SettingsIn(BaseModel):
     interval_seconds: float = Field(ge=0.4, le=600)
     scan_wait_seconds: float = Field(default=1.5, ge=0.2, le=10)
     scan_max_zoom: int = Field(default=10, ge=4, le=18)
+    scan_debug_html_enabled: bool = False
     scan_mode: str = "adaptive"
+    scan_followed_click_interval_seconds: float = Field(default=1.0, ge=0.2, le=10)
+    scan_empty_zoom: int = Field(default=4, ge=4, le=18)
     scan_group_radius_km: float = Field(default=50, ge=1, le=500)
     scan_zones: list[ScanZoneIn] = Field(default_factory=list)
     screenshot_enabled: bool = False
@@ -121,6 +124,8 @@ class SimulatorIn(BaseModel):
     red_km: float = Field(gt=0, le=20_000)
     yellow_km: float = Field(gt=0, le=20_000)
     blue_km: float = Field(gt=0, le=20_000)
+    map_width: int = Field(default=800, ge=200, le=5000)
+    map_height: int = Field(default=600, ge=200, le=5000)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -162,6 +167,7 @@ def api_simulator_generate(payload: SimulatorIn) -> dict[str, Any]:
             area=payload.area, distribution=payload.distribution, seed=payload.seed,
             reveal_zoom=payload.reveal_zoom, group_radius=payload.group_radius,
             red_km=payload.red_km, yellow_km=payload.yellow_km, blue_km=payload.blue_km,
+            map_width=payload.map_width, map_height=payload.map_height,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

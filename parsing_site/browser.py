@@ -102,6 +102,8 @@ class BrowserSession:
         self._numbered_captures: list[NumberedCapture] = []
         self._on_numbered_capture: Callable[[NumberedCapture], None] | None = None
         self._numbered_html_captured = False
+        self._scan_debug_capture: Callable[[str, dict], None] | None = None
+        self.scan_debug_error = ""
         self.numbered_capture_error = ""
         self.numbered_html_error = ""
 
@@ -117,6 +119,13 @@ class BrowserSession:
         self._numbered_html_captured = False
         self.numbered_capture_error = ""
         self.numbered_html_error = ""
+
+    def prepare_scan_debug(
+        self, on_capture: Callable[[str, dict], None] | None,
+    ) -> None:
+        """Включает сохранение HTML шагов только для текущего опроса."""
+        self._scan_debug_capture = on_capture
+        self.scan_debug_error = ""
 
     def take_numbered_capture(self) -> NumberedCapture | None:
         """Возвращает архивный вид, полученный во время обхода."""
@@ -186,7 +195,18 @@ class BrowserSession:
             self._number_cache.clear()
             self._cache_url = page.url
         tracked_tab = page.get_by_role("tab", name=re.compile("сопровожда", re.IGNORECASE))
-        if tracked_tab.count():
+        followed = tracking.scan_mode == "followed_grid"
+        has_tracked_tab = bool(tracked_tab.count())
+        expected_count = self._followed_count(tracked_tab.first) \
+            if followed and has_tracked_tab else None
+        if followed and expected_count == 0:
+            general = page.get_by_role(
+                "tab", name=re.compile("общая обстановка", re.IGNORECASE),
+            )
+            if general.count():
+                general.first.click(timeout=self._config.wait_timeout_ms)
+                page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
+        elif has_tracked_tab:
             tracked_tab.first.click(timeout=self._config.wait_timeout_ms)
             # После нажатия сайт обновляет слой маркеров асинхронно.
             page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
@@ -195,19 +215,137 @@ class BrowserSession:
             title=page.title(),
             html="",
         )
-        raw = extract_scene_with_mouse_scan(
-            page, tracking, self._number_cache,
-            on_numbered_view=(
-                lambda scene: self._capture_mouse_numbered(
-                    page, scene, tracking.map_container_selector
+        if followed and expected_count and has_tracked_tab:
+            overview = extract_scene_from_page(page, tracking, scan_numbers=False)
+            self._capture_scan_debug(page, overview, "followed_overview")
+            if len(overview.get("dynamics") or []) < expected_count:
+                # Повторяем только если сайт ещё не создал все маркеры после первого клика.
+                tracked_tab.first.click(timeout=self._config.wait_timeout_ms)
+                page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
+        if followed and expected_count == 0:
+            raw = self._capture_empty_followed_scene(page, tracking)
+        else:
+            try:
+                raw = extract_scene_with_mouse_scan(
+                    page, tracking, self._number_cache,
+                    on_numbered_view=(
+                        lambda scene: self._capture_mouse_numbered(
+                            page, scene, tracking.map_container_selector
+                        )
+                    ) if self._numbered_size or self._numbered_html_enabled else None,
+                    on_debug_view=(
+                        lambda scene, phase: self._capture_scan_debug(page, scene, phase)
+                    ) if self._scan_debug_capture else None,
                 )
-            ) if self._numbered_size or self._numbered_html_enabled else None,
-        )
-        scan = raw.get("scan") or {}
-        views = scan.get("numbered_views") or []
-        if (self._numbered_size or self._numbered_html_enabled) and views:
-            self._capture_numbered_views(page, tracking, views)
+                scan = raw.get("scan") or {}
+                for view in scan.pop("debug_views", []):
+                    if self._scan_debug_capture is not None:
+                        html = view.pop("html", "")
+                        try:
+                            self._scan_debug_capture(html, view)
+                        except Exception as exc:  # noqa: BLE001 — отладка не прерывает опрос.
+                            self.scan_debug_error = str(exc)
+                views = scan.get("numbered_views") or []
+                if (self._numbered_size or self._numbered_html_enabled) and views:
+                    self._capture_numbered_views(page, tracking, views)
+            finally:
+                if followed and has_tracked_tab:
+                    for attempt in range(2):
+                        tracked_tab.first.click(timeout=self._config.wait_timeout_ms)
+                        page.wait_for_timeout(round(
+                            (tracking.scan_followed_click_interval_seconds
+                             if attempt == 0 else tracking.scan_wait_seconds) * 1000
+                        ))
+                    self._capture_scan_debug_live(page, "followed_refit")
+            if expected_count is not None:
+                scan = raw.setdefault("scan", {})
+                scan["expected_count"] = expected_count
+                numbered = {item.get("index") for item in raw.get("dynamics") or []
+                            if item.get("index", -1) > 0}
+                if len(numbered) < expected_count and scan.get("status") == "complete":
+                    scan["status"] = "partial"
         return snapshot, raw
+
+    @staticmethod
+    def _followed_count(tab: object) -> int | None:
+        try:
+            label = tab.inner_text()
+        except Exception:  # noqa: BLE001 — счётчик вкладки может отсутствовать.
+            return None
+        match = re.search(r"\b(\d[\d\s]*)\s+сопровожда", label, re.IGNORECASE)
+        return int(re.sub(r"\s", "", match.group(1))) if match else None
+
+    def _capture_empty_followed_scene(self, page: Page, tracking: TrackingConfig) -> dict:
+        """При нулевом счётчике показывает общую карту без поиска номеров."""
+        raw = extract_scene_from_page(page, tracking, scan_numbers=False)
+        self._capture_scan_debug(page, raw, "empty_general")
+        target = tracking.scan_empty_zoom
+        zoom = raw.get("map_zoom")
+        if zoom is not None and abs(float(zoom) - target) > 0.01:
+            changed = page.evaluate("""target => {
+              const map = window.__parsingSiteMap;
+              if (!map || typeof map.setZoom !== 'function') return false;
+              map.setZoom(target, {animate: false});
+              return true;
+            }""", target)
+            if changed:
+                page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
+                raw = extract_scene_from_page(page, tracking, scan_numbers=False)
+                self._capture_scan_debug(page, raw, "empty_zoom")
+            else:
+                for _ in range(16):
+                    zoom = raw.get("map_zoom")
+                    if zoom is None or abs(float(zoom) - target) <= 0.01:
+                        break
+                    map_raw = raw.get("map") or {}
+                    page.mouse.move(float(map_raw.get("left") or 0) +
+                                    float(map_raw.get("width") or 0) / 2,
+                                    float(map_raw.get("top") or 0) +
+                                    float(map_raw.get("height") or 0) / 2)
+                    page.mouse.wheel(0, -120 if zoom < target else 120)
+                    page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
+                    candidate = extract_scene_from_page(page, tracking, scan_numbers=False)
+                    if candidate.get("map_zoom") == zoom:
+                        break
+                    raw = candidate
+                    self._capture_scan_debug(page, raw, "empty_zoom")
+        raw["dynamics"] = []
+        raw["unnumbered_dynamics"] = 0
+        raw["scan"] = {"status": "complete", "mode": "followed_grid",
+                       "views": 0, "overview_count": 0, "expected_count": 0}
+        return raw
+
+    def _capture_scan_debug(self, page: Page, scene: dict, phase: str) -> None:
+        """Сохраняет состояние карты после шага обхода мышью."""
+        if self._scan_debug_capture is None:
+            return
+        try:
+            map_raw = scene.get("map") or {}
+            self._scan_debug_capture(page.content(), {
+                "phase": phase, "zoom": scene.get("map_zoom"),
+                "center": map_raw.get("center"), "url": page.url,
+                "dynamic_count": len(scene.get("dynamics") or []),
+            })
+        except Exception as exc:  # noqa: BLE001 — отладка не прерывает опрос.
+            self.scan_debug_error = str(exc)
+
+    def _capture_scan_debug_live(self, page: Page, phase: str) -> None:
+        """Снимает HTML после перемещения карты для архива или MAX."""
+        if self._scan_debug_capture is None:
+            return
+        try:
+            view = page.evaluate("""() => {
+              const map = window.__parsingSiteMap;
+              if (!map) return null;
+              const center = map.getCenter();
+              return {zoom: map.getZoom(), center: {lat: center.lat, lng: center.lng}};
+            }""")
+            if isinstance(view, dict):
+                self._scan_debug_capture(page.content(), {
+                    "phase": phase, **view, "url": page.url,
+                })
+        except Exception as exc:  # noqa: BLE001 — отладка не прерывает опрос.
+            self.scan_debug_error = str(exc)
 
     def _capture_mouse_numbered(self, page: Page, scene: dict, selector: str) -> bool:
         """Снимает архив прямо во время приближения мышью."""
@@ -305,6 +443,8 @@ class BrowserSession:
             })
             for _ in range(2):
                 page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
+                if _ == 0:
+                    self._capture_scan_debug_live(page, "max_pair")
                 zoom = page.evaluate("() => window.__parsingSiteMap.getZoom()")
                 if self._capture_visible_view(
                     page, tracking.map_container_selector, float(zoom),
@@ -351,7 +491,10 @@ class BrowserSession:
         if target is None:
             return False
         try:
-            current = _pan_mouse_to(page, tracking, current, *target[1], max_gestures=12)
+            current = _pan_mouse_to(
+                page, tracking, current, *target[1], max_gestures=12,
+                on_view=lambda scene: self._capture_scan_debug(page, scene, "max_pan"),
+            )
             for _ in range(16):
                 view = map_view_from_raw(current.get("map"))
                 if view is None or view.zoom is None or abs(view.zoom - target[0]) < 0.01:
@@ -363,6 +506,7 @@ class BrowserSession:
                 page.mouse.wheel(0, direction)
                 page.wait_for_timeout(wait_ms)
                 candidate = extract_scene_from_page(page, tracking, scan_numbers=False)
+                self._capture_scan_debug(page, candidate, "max_zoom")
                 next_view = map_view_from_raw(candidate.get("map"))
                 if next_view is None or next_view.zoom == view.zoom:
                     break
@@ -394,9 +538,12 @@ class BrowserSession:
                     page.mouse.wheel(0, 120 if view.zoom > original_view.zoom else -120)
                     page.wait_for_timeout(wait_ms)
                     current = extract_scene_from_page(page, tracking, scan_numbers=False)
+                    self._capture_scan_debug(page, current, "max_restore_zoom")
                 _pan_mouse_to(
                     page, tracking, current, original_view.center_lat,
                     original_view.center_lng, max_gestures=12,
+                    on_view=lambda scene: self._capture_scan_debug(
+                        page, scene, "max_restore_pan"),
                 )
             except Exception as exc:  # noqa: BLE001 — фиксируем ошибку восстановления.
                 self.numbered_capture_error = f"Не удалось восстановить карту: {exc}"
@@ -492,6 +639,7 @@ class BrowserSession:
                         {"lat": view["lat"], "lng": view["lng"], "zoom": transit_zoom},
                     )
                     page.wait_for_timeout(100)
+                    self._capture_scan_debug_live(page, "archive_transit")
                     page.evaluate(
                         """view => window.__parsingSiteMap.setView(
                           [view.lat, view.lng], view.zoom, {animate: false}
@@ -500,6 +648,8 @@ class BrowserSession:
                     )
                     for _ in range(2):
                         page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
+                        if _ == 0:
+                            self._capture_scan_debug_live(page, "archive_view")
                         if self._capture_visible_view(
                             page, tracking.map_container_selector,
                             zoom,

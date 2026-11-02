@@ -31,6 +31,7 @@
   let known = new Set();
   let timer = null;
   let running = false;
+  let supplementalPhase = 0;
 
   function escapeHtml(value) {
     return String(value).replace(/[&<>"']/g, char => ({
@@ -120,7 +121,9 @@
     }
     $("sim-route-count").textContent = fields.mode.value === "full_coverage"
       ? `${steps.length} целей · без лимита переходов`
-      : `${steps.length} переходов · предел ${scenario.route_limit}`;
+      : fields.mode.value === "followed_grid"
+        ? `${steps.length} занятых квадратов · без лимита 32 переходов`
+        : `${steps.length} переходов · предел ${scenario.route_limit}`;
     if (steps.length > 1) L.polyline(steps.map(step => [step.lat, step.lng]), {
       color: "#8cb6f4", weight: 2, dashArray: "5,6", opacity: .85,
     }).addTo(routeLayer);
@@ -166,12 +169,75 @@
       : `Шаг ${stepIndex} из ${route().length}: ${step.title} · zoom ${step.zoom}`;
   }
 
+  function supplementalSteps(missing, individual) {
+    const zoom = scenario.scan_max_zoom;
+    let groups;
+    if (individual) {
+      groups = missing.map(item => [item]);
+    } else {
+      const projected = missing.map(item => ({ item, point: map.project([item.lat, item.lng], zoom) }));
+      const minX = Math.min(...projected.map(entry => entry.point.x));
+      const minY = Math.min(...projected.map(entry => entry.point.y));
+      const size = map.getSize();
+      const side = Math.max(1, Math.min(size.x, size.y) * .7);
+      let best = null;
+      for (const shiftX of [0, side / 2]) for (const shiftY of [0, side / 2]) {
+        const cells = new Map();
+        for (const entry of projected) {
+          const key = `${Math.floor((entry.point.x - minX + shiftX) / side)},`
+            + `${Math.floor((entry.point.y - minY + shiftY) / side)}`;
+          if (!cells.has(key)) cells.set(key, []);
+          cells.get(key).push(entry.item);
+        }
+        if (!best || cells.size < best.size) best = cells;
+      }
+      groups = [...best.values()];
+    }
+    const remaining = groups.map((items, index) => {
+      const points = items.map(item => map.project([item.lat, item.lng], zoom));
+      const center = map.unproject(L.point(
+        (Math.min(...points.map(point => point.x)) + Math.max(...points.map(point => point.x))) / 2,
+        (Math.min(...points.map(point => point.y)) + Math.max(...points.map(point => point.y))) / 2,
+      ), zoom);
+      return { title: individual ? `Проверка объекта №${items[0].id}`
+        : `Дополнительный квадрат ${index + 1} · ${items.length} объектов`,
+      lat: center.lat, lng: center.lng, zoom, object_ids: items.map(item => item.id),
+      target_id: individual ? items[0].id : undefined, supplemental: true };
+    });
+    const ordered = [];
+    let cursor = map.getCenter();
+    while (remaining.length) {
+      const index = remaining.reduce((best, step, i) =>
+        cursor.distanceTo([step.lat, step.lng])
+          < cursor.distanceTo([remaining[best].lat, remaining[best].lng]) ? i : best, 0);
+      const step = remaining.splice(index, 1)[0];
+      ordered.push(step);
+      cursor = L.latLng(step.lat, step.lng);
+    }
+    return ordered;
+  }
+
   function nextStep() {
     if (!scenario) return;
     const steps = route();
     const next = fields.mode.value === "full_coverage"
-      ? steps.findIndex(step => !known.has(step.target_id)) : stepIndex;
+      ? steps.findIndex(step => !known.has(step.target_id))
+      : fields.mode.value === "followed_grid"
+        ? steps.findIndex((step, index) => index >= stepIndex
+          && (!step.target_id || !known.has(step.target_id)))
+        : stepIndex;
     if (next < 0 || next >= steps.length) {
+      if (fields.mode.value === "followed_grid" && supplementalPhase < 2) {
+        const missing = scenario.objects.filter(item => !known.has(item.id)
+          && item.reveal_zoom <= scenario.scan_max_zoom);
+        if (missing.length) {
+          supplementalPhase += 1;
+          steps.push(...supplementalSteps(missing, supplementalPhase === 2));
+          renderRoute();
+          nextStep();
+          return;
+        }
+      }
       stopAuto();
       if (home) map.setView(home.center, home.zoom, { animate: false });
       $("sim-progress").textContent = `Обход завершён · переходов ${transitions} · найдено ${known.size} из ${scenario.objects.length} номеров · без номера ${scenario.objects.length - known.size} · исходный вид восстановлен`;
@@ -190,6 +256,9 @@
 
   function resetView() {
     stopAuto(); stepIndex = 0; transitions = 0; known = new Set();
+    if (scenario) scenario.routes.followed_grid = scenario.routes.followed_grid
+      .filter(step => !step.supplemental);
+    supplementalPhase = 0;
     $("sim-found").textContent = "0";
     if (scenario) $("sim-missing").textContent = String(scenario.objects.length);
     if (home) map.setView(home.center, home.zoom, { animate: false });
@@ -238,13 +307,17 @@
     button.disabled = true;
     $("sim-error").hidden = true;
     try {
+      map.invalidateSize();
+      const mapSize = map.getSize();
       const response = await fetch("/api/simulator/generate", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ count: Number(fields.count.value), area: fields.area.value,
           distribution: fields.distribution.value, seed: Number(fields.seed.value),
           reveal_zoom: Number(fields.reveal.value), group_radius: Number(fields.radius.value),
           red_km: Number(fields.redKm.value), yellow_km: Number(fields.yellowKm.value),
-          blue_km: Number(fields.blueKm.value) }),
+          blue_km: Number(fields.blueKm.value),
+          map_width: Math.min(5000, Math.max(200, Math.round(mapSize.x))),
+          map_height: Math.min(5000, Math.max(200, Math.round(mapSize.y))) }),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
       scenario = await response.json();
@@ -253,9 +326,12 @@
       $("sim-yellow").textContent = String(scenario.zone_counts.warning);
       $("sim-blue").textContent = String(scenario.zone_counts.blue);
       $("sim-outside").textContent = String(scenario.zone_counts.ok);
+      const unavailable = scenario.objects.filter(item => item.reveal_zoom > scenario.scan_max_zoom).length;
       $("sim-source").textContent = `Основа данных: ${scenario.source}. Пороги: красная ${scenario.thresholds.alert} км, `
         + `жёлтая ${scenario.thresholds.warning} км, синяя ${scenario.thresholds.blue} км. `
-        + `Максимальный zoom обычных режимов: ${scenario.scan_max_zoom}.`;
+        + `Максимальный zoom: ${scenario.scan_max_zoom}. `
+        + (unavailable ? `${unavailable} объектов требуют большего zoom и в режиме занятых квадратов останутся без номера.`
+          : `Все объекты могут показать номер на этом масштабе.`);
       renderMap(); renderMessages(); resetView();
       $("sim-step").disabled = false;
       $("sim-auto").disabled = false;

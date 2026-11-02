@@ -700,7 +700,10 @@ function fillForm(settings) {
   setFormValue("interval_seconds", settings.interval_seconds);
   setFormValue("scan_wait_seconds", settings.scan_wait_seconds ?? 1.5);
   setFormValue("scan_max_zoom", settings.scan_max_zoom ?? 10);
+  els.form.elements.namedItem("scan_debug_html_enabled").checked = Boolean(settings.scan_debug_html_enabled);
   setFormValue("scan_mode", settings.scan_mode ?? "adaptive");
+  setFormValue("scan_followed_click_interval_seconds", settings.scan_followed_click_interval_seconds ?? 1);
+  setFormValue("scan_empty_zoom", settings.scan_empty_zoom ?? 4);
   setFormValue("scan_group_radius_km", settings.scan_group_radius_km ?? 50);
   renderScanZones();
   showScanModeControls();
@@ -904,6 +907,8 @@ function showScanModeControls() {
   els.scanZonesBlock.hidden = !active;
   els.scanZoneList.querySelectorAll("input").forEach(input => { input.disabled = !active; });
   els.scanGroupRadiusControl.hidden = mode !== "grouped_static";
+  els.form.querySelector("#scan-followed-interval-control").hidden = mode !== "followed_grid";
+  els.form.querySelector("#scan-empty-zoom-control").hidden = mode !== "followed_grid";
 }
 
 function renderScanZones() {
@@ -957,6 +962,9 @@ async function saveSettings(event) {
   data.interval_seconds = Number(data.interval_seconds);
   data.scan_wait_seconds = Number(data.scan_wait_seconds);
   data.scan_max_zoom = Number(data.scan_max_zoom);
+  data.scan_followed_click_interval_seconds = Number(data.scan_followed_click_interval_seconds);
+  data.scan_empty_zoom = Number(data.scan_empty_zoom);
+  data.scan_debug_html_enabled = Boolean(els.form.elements.namedItem("scan_debug_html_enabled")?.checked);
   data.scan_group_radius_km = Number(data.scan_group_radius_km);
   data.scan_zones = collectScanZones();
   data.screenshot_enabled = Boolean(els.form.elements.namedItem("screenshot_enabled")?.checked);

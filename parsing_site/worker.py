@@ -8,7 +8,7 @@ from time import monotonic
 from typing import Any
 
 from parsing_site.browser import BrowserNotConnectedError, BrowserSession
-from parsing_site.capture_archive import CaptureArchive
+from parsing_site.capture_archive import CaptureArchive, ScanDebugArchive
 from parsing_site.config import load_config
 from parsing_site.db import Database
 from parsing_site.max_bot import PHOTO_MISSING_NOTE, MaxAlertEngine, MaxDispatch
@@ -174,12 +174,16 @@ class ParseWorker:
                         cfg = settings.to_app_config(load_config())
                         interval = max(0.4, settings.interval_seconds)
                         archive = CaptureArchive(settings)
+                        debug_archive = ScanDebugArchive() if settings.scan_debug_html_enabled else None
                         session.prepare_numbered_capture(
                             (settings.screenshot_width, settings.screenshot_height)
                             if settings.screenshot_enabled else None,
                             html_enabled=settings.archive_html_enabled,
                             on_capture=archive.save,
                         )
+                        prepare_debug = getattr(session, "prepare_scan_debug", None)
+                        if callable(prepare_debug):
+                            prepare_debug(debug_archive.record if debug_archive else None)
                         snapshot = capture_snapshot(session, cfg.tracking)
                         current_day = datetime.now().astimezone().date().isoformat()
                         if current_day != previous_day:
@@ -285,6 +289,18 @@ class ParseWorker:
                                     note = "\nНе удалось подготовить скриншот с ближайшей точкой."
                                     delivery.text = delivery.text[:4000 - len(note)] + note
                         saved, archive_errors = archive.finish(session)
+                        if debug_archive is not None:
+                            archive_errors.extend(debug_archive.errors)
+                            if getattr(session, "scan_debug_error", ""):
+                                archive_errors.append(
+                                    f"scan_debug: {session.scan_debug_error}"
+                                )
+                            if debug_archive.saved:
+                                self._db.add_log(
+                                    "INFO", "archive",
+                                    f"Отладка обхода: {len(debug_archive.saved)} HTML в "
+                                    f"{debug_archive.folder}",
+                                )
                         for path in saved:
                             self._db.add_log("INFO", "archive", f"Сохранён файл: {path}")
                         for error in archive_errors:

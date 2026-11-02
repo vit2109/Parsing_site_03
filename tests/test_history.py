@@ -128,7 +128,8 @@ class HistoryDatabaseTest(unittest.TestCase):
 
     def test_scan_modes_and_zones_round_trip(self) -> None:
         self.assertEqual(from_dict({}).scan_mode, "adaptive")
-        payload = {"scan_mode": "zones", "scan_zones": [
+        payload = {"scan_mode": "zones", "scan_debug_html_enabled": True,
+                   "scan_zones": [
             {"name": "Север", "lat": 59.9, "lng": 30.3, "radius_km": 150},
         ]}
         settings = validate_settings(from_dict(payload))
@@ -139,6 +140,7 @@ class HistoryDatabaseTest(unittest.TestCase):
             loaded = SettingsStore(db).save(settings)
             self.assertEqual(loaded.scan_zones[0].name, "Север")
             self.assertEqual(SettingsStore(db).load().scan_zones[0].lat, 59.9)
+            self.assertTrue(SettingsStore(db).load().scan_debug_html_enabled)
             db.close()
         with self.assertRaises(ValueError):
             validate_settings(from_dict({"scan_mode": "zones"}))
@@ -152,8 +154,19 @@ class HistoryDatabaseTest(unittest.TestCase):
         }))
         self.assertEqual(grouped.to_app_config().tracking.scan_mode, "grouped_static")
         self.assertEqual(from_dict(grouped.to_dict()).scan_group_radius_km, 50)
+        followed = validate_settings(from_dict({
+            "scan_mode": "followed_grid",
+            "scan_followed_click_interval_seconds": 1.2,
+            "scan_empty_zoom": 5,
+        }))
+        self.assertEqual(followed.to_app_config().tracking.scan_mode, "followed_grid")
+        self.assertEqual(followed.to_app_config().tracking.scan_empty_zoom, 5)
+        self.assertEqual(from_dict(followed.to_dict()).scan_followed_click_interval_seconds,
+                         1.2)
         with self.assertRaises(ValueError):
             validate_settings(from_dict({"scan_group_radius_km": 501}))
+        with self.assertRaises(ValueError):
+            validate_settings(from_dict({"scan_empty_zoom": 19}))
 
     def test_trajectory_keeps_first_timestamp_until_coordinates_change(self) -> None:
         with TemporaryDirectory() as directory:

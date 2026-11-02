@@ -94,7 +94,10 @@ class RuntimeSettings:
     reference_zoom: float = 0.0
     scan_wait_seconds: float = 1.5
     scan_max_zoom: int = 10
+    scan_debug_html_enabled: bool = False
     scan_mode: str = "adaptive"
+    scan_followed_click_interval_seconds: float = 1.0
+    scan_empty_zoom: int = 4
     scan_group_radius_km: float = 50.0
     scan_zones: list[ScanZoneConfig] = field(default_factory=list)
     screenshot_enabled: bool = False
@@ -159,6 +162,8 @@ class RuntimeSettings:
                 scan_wait_seconds=self.scan_wait_seconds,
                 scan_max_zoom=self.scan_max_zoom,
                 scan_mode=self.scan_mode,
+                scan_followed_click_interval_seconds=self.scan_followed_click_interval_seconds,
+                scan_empty_zoom=self.scan_empty_zoom,
                 scan_group_radius_km=self.scan_group_radius_km,
                 scan_zones=list(self.scan_zones),
                 lock_scale=self.lock_scale,
@@ -244,6 +249,8 @@ def from_app_config(cfg: AppConfig) -> RuntimeSettings:
         scan_wait_seconds=cfg.tracking.scan_wait_seconds,
         scan_max_zoom=cfg.tracking.scan_max_zoom,
         scan_mode=cfg.tracking.scan_mode,
+        scan_followed_click_interval_seconds=cfg.tracking.scan_followed_click_interval_seconds,
+        scan_empty_zoom=cfg.tracking.scan_empty_zoom,
         scan_group_radius_km=cfg.tracking.scan_group_radius_km,
         scan_zones=list(cfg.tracking.scan_zones),
         lock_scale=cfg.tracking.lock_scale,
@@ -332,7 +339,12 @@ def from_dict(data: dict[str, Any]) -> RuntimeSettings:
         reference_zoom=float(data.get("reference_zoom", 0)),
         scan_wait_seconds=float(data.get("scan_wait_seconds", 1.5)),
         scan_max_zoom=int(data.get("scan_max_zoom", 10)),
+        scan_debug_html_enabled=bool(data.get("scan_debug_html_enabled", False)),
         scan_mode=str(data.get("scan_mode", "adaptive")),
+        scan_followed_click_interval_seconds=float(
+            data.get("scan_followed_click_interval_seconds", 1.0)
+        ),
+        scan_empty_zoom=int(data.get("scan_empty_zoom", 4)),
         scan_group_radius_km=float(data.get("scan_group_radius_km", 50)),
         scan_zones=scan_zones,
         screenshot_enabled=bool(data.get("screenshot_enabled", False)),
@@ -368,8 +380,12 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
         raise ValueError("Задержка на точке должна быть от 0.2 до 10 с.")
     if not 4 <= settings.scan_max_zoom <= 18:
         raise ValueError("Максимальный zoom обхода должен быть от 4 до 18.")
-    if settings.scan_mode not in {"adaptive", "static_points", "grouped_static", "zones"}:
+    if settings.scan_mode not in {"adaptive", "static_points", "grouped_static", "zones", "followed_grid"}:
         raise ValueError("Неизвестный режим обхода карты.")
+    if not 0.2 <= settings.scan_followed_click_interval_seconds <= 10:
+        raise ValueError("Интервал повторного нажатия должен быть от 0.2 до 10 с.")
+    if not 4 <= settings.scan_empty_zoom <= 18:
+        raise ValueError("Zoom при отсутствии объектов должен быть от 4 до 18.")
     if not 1 <= settings.scan_group_radius_km <= 500:
         raise ValueError("Радиус объединения стационарных точек должен быть от 1 до 500 км.")
     if settings.scan_mode in {"static_points", "grouped_static"} \
@@ -488,7 +504,12 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
         reference_zoom=float(settings.reference_zoom),
         scan_wait_seconds=float(settings.scan_wait_seconds),
         scan_max_zoom=int(settings.scan_max_zoom),
+        scan_debug_html_enabled=bool(settings.scan_debug_html_enabled),
         scan_mode=settings.scan_mode,
+        scan_followed_click_interval_seconds=float(
+            settings.scan_followed_click_interval_seconds
+        ),
+        scan_empty_zoom=int(settings.scan_empty_zoom),
         scan_group_radius_km=float(settings.scan_group_radius_km),
         scan_zones=[ScanZoneConfig(zone.name.strip(), zone.lat, zone.lng, zone.radius_km)
                     for zone in settings.scan_zones],
