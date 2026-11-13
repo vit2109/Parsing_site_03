@@ -22,12 +22,19 @@ let maxGroups = (window.__INITIAL_SETTINGS__?.max_groups || []).slice();
 // Отслеживание красных записей для звукового сигнала
 let previousAlertKeys = new Set();
 let soundEnabled = true;
+let currentSettings = window.__INITIAL_SETTINGS__ || {};
+let settingsSignature = "";
+let stateRevision = -1;
+let tickRunning = false;
+let lastStorageRefresh = 0;
 
 const els = {
   site: document.getElementById("site-label"),
   status: document.getElementById("status-chip"),
   start: document.getElementById("btn-start"),
   stop: document.getElementById("btn-stop"),
+  speedup: document.getElementById("btn-speedup"),
+  serviceFeedback: document.getElementById("service-feedback"),
   settingsBtn: document.getElementById("btn-settings"),
   testHtml: document.getElementById("btn-test-html"),
   pruneHistory: document.getElementById("btn-prune-history"),
@@ -66,15 +73,35 @@ const els = {
 els.start.addEventListener("click", () => post("/api/worker/start"));
 els.stop.addEventListener("click", () => post("/api/worker/stop"));
 els.settingsBtn.addEventListener("click", openSettings);
-if (els.testHtml) els.testHtml.addEventListener("click", loadTestHtml);
-if (els.pruneHistory) els.pruneHistory.addEventListener("click", async () => {
-  if (!window.confirm("Удалить историю динамических объектов старше 20 дней? Настройки стационарных объектов сохранятся.")) return;
+els.speedup.addEventListener("click", async () => {
+  els.speedup.disabled = true;
   try {
-    const result = await post("/api/history/prune");
-    window.alert(`Удалено опросов: ${result.polls_deleted}; снимков таблицы: ${result.snapshots_deleted}.`);
-    tick();
+    applySettings(await post("/api/speedup/toggle"));
   } catch (error) {
     showError(error.message);
+  } finally {
+    els.speedup.disabled = false;
+  }
+});
+if (els.testHtml) els.testHtml.addEventListener("click", loadTestHtml);
+if (els.pruneHistory) els.pruneHistory.addEventListener("click", async () => {
+  const field = els.form.elements.namedItem("history_keep_days");
+  if (!field.reportValidity()) return;
+  const days = Number(field.value);
+  if (!window.confirm(`Удалить историю динамических объектов старше ${days} дней? Настройки стационарных объектов сохранятся.`)) return;
+  els.pruneHistory.disabled = true;
+  try {
+    // Сохраняем только срок: остальные несохранённые поля формы не затрагиваем.
+    const current = await get("/api/settings");
+    applySettings(await put("/api/settings", {...current, history_keep_days: days}));
+    const result = await post(`/api/history/prune?keep_days=${days}`);
+    els.serviceFeedback.textContent = `Удалено опросов: ${result.polls_deleted}; снимков таблицы: ${result.snapshots_deleted}.`;
+    lastStorageRefresh = 0;
+    tick();
+  } catch (error) {
+    els.serviceFeedback.textContent = error.message;
+  } finally {
+    els.pruneHistory.disabled = false;
   }
 });
 els.cancel.addEventListener("click", () => els.dialog.close());
@@ -580,7 +607,7 @@ function applySnapshot(snapshot, settings) {
     ? ` · geo=${snapshot.geo_source}`
     : "";
   els.meta.textContent =
-    `${snapshot.title || snapshot.url} · режим ${mode}${zoom}${geo} · красный ≤ ${snapshot.threshold} ${unit} · жёлтый ≤ ${snapshot.warning_limit} ${unit}${unit === "km" ? ` · синий ≤ ${snapshot.blue_limit || 350} км` : ""}`;
+    `${snapshot.in_progress ? "Обход выполняется · промежуточные данные · " : ""}${snapshot.title || snapshot.url} · режим ${mode}${zoom}${geo} · красный ≤ ${snapshot.threshold} ${unit} · жёлтый ≤ ${snapshot.warning_limit} ${unit}${unit === "km" ? ` · синий ≤ ${snapshot.blue_limit || 350} км` : ""}`;
 
   if (snapshot.scale_warning) {
     els.scaleWarning.hidden = false;
@@ -628,14 +655,16 @@ async function loadTestHtml() {
   try {
     hideError();
     await post("/api/test-file");
+    els.dialog.close();
     await tick();
   } catch (err) {
-    showError(err.message);
+    els.serviceFeedback.textContent = err.message;
   }
 }
 
 /** Синхронизирует список точек и открывает диалог настроек. */
 function openSettings() {
+  fillForm(currentSettings);
   renderStaticList();
   renderScanZones();
   showScanModeControls();
@@ -653,30 +682,59 @@ function selectSettingsTab(panelId, focus = false) {
   els.settingsPanels.forEach(panel => { panel.hidden = panel.id !== panelId; });
   const content = els.dialog.querySelector(".settings-content");
   if (content) content.scrollTop = 0;
+  if (panelId === "panel-service") {
+    lastStorageRefresh = 0;
+    tick();
+  }
 }
 
 /** Получает очередное состояние сервера, историю движений и обновляет UI. */
 async function tick() {
+  if (tickRunning) return;
+  tickRunning = true;
   try {
+    const storage = els.dialog.open && !document.getElementById("panel-service").hidden &&
+      Date.now() - lastStorageRefresh > 30000;
     const [state, movements] = await Promise.all([
-      get("/api/state"),
+      get(`/api/state?include_storage=${storage}&since_revision=${stateRevision}`),
       get("/api/movements?limit=40"),
     ]);
+    const settingsChanged = settingsSignature !== JSON.stringify(state.settings);
     applySettings(state.settings);
     applyWorker(state.worker);
-    applySnapshot(state.snapshot, state.settings);
+    if (state.snapshot_changed !== false || settingsChanged) {
+      applySnapshot(state.snapshot_changed === false ? lastSnapshot : state.snapshot, state.settings);
+    }
+    stateRevision = state.worker.revision ?? -1;
     applyTableHistoryStats(state.table_history);
+    if (storage) lastStorageRefresh = Date.now();
     applyLogs(state.logs || []);
-    const visibleNumbers = new Set((state.snapshot?.dynamics || []).map((item) => Number(item.index)));
+    const visibleNumbers = new Set((lastSnapshot?.dynamics || []).map((item) => Number(item.index)));
     applyMoves((movements || []).filter((item) => visibleNumbers.has(Number(item.object_index))));
   } catch (err) {
     showError("Нет связи с сервером: " + err.message);
+  } finally {
+    tickRunning = false;
   }
 }
 
 /** Применяет серверные настройки к карточкам и форме. */
 function applySettings(settings) {
   if (!settings) return;
+  currentSettings = settings;
+  const signature = JSON.stringify(settings);
+  if (signature === settingsSignature) return;
+  settingsSignature = signature;
+  const accelerated = Boolean(settings.speedup_enabled);
+  els.speedup.textContent = accelerated ? "Вернуть обычный режим" : "Ускорить работу";
+  els.speedup.setAttribute("aria-pressed", String(accelerated));
+  els.speedup.classList.toggle("btn-primary", accelerated);
+  const paused = [];
+  if (settings.speedup_disable_max) paused.push("MAX");
+  if (settings.speedup_disable_screenshots) paused.push("скриншоты");
+  if (settings.speedup_disable_html) paused.push("HTML");
+  els.speedup.title = accelerated ? `Ускорение включено. Приостановлены: ${paused.join(", ") || "ничего не выбрано"}`
+    : `При ускорении отключаются: ${paused.join(", ") || "ничего не выбрано"}`;
   soundEnabled = settings.sound_enabled !== false;
   document.documentElement.style.setProperty("--alert", settings.alert_color);
   document.documentElement.style.setProperty("--warning", settings.warning_color);
@@ -692,6 +750,10 @@ function applySettings(settings) {
 
 /** Заполняет поля диалога значениями runtime-настроек. */
 function fillForm(settings) {
+  for (const name of ["speedup_disable_max", "speedup_disable_screenshots", "speedup_disable_html"]) {
+    els.form.elements.namedItem(name).checked = settings[name] !== false;
+  }
+  setFormValue("history_keep_days", settings.history_keep_days ?? 20);
   setFormValue("site", settings.site);
   setFormValue("dynamic_selector", settings.dynamic_selector);
   setFormValue("coordinate_mode", settings.coordinate_mode);
@@ -960,6 +1022,10 @@ async function saveSettings(event) {
   }
   const data = Object.fromEntries(new FormData(els.form).entries());
   data.interval_seconds = Number(data.interval_seconds);
+  data.history_keep_days = Number(data.history_keep_days);
+  for (const name of ["speedup_disable_max", "speedup_disable_screenshots", "speedup_disable_html"]) {
+    data[name] = els.form.elements.namedItem(name).checked;
+  }
   data.scan_wait_seconds = Number(data.scan_wait_seconds);
   data.scan_max_zoom = Number(data.scan_max_zoom);
   data.scan_followed_click_interval_seconds = Number(data.scan_followed_click_interval_seconds);

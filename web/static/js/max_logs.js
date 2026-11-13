@@ -29,7 +29,8 @@
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const state = await response.json();
       const problems = [];
-      if (!state.enabled) problems.push("рассылка по зонам выключена");
+      if (!state.enabled) problems.push(state.paused_by_speedup
+        ? "рассылка приостановлена режимом ускорения" : "рассылка по зонам выключена");
       if (!state.token_set) problems.push("токен не найден");
       if (!state.recipients || !state.rules) problems.push("получатели и зоны не настроены");
       config.textContent = problems.length

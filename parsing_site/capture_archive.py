@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -33,14 +34,18 @@ class ScreenshotRecord:
 class CaptureArchive:
     """Сохраняет каждый подписанный вид сразу, не накапливая JPEG в памяти."""
 
-    def __init__(self, settings: RuntimeSettings) -> None:
+    def __init__(self, settings: RuntimeSettings,
+                 current_settings: Callable[[], RuntimeSettings] | None = None) -> None:
         self.settings = settings
+        self._current_settings = current_settings
         self.saved: list[Path] = []
         self.errors: list[str] = []
         self.screenshots: list[ScreenshotRecord] = []
 
     def save(self, capture: Any) -> None:
         """Пишет JPEG вида и первый HTML обхода в выбранные папки."""
+        if self._current_settings is not None:
+            self.settings = self._current_settings().effective()
         jobs = (
             (self.settings.screenshot_enabled, self.settings.screenshot_dir,
              self.settings.screenshot_period_hours, "jpg", "map", capture.image),

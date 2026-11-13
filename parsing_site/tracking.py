@@ -36,6 +36,9 @@ from parsing_site.phone_loader import get_phone_for_static
 from parsing_site.scan_routes import group_static_points
 
 BLUE_ZONE_KM = 350.0
+# Один обход может занимать 180 с, а интервал между началами — до 600 с.
+# Кэш по ID дополнительно проверяет смещение (20 км) и сбрасывается при смене дня/URL.
+NUMBER_CACHE_TTL_SECONDS = 1200
 
 Status = Literal["ok", "blue", "warning", "alert"]
 
@@ -449,6 +452,27 @@ async (opts) => {
   dynamics.forEach(applyKnownNumber);
   const scan = { status: map ? "ready" : "no_leaflet_instance", views: 0,
     overview_count: dynamics.length, mode: opts.scanMode || "adaptive" };
+  let lastProgress = 0;
+  const reportProgress = () => {
+    if (!opts.progressPrefix || Date.now() - lastProgress < 1000) return;
+    lastProgress = Date.now();
+    const origin = center ? project3857(center.lat, center.lng, zoom) : null;
+    const items = dynamics.map((item) => {
+      if (!origin || !Number.isFinite(item.lat) || !Number.isFinite(item.lng)) return item;
+      const point = project3857(item.lat, item.lng, zoom);
+      const xy = xyForMode(mapRect.left + point.x - origin.x + mapRect.width / 2,
+        mapRect.top + point.y - origin.y + mapRect.height / 2);
+      return {...item, x: round2(xy.x), y: round2(xy.y)};
+    });
+    console.debug(opts.progressPrefix + JSON.stringify({dynamics: items, statics,
+      config_statics: configStatics, coordinate_mode: mode, map_zoom: zoom,
+      geo_source: geoSource, viewport: {width: window.innerWidth, height: window.innerHeight},
+      map: mapRect ? {width: mapRect.width, height: mapRect.height, zoom, center,
+        has_leaflet: Boolean(map), geo_source: geoSource, proxy} : null,
+      unnumbered_dynamics: items.filter(item => item.index < 0).length,
+      scan: {...scan, status: "running"}}));
+  };
+  reportProgress();
 
   // Сначала собираем маркеры при отдалении, затем читаем подписи в увеличенном виде.
   // Позиции всех объектов в результате пересчитываются для исходного вида карты.
@@ -611,6 +635,7 @@ async (opts) => {
           matched++;
         }
       }
+      reportProgress();
       return matched;
     };
     try {
@@ -636,6 +661,7 @@ async (opts) => {
             }
           }
         }
+        reportProgress();
         return added;
       };
       // В html_test/44.html нужные маркеры видны при zoom 4. Сразу переходим
@@ -1015,6 +1041,7 @@ def extract_scene_from_page(
     known_numbers: dict[int, tuple[int, float, float]] | None = None,
     capture_numbered: bool = False,
     debug_scan: bool = False,
+    progress_prefix: str = "",
 ) -> dict[str, Any]:
     """Снимает маркеры и вид карты из живой вкладки (JS _EXTRACT_SCRIPT)."""
     grouped_route = group_static_points(
@@ -1030,6 +1057,7 @@ def extract_scene_from_page(
             "scanNumbers": scan_numbers,
             "captureNumbered": capture_numbered,
             "debugScan": debug_scan,
+            "progressPrefix": progress_prefix,
             "scanWaitMs": round(tracking.scan_wait_seconds * 1000),
             "scanMaxZoom": tracking.scan_max_zoom,
             "scanMode": tracking.scan_mode,
@@ -1142,9 +1170,17 @@ def extract_scene_with_mouse_scan(
     number_cache: dict[int, tuple[int, float, float, float]] | None = None,
     on_numbered_view: Callable[[dict[str, Any]], bool] | None = None,
     on_debug_view: Callable[[dict[str, Any], str], None] | None = None,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
+    progress_prefix: str = "",
 ) -> dict[str, Any]:
     """Обходит карту колесом браузера, если Vue не отдаёт экземпляр L.Map."""
     raw = extract_scene_from_page(page, tracking, scan_numbers=False)
+    def report_progress() -> None:
+        if on_progress is not None:
+            on_progress({**raw, "scan": {**(raw.get("scan") or {}), "status": "running"},
+                         "unnumbered_dynamics": sum(item["index"] < 0 for item in raw.get("dynamics") or [])})
+
+    report_progress()
     initial_labels_visible = any(item.get("index", 0) > 0 for item in raw.get("dynamics") or [])
     if on_numbered_view is None:
         _apply_number_cache(raw, number_cache)
@@ -1154,12 +1190,13 @@ def extract_scene_with_mouse_scan(
         recent_numbers = {
             identity: (number, lat, lng)
             for identity, (number, lat, lng, captured_at) in (number_cache or {}).items()
-            if now - captured_at <= 60
+            if now - captured_at <= NUMBER_CACHE_TTL_SECONDS
         }
         raw = extract_scene_from_page(
             page, tracking, scan_numbers=True, known_numbers=recent_numbers,
             capture_numbered=on_numbered_view is not None,
             debug_scan=on_debug_view is not None,
+            progress_prefix=progress_prefix,
         )
         _apply_number_cache(raw, number_cache)
         _remember_numbers(raw, number_cache)
@@ -1289,6 +1326,7 @@ def extract_scene_with_mouse_scan(
         overview_views += 1
         overview = candidate
         _merge_overview_scene(raw, candidate, base_view, in_static_area)
+        report_progress()
     overview_view = map_view_from_raw(overview.get("map"))
     if overview_view is not None and overview_view.can_unproject:
         if callable(getattr(page.mouse, "down", None)) and callable(getattr(page.mouse, "up", None)):
@@ -1306,6 +1344,7 @@ def extract_scene_with_mouse_scan(
                                          on_view=debug_pan)
                 overview_views += 1
                 _merge_overview_scene(raw, overview, base_view, in_static_area)
+                report_progress()
             overview = _pan_mouse_to(
                 page, tracking, overview, overview_view.center_lat, overview_view.center_lng,
                 max_gestures=24, on_view=debug_pan,
@@ -1369,6 +1408,7 @@ def extract_scene_with_mouse_scan(
                     break
                 ticks += 1
                 _merge_numbered_scene(raw, current, used)
+                report_progress()
             overview_views += 1
             for _ in range(ticks):
                 page.mouse.move(anchor_x, anchor_y)
@@ -1484,6 +1524,7 @@ def extract_scene_with_mouse_scan(
                 break
             views += 1
             _merge_numbered_scene(raw, current, used_numbers)
+            report_progress()
             # Проверяем всю группу: номера её соседей могут появиться позже.
             max_ticks = min(10, (wheel_ticks or 6) + 4)
             while any(item["index"] < 0 for item in group) and ticks < max_ticks:
@@ -1494,6 +1535,7 @@ def extract_scene_with_mouse_scan(
                 current = scene_after_wheel(screen_x, screen_y, -120)
                 ticks += 1
                 _merge_numbered_scene(raw, current, used_numbers)
+                report_progress()
                 if not current.get("dynamics"):
                     break
                 current_zoom = _maybe_float(current.get("map_zoom"))
@@ -1556,7 +1598,7 @@ def _apply_number_cache(
         if not known or item["index"] > 0 or lat is None or lng is None:
             continue
         number, old_lat, old_lng, captured_at = known
-        if now - captured_at <= 60 and haversine_km(lat, lng, old_lat, old_lng) <= 20 and number not in used:
+        if now - captured_at <= NUMBER_CACHE_TTL_SECONDS and haversine_km(lat, lng, old_lat, old_lng) <= 20 and number not in used:
             item["index"] = number
             used.add(number)
     raw["unnumbered_dynamics"] = sum(item["index"] < 0 for item in raw.get("dynamics") or [])

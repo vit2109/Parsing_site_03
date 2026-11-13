@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import secrets
@@ -43,19 +44,45 @@ worker = ParseWorker(db, store, table_history_db)
 async def lifespan(_app: FastAPI):
     """Инициализирует данные при старте и освобождает ресурсы при остановке ASGI."""
     db.mark_interrupted_max_deliveries()
-    store.ensure_defaults(load_config())
-    db.prune_dynamic_history()
-    table_history_db.prune_dynamic_history()
+    settings = store.ensure_defaults(load_config())
+    db.prune_dynamic_history(settings.history_keep_days)
+    table_history_db.prune_dynamic_history(settings.history_keep_days)
     db.ensure_fake_history()
     db.add_log("INFO", "web", "Интерфейс запущен")
+    server = getattr(_app.state, "uvicorn_server", None)
+    registration = None
+    registration_task = None
+    if server is not None:
+        async def publish_registration() -> None:
+            nonlocal registration
+            # Uvicorn входит в lifespan до bind(). Не перезаписываем ключ уже
+            # работающего процесса, если второй запуск получит «порт занят».
+            while not server.started and not server.should_exit:
+                await asyncio.sleep(0.05)
+            if server.started:
+                from parsing_site.launcher_registry import register
+
+                try:
+                    registration, _app.state.launcher_token = register(server.config.port, settings.cdp_url)
+                except OSError as exc:
+                    db.add_log("WARNING", "launcher", f"Не удалось включить подхват лаунчером: {exc}")
+
+        registration_task = asyncio.create_task(publish_registration())
     try:
         yield
     finally:
+        if registration_task is not None:
+            registration_task.cancel()
+            await asyncio.gather(registration_task, return_exceptions=True)
         # Освобождение выполняется и при исключении внутри жизненного цикла ASGI.
         if worker.status["running"]:
             worker.stop()
         table_history_db.close()
         db.close()
+        if registration is not None:
+            from parsing_site.launcher_registry import unregister
+
+            unregister(registration, _app.state.launcher_token)
 
 
 app = FastAPI(title="Парсинг объектов", lifespan=lifespan)
@@ -76,6 +103,11 @@ class SettingsIn(BaseModel):
     site: str = Field(min_length=1)
     cdp_url: str = "http://127.0.0.1:9222"
     interval_seconds: float = Field(ge=0.4, le=600)
+    speedup_enabled: bool = False
+    speedup_disable_max: bool = True
+    speedup_disable_screenshots: bool = True
+    speedup_disable_html: bool = True
+    history_keep_days: int = Field(default=20, ge=20, le=36500)
     scan_wait_seconds: float = Field(default=1.5, ge=0.2, le=10)
     scan_max_zoom: int = Field(default=10, ge=4, le=18)
     scan_debug_html_enabled: bool = False
@@ -182,7 +214,7 @@ def max_logs_page(request: Request) -> HTMLResponse:
 
 
 @app.get("/api/state")
-def api_state() -> dict[str, Any]:
+def api_state(include_storage: bool = True, since_revision: int | None = None) -> dict[str, Any]:
     """Возвращает единый снимок настроек, worker, таблицы, хранилища и логов."""
     settings = store.current()
     status = worker.status
@@ -195,12 +227,14 @@ def api_state() -> dict[str, Any]:
             "status": status["status"],
             "error": status["error"],
             "polls": status["polls"],
+            "revision": status.get("revision", 0),
         },
-        "snapshot": snapshot,
+        "snapshot": snapshot if since_revision != status.get("revision", 0) else None,
+        "snapshot_changed": since_revision != status.get("revision", 0),
         "table_history": table_history_db.storage_stats(
             interval_seconds=settings.interval_seconds,
             current_rows=current_rows,
-        ),
+        ) if include_storage else None,
         "logs": db.list_logs(40),
     }
 
@@ -253,6 +287,17 @@ def api_start() -> dict[str, Any]:
     return worker.status
 
 
+@app.post("/api/speedup/toggle")
+def api_toggle_speedup() -> dict[str, Any]:
+    """Переключает ускорение без изменения обычных настроек функций."""
+    from dataclasses import replace
+
+    settings = store.current()
+    saved = store.save(replace(settings, speedup_enabled=not settings.speedup_enabled))
+    db.add_log("INFO", "settings", "Ускорение " + ("включено" if saved.speedup_enabled else "выключено"))
+    return saved.public_dict()
+
+
 @app.post("/api/worker/stop")
 def api_stop() -> dict[str, Any]:
     """Останавливает фоновый опрос и возвращает его состояние."""
@@ -261,10 +306,12 @@ def api_stop() -> dict[str, Any]:
 
 
 @app.get("/api/launcher/status")
-def api_launcher_status(request: Request) -> dict[str, bool]:
+def api_launcher_status(request: Request) -> dict[str, Any]:
     """Подтверждает, что локальный запускатель управляет этим процессом."""
     _check_launcher_token(request)
-    return {"managed": True}
+    return {"managed": True, "application": "parsing-site", "pid": os.getpid(),
+            "instance": os.environ.get("PARSING_SITE_INSTANCE") or None,
+            "cdp_url": store.current().cdp_url}
 
 
 @app.post("/api/launcher/stop")
@@ -279,7 +326,7 @@ def api_launcher_stop(request: Request) -> dict[str, bool]:
 
 
 def _check_launcher_token(request: Request) -> None:
-    token = os.environ.get("PARSING_SITE_LAUNCHER_TOKEN", "")
+    token = os.environ.get("PARSING_SITE_LAUNCHER_TOKEN") or getattr(app.state, "launcher_token", "")
     if not token:
         raise HTTPException(status_code=404, detail="Управление запускателем выключено")
     received = request.headers.get("x-launcher-token", "")
@@ -314,7 +361,8 @@ def api_max_status() -> dict[str, Any]:
     settings = store.current()
     state = worker.status
     return {
-        "enabled": settings.max_enabled,
+        "enabled": settings.effective().max_enabled,
+        "paused_by_speedup": settings.max_enabled and settings.speedup_enabled and settings.speedup_disable_max,
         "token_set": bool(resolve_max_token(settings)),
         "recipients": len(settings.max_recipients),
         "rules": sum(len(item.rules) for item in settings.max_recipients),
@@ -758,10 +806,12 @@ def api_generate_fake_history() -> dict[str, Any]:
 
 
 @app.post("/api/history/prune")
-def api_prune_history() -> dict[str, Any]:
-    """Вручную удаляет реальные динамические наблюдения старше 20 дней."""
-    tracking_result = db.prune_dynamic_history()
-    table_result = table_history_db.prune_dynamic_history()
+def api_prune_history(keep_days: int | None = Query(default=None, ge=20, le=36500)) -> dict[str, Any]:
+    """Удаляет старую историю, сохраняя не менее 20 календарных дней."""
+    # При прямом вызове функции (без FastAPI) используется сохранённый срок.
+    days = keep_days if isinstance(keep_days, int) else store.current().history_keep_days
+    tracking_result = db.prune_dynamic_history(days)
+    table_result = table_history_db.prune_dynamic_history(days)
     if tracking_result["polls_deleted"]:
         db.compact()
     if table_result["snapshots_deleted"]:

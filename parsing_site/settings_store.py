@@ -80,6 +80,11 @@ class RuntimeSettings:
     site: str = "http://127.0.0.1:8000"
     cdp_url: str = "http://127.0.0.1:9222"
     interval_seconds: float = 2.0
+    speedup_enabled: bool = False
+    speedup_disable_max: bool = True
+    speedup_disable_screenshots: bool = True
+    speedup_disable_html: bool = True
+    history_keep_days: int = 20
     threshold: float = 500.0
     warning_distance: float = 1000.0
     blue_distance: float = 350.0
@@ -130,6 +135,18 @@ class RuntimeSettings:
         payload["max_token"] = ""
         payload["max_token_set"] = bool(resolve_max_token(self))
         return payload
+
+    def effective(self) -> RuntimeSettings:
+        """Временно приостанавливает выбранные функции, сохраняя предпочтения."""
+        if not self.speedup_enabled:
+            return self
+        return replace(
+            self,
+            max_enabled=self.max_enabled and not self.speedup_disable_max,
+            screenshot_enabled=self.screenshot_enabled and not self.speedup_disable_screenshots,
+            archive_html_enabled=self.archive_html_enabled and not self.speedup_disable_html,
+            scan_debug_html_enabled=self.scan_debug_html_enabled and not self.speedup_disable_html,
+        )
 
     def to_app_config(self, base: AppConfig | None = None) -> AppConfig:
         """Накладывает runtime-настройки на полную конфигурацию приложения."""
@@ -328,6 +345,11 @@ def from_dict(data: dict[str, Any]) -> RuntimeSettings:
         site=str(data.get("site", "http://127.0.0.1:8000")),
         cdp_url=str(data.get("cdp_url", "http://127.0.0.1:9222")),
         interval_seconds=float(data.get("interval_seconds", 2)),
+        speedup_enabled=bool(data.get("speedup_enabled", False)),
+        speedup_disable_max=bool(data.get("speedup_disable_max", True)),
+        speedup_disable_screenshots=bool(data.get("speedup_disable_screenshots", True)),
+        speedup_disable_html=bool(data.get("speedup_disable_html", True)),
+        history_keep_days=int(data.get("history_keep_days", 20)),
         threshold=threshold,
         warning_distance=warning_distance,
         blue_distance=blue_distance,
@@ -386,6 +408,8 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
         raise ValueError("Укажите адрес CDP браузера.")
     if settings.interval_seconds < 0.4:
         raise ValueError("Интервал парсинга должен быть не меньше 0.4 с.")
+    if not 20 <= settings.history_keep_days <= 36500:
+        raise ValueError("Срок хранения истории должен быть от 20 до 36500 дней.")
     if not 0.2 <= settings.scan_wait_seconds <= 10:
         raise ValueError("Задержка на точке должна быть от 0.2 до 10 с.")
     if not 4 <= settings.scan_max_zoom <= 18:
@@ -496,6 +520,11 @@ def validate_settings(settings: RuntimeSettings) -> RuntimeSettings:
         site=site,
         cdp_url=cdp_url,
         interval_seconds=float(settings.interval_seconds),
+        speedup_enabled=bool(settings.speedup_enabled),
+        speedup_disable_max=bool(settings.speedup_disable_max),
+        speedup_disable_screenshots=bool(settings.speedup_disable_screenshots),
+        speedup_disable_html=bool(settings.speedup_disable_html),
+        history_keep_days=int(settings.history_keep_days),
         threshold=float(settings.threshold),
         warning_distance=float(warning),
         blue_distance=float(blue),

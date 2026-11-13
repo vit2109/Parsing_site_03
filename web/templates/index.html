@@ -5,7 +5,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Мониторинг объектов</title>
-    <link rel="stylesheet" href="/static/css/app.css?v=10" />
+    <link rel="stylesheet" href="/static/css/app.css?v=11" />
   </head>
   <body>
     <div class="app">
@@ -20,12 +20,9 @@
         </div>
         <div class="topbar__actions">
           <a class="btn btn-history" href="/history">Хронология</a>
-          <a class="btn btn-history" href="/max-logs">Журнал MAX</a>
-          <a class="btn btn-history" href="/simulator" target="_blank" rel="noopener">Тренажёр карты</a>
           <button id="btn-start" class="btn btn-primary" type="button">Запустить</button>
           <button id="btn-stop" class="btn" type="button" disabled>Стоп</button>
-          <button id="btn-test-html" class="btn" type="button">Тест HTML</button>
-          <button id="btn-prune-history" class="btn" type="button" title="Оставить историю за последние 20 дней">Очистить старую историю</button>
+          <button id="btn-speedup" class="btn" type="button" aria-pressed="false">Ускорить работу</button>
           <button id="btn-settings" class="btn btn-ghost" type="button">Настройки</button>
         </div>
       </header>
@@ -38,8 +35,6 @@
         <article><span>Синих</span><strong id="stat-blue">0</strong></article>
         <article><span>Интервал</span><strong id="stat-interval">{{ settings.interval_seconds }} с</strong></article>
         <article><span>Опросов</span><strong id="stat-polls">0</strong></article>
-        <article title="Оценка по текущему интервалу обновления"><span>Строк истории / сутки</span><strong id="stat-history-rows-day">0</strong></article>
-        <article title="Отдельная база table_history.db"><span>Объём БД / сутки</span><strong id="stat-history-size-day">0 Б</strong></article>
       </section>
 
       <p id="error-banner" class="error-banner" hidden></p>
@@ -69,7 +64,7 @@
               </tr>
             </thead>
             <tbody id="distance-body">
-              <tr class="empty"><td colspan="10">Нет данных. Запустите парсинг или «Тест HTML».</td></tr>
+              <tr class="empty"><td colspan="10">Нет данных. Запустите парсинг или откройте «Тест HTML» в настройках.</td></tr>
             </tbody>
           </table>
         </div>
@@ -119,6 +114,7 @@
           <button class="settings-tab" type="button" role="tab" id="tab-archive" aria-controls="panel-archive" aria-selected="false" tabindex="-1">Снимки и HTML</button>
           <button class="settings-tab" type="button" role="tab" id="tab-objects" aria-controls="panel-objects" aria-selected="false" tabindex="-1">Объекты и зоны</button>
           <button class="settings-tab" type="button" role="tab" id="tab-max" aria-controls="panel-max" aria-selected="false" tabindex="-1">Оповещения MAX</button>
+          <button class="settings-tab" type="button" role="tab" id="tab-service" aria-controls="panel-service" aria-selected="false" tabindex="-1">Сервис и ускорение</button>
         </nav>
         <div class="settings-content">
         <section class="settings-panel" id="panel-connection" role="tabpanel" aria-labelledby="tab-connection">
@@ -155,8 +151,9 @@
           </label>
           <label>
             Время парсинга, сек
-            <input name="interval_seconds" type="number" min="0.4" step="0.1" required value="{{ settings.interval_seconds }}" />
+            <input name="interval_seconds" type="number" min="0.4" max="600" step="0.1" required value="{{ settings.interval_seconds }}" />
           </label>
+          <p class="muted">Интервал задаёт минимальное время между началами обходов. Найденные объекты появляются в таблице во время обхода; если он длится дольше интервала, следующий начинается сразу после завершения.</p>
           </div>
         </section>
         <section class="settings-panel" id="panel-scan" role="tabpanel" aria-labelledby="tab-scan" hidden>
@@ -259,15 +256,15 @@
           <div class="form-grid">
           <label>
             Красный порог (км в latlng, иначе px)
-            <input name="threshold" type="number" min="0.001" step="0.1" required value="{{ settings.threshold }}" />
+            <input name="threshold" type="number" min="0.001" step="any" required value="{{ settings.threshold }}" />
           </label>
           <label>
             Жёлтый порог (км в latlng, иначе px)
-            <input name="warning_distance" type="number" min="0.001" step="0.1" required value="{{ settings.warning_distance }}" />
+            <input name="warning_distance" type="number" min="0.001" step="any" required value="{{ settings.warning_distance }}" />
           </label>
           <label>
             Синий порог (км, не меньше жёлтого)
-            <input name="blue_distance" type="number" min="0.001" step="0.1" required value="{{ settings.blue_distance }}" />
+            <input name="blue_distance" type="number" min="0.001" step="any" required value="{{ settings.blue_distance }}" />
           </label>
           <label>
             Эталонный zoom Leaflet (0 = не проверять)
@@ -331,6 +328,35 @@
           <div id="max-recipient-list"></div>
         </div>
         </section>
+        <section class="settings-panel" id="panel-service" role="tabpanel" aria-labelledby="tab-service" hidden>
+          <div class="settings-panel__intro"><h3>Сервис и ускорение</h3><p>Выберите функции, которые приостанавливаются кнопкой «Ускорить работу» на главном экране.</p></div>
+          <div class="static-block">
+            <h4 class="settings-subheading">При ускорении отключать</h4>
+            <label class="checkbox"><input name="speedup_disable_max" type="checkbox" />Автоматические оповещения MAX</label>
+            <label class="checkbox"><input name="speedup_disable_screenshots" type="checkbox" />Скриншоты карты и снимки для MAX</label>
+            <label class="checkbox"><input name="speedup_disable_html" type="checkbox" />Сохранение HTML и HTML отладки обхода</label>
+            <p class="muted">Повторное нажатие восстанавливает обычные настройки функций. Режим сохраняется после перезапуска. Изменения применяются на ближайшем шаге обхода; уже выполняющаяся операция может завершиться.</p>
+          </div>
+          <div class="static-block service-actions">
+            <h4 class="settings-subheading">Дополнительные инструменты</h4>
+            <a class="btn btn-history" href="/max-logs" target="_blank" rel="noopener">Журнал MAX</a>
+            <a class="btn btn-history" href="/simulator" target="_blank" rel="noopener">Тренажёр карты</a>
+            <button id="btn-test-html" class="btn" type="button">Тест HTML</button>
+            <p id="service-feedback" class="muted" role="status"></p>
+          </div>
+          <div class="static-block">
+            <h4 class="settings-subheading">История</h4>
+            <label>Хранить последние дни (не менее 20)
+              <input name="history_keep_days" type="number" min="20" max="36500" step="1" required value="{{ settings.history_keep_days }}" />
+            </label>
+            <p class="muted">Сохранённый срок используется при автоматической очистке. Кнопка ниже сразу очищает обе базы по указанному сроку.</p>
+            <button id="btn-prune-history" class="btn" type="button">Очистить старую историю</button>
+            <section class="stats service-stats" aria-label="Объём истории">
+              <article title="Оценка по текущему интервалу обновления"><span>Строк истории / сутки</span><strong id="stat-history-rows-day">0</strong></article>
+              <article title="Отдельная база table_history.db"><span>Объём БД / сутки</span><strong id="stat-history-size-day">0 Б</strong></article>
+            </section>
+          </div>
+        </section>
         </div>
         <p id="settings-error" class="form-error" hidden></p>
         <footer>
@@ -344,6 +370,6 @@
     <script>
       window.__INITIAL_SETTINGS__ = {{ settings | tojson }};
     </script>
-    <script src="/static/js/app.js?v=14"></script>
+    <script src="/static/js/app.js?v=15"></script>
   </body>
 </html>

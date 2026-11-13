@@ -3,6 +3,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const extract = eval(fs.readFileSync(process.argv[2], 'utf8'));
 const nativeSetTimeout = global.setTimeout;
+const progressMessages = [];
+console.debug = (message) => {
+  assert.ok(message.startsWith('test-progress:'));
+  progressMessages.push(JSON.parse(message.slice('test-progress:'.length)));
+};
 
 async function check(initialZoom, mapDiscoverable = true, crowded = false, overlapping = false,
   sameNumber = false, denseUnique = false, bounded = false, mixedLabels = false,
@@ -169,6 +174,7 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
     return;
   }
   const result = await extract({
+    progressPrefix: 'test-progress:',
     mode: 'latlng', mapContainer: '.leaflet-container',
     dynamic: '.leaflet-marker-icon.map-incident', static: '.static',
     staticObjects: remoteStatics ? [0, 80].map(lng => ({lat: 50, lng}))
@@ -336,4 +342,7 @@ async function check(initialZoom, mapDiscoverable = true, crowded = false, overl
   assert.ok(grouped.zoomInMoves < plain.zoomInMoves,
     `grouped route must use fewer zooms: ${grouped.zoomInMoves} vs ${plain.zoomInMoves}`);
   console.log('Leaflet scan: both zoom cases passed');
+  assert.ok(progressMessages.length > 0, 'scan must publish data before completion');
+  assert.ok(progressMessages.every(scene => scene.scan.status === 'running'));
+  assert.ok(progressMessages.some(scene => scene.dynamics.length > 0));
 })().catch((error) => {console.error(error); process.exitCode = 1;});

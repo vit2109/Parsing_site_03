@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from urllib.parse import urlparse
 
 DEFAULT_WEB_PORT = 8082
 DEFAULT_CDP_PORT = 9222
@@ -98,9 +99,33 @@ def launcher_request(managed: ManagedTarget, action: str, timeout: float = 2) ->
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.status == 200
-    except (OSError, urllib.error.URLError):
+            payload = json.loads(response.read(8192))
+            return response.status == 200 and isinstance(payload, dict) and bool(
+                payload.get("managed") if action == "status" else payload.get("stopping")
+            )
+    except (OSError, ValueError, urllib.error.URLError):
         return False
+
+
+def discover_target(backend: Path, target: Target) -> ManagedTarget | None:
+    """Подхватывает внешнее приложение только после проверки локального ключа."""
+    path = backend.parent / "data" / f"launcher-{target.web_port}.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("application") != "parsing-site" or payload.get("web_port") != target.web_port:
+            return None
+        token = payload["token"]
+        if not isinstance(token, str) or not token:
+            return None
+        instance = payload.get("instance")
+        label = target.label if instance == target.instance else (
+            f"Программа {instance}" if instance else "Основная программа"
+        )
+        cdp_port = urlparse(payload["cdp_url"]).port or DEFAULT_CDP_PORT
+        managed = ManagedTarget(Target(label, target.web_port, cdp_port, instance), token)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+    return managed if launcher_request(managed, "status") else None
 
 
 def stop_target(managed: ManagedTarget) -> None:
@@ -160,14 +185,26 @@ def start_targets(
     backend: Path, targets: list[Target], start_browser: bool,
     report: Callable[[str], None],
 ) -> list[ManagedTarget]:
-    """Запускает Chrome, затем веб-серверы; при ошибке убирает свои серверы."""
+    """Подхватывает работающие приложения и запускает недостающие экземпляры."""
     base_command = backend_command(backend)
+    adopted: list[ManagedTarget] = []
+    pending: list[Target] = []
     for target in targets:
         if port_occupied(target.web_port):
-            raise RuntimeError(f"Порт интерфейса {target.web_port} уже занят.")
+            managed = discover_target(backend, target)
+            if managed is None:
+                raise RuntimeError(
+                    f"Порт интерфейса {target.web_port} уже занят. "
+                    "Не удалось подтвердить управление Parsing Site. "
+                    "Для старой версии приложения требуется перезапуск обновлённой программы."
+                )
+            adopted.append(managed)
+            report(f"Подключено работающее приложение на порту {target.web_port}")
+        else:
+            pending.append(target)
 
     if start_browser:
-        for target in targets:
+        for target in pending:
             report(f"Запуск браузера для {target.label} (CDP {target.cdp_port})…")
             completed = subprocess.run(
                 [*base_command, "chrome", "--port", str(target.cdp_port)],
@@ -183,7 +220,7 @@ def start_targets(
 
     started: list[ManagedTarget] = []
     try:
-        for target in targets:
+        for target in pending:
             report(f"Запуск: {target.label} (порт {target.web_port})…")
             arguments = [*base_command, "web", "--port", str(target.web_port)]
             if target.instance:
@@ -221,7 +258,7 @@ def start_targets(
             if process.poll() is None:
                 process.terminate()
         raise
-    return started
+    return adopted + started
 
 
 class LauncherApp:
@@ -243,11 +280,55 @@ class LauncherApp:
         self.status = tk.StringVar(value="Готово к запуску")
         self._launching = False
         self._stopping = False
+        self._operation_revision = 0
         self._managed = self._read_managed()
         self._build()
         self._mode_changed()
         self._refresh_stop_buttons()
         self.root.protocol("WM_DELETE_WINDOW", self._close)
+        self.root.after(100, self._discover_running)
+
+    def _discover_running(self) -> None:
+        """Ищет внешние запуски в фоне, сохраняя отзывчивость окна."""
+        if self._launching or self._stopping:
+            self.root.after(3000, self._discover_running)
+            return
+        try:
+            targets = build_targets(self.two.get(), (
+                self.web_a.get(), self.cdp_a.get(), self.web_b.get(), self.cdp_b.get(),
+            ))
+        except ValueError:
+            targets = []
+        backend = Path(self.backend.get()).expanduser().resolve()
+        known = {item.target.web_port: item for item in self._managed}
+        operation_revision = self._operation_revision
+        candidates = {item.web_port: item for item in targets}
+        candidates.update({port: item.target for port, item in known.items()})
+
+        def run() -> None:
+            found = []
+            for web_port, target in candidates.items():
+                existing = known.get(web_port)
+                if existing is not None and launcher_request(existing, "status", timeout=0.5):
+                    found.append(existing)
+                else:
+                    adopted = discover_target(backend, target)
+                    if adopted is not None:
+                        found.append(adopted)
+            self.root.after(0, finish, found)
+
+        def finish(found: list[ManagedTarget]) -> None:
+            if (not self._launching and not self._stopping
+                    and self._operation_revision == operation_revision):
+                self._managed = found
+                self._refresh_stop_buttons()
+                if found:
+                    self.status.set("Подключены программы: " + ", ".join(
+                        str(item.target.web_port) for item in found
+                    ))
+            self.root.after(5000, self._discover_running)
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _configure_style(self) -> None:
         style = ttk.Style(self.root)
@@ -394,6 +475,7 @@ class LauncherApp:
         if self._launching or self._stopping:
             return
         self._stopping = True
+        self._operation_revision += 1
         self.start_button.configure(state="disabled")
         self.status.set(f"Остановка {managed.target.label}…")
 
@@ -433,6 +515,7 @@ class LauncherApp:
         if self._stopping:
             return
         self._launching = True
+        self._operation_revision += 1
         self.start_button.configure(state="disabled")
         self.status.set("Подготовка запуска…")
 
@@ -457,6 +540,8 @@ class LauncherApp:
             self.status.set("Ошибка запуска")
             messagebox.showerror("Не удалось запустить", error, parent=self.root)
             return
+        ports = {item.target.web_port for item in started or []}
+        self._managed = [item for item in self._managed if item.target.web_port not in ports]
         self._managed.extend(started or [])
         self._refresh_stop_buttons()
         urls = ", ".join(

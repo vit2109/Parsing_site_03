@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import base64
+import json
 import re
+import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from parsing_site.cdp_check import cdp_endpoint_ok, format_cdp_help
 from parsing_site.config import BrowserConfig, TrackingConfig
@@ -107,6 +109,32 @@ class BrowserSession:
         self.scan_debug_error = ""
         self.numbered_capture_error = ""
         self.numbered_html_error = ""
+        self._on_progress: Callable[[dict], None] | None = None
+        self._progress_page: Page | None = None
+        self._progress_prefix = "parsing-site-progress-" + secrets.token_hex(12) + ":"
+        self._capture_preferences: Callable[[], Any] | None = None
+
+    def prepare_capture_preferences(self, provider: Callable[[], Any]) -> None:
+        self._capture_preferences = provider
+
+    def _refresh_capture_preferences(self) -> None:
+        if self._capture_preferences is None:
+            return
+        settings = self._capture_preferences().effective()
+        self._numbered_size = (settings.screenshot_width, settings.screenshot_height) \
+            if settings.screenshot_enabled else None
+        self._numbered_html_enabled = settings.archive_html_enabled
+        if not settings.scan_debug_html_enabled:
+            self._scan_debug_capture = None
+
+    def prepare_progress(self, callback: Callable[[dict], None]) -> None:
+        """Передаёт текущие результаты без ожидания завершения обхода."""
+        self._on_progress = callback
+
+    def _receive_progress(self, message: Any) -> None:
+        text = message.text
+        if self._on_progress is not None and text.startswith(self._progress_prefix):
+            self._on_progress(json.loads(text[len(self._progress_prefix):]))
 
     def prepare_numbered_capture(
         self, size: tuple[int, int] | None, html_enabled: bool = False,
@@ -163,6 +191,9 @@ class BrowserSession:
     def close(self) -> None:
         """Останавливает Playwright, оставляя окно Chrome открытым."""
         # Не вызываем browser.close(): для CDP это закрыло бы окно пользователя.
+        if self._progress_page is not None:
+            self._progress_page.remove_listener("console", self._receive_progress)
+            self._progress_page = None
         self._browser = None
         self._page = None
         if self._playwright is not None:
@@ -217,6 +248,11 @@ class BrowserSession:
             title=page.title(),
             html="",
         )
+        if self._on_progress is not None and self._progress_page is not page:
+            if self._progress_page is not None:
+                self._progress_page.remove_listener("console", self._receive_progress)
+            page.on("console", self._receive_progress)
+            self._progress_page = page
         if followed and expected_count and has_tracked_tab:
             overview = extract_scene_from_page(page, tracking, scan_numbers=False)
             self._capture_scan_debug(page, overview, "followed_overview")
@@ -238,8 +274,11 @@ class BrowserSession:
                     on_debug_view=(
                         lambda scene, phase: self._capture_scan_debug(page, scene, phase)
                     ) if self._scan_debug_capture else None,
+                    on_progress=self._on_progress,
+                    progress_prefix=self._progress_prefix if self._on_progress else "",
                 )
                 scan = raw.get("scan") or {}
+                self._refresh_capture_preferences()
                 for view in scan.pop("debug_views", []):
                     if self._scan_debug_capture is not None:
                         html = view.pop("html", "")
@@ -319,6 +358,7 @@ class BrowserSession:
 
     def _capture_scan_debug(self, page: Page, scene: dict, phase: str) -> None:
         """Сохраняет состояние карты после шага обхода мышью."""
+        self._refresh_capture_preferences()
         if self._scan_debug_capture is None:
             return
         try:
@@ -333,6 +373,7 @@ class BrowserSession:
 
     def _capture_scan_debug_live(self, page: Page, phase: str) -> None:
         """Снимает HTML после перемещения карты для архива или MAX."""
+        self._refresh_capture_preferences()
         if self._scan_debug_capture is None:
             return
         try:
@@ -351,7 +392,8 @@ class BrowserSession:
 
     def _capture_mouse_numbered(self, page: Page, scene: dict, selector: str) -> bool:
         """Снимает архив прямо во время приближения мышью."""
-        if self._numbered_size is None and self._numbered_html_captured:
+        self._refresh_capture_preferences()
+        if self._numbered_size is None and (not self._numbered_html_enabled or self._numbered_html_captured):
             return True
         zoom = scene.get("map_zoom")
         if zoom is None:
@@ -366,6 +408,9 @@ class BrowserSession:
         required_point: tuple[float, float] | None = None,
     ) -> bool:
         """Берёт HTML и JPEG только при наличии видимой подписи в DOM."""
+        self._refresh_capture_preferences()
+        if self._numbered_size is None and not self._numbered_html_enabled:
+            return False
         try:
             labels = page.evaluate(_VISIBLE_NUMBERS_SCRIPT, selector)
             if not labels:

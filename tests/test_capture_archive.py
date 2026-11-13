@@ -156,7 +156,7 @@ class CaptureArchiveTest(unittest.TestCase):
                 return Tab()
 
         with TemporaryDirectory() as directory, \
-                patch("parsing_site.capture_archive.ROOT", Path(directory)):
+                patch("parsing_site.capture_archive.instance_data_dir", return_value=Path(directory) / "data"):
             archive = ScanDebugArchive(datetime(2026, 10, 30, 12, 0, tzinfo=UTC))
             session = BrowserSession(BrowserConfig())
             session.prepare_scan_debug(archive.record)

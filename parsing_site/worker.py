@@ -14,7 +14,11 @@ from parsing_site.db import Database
 from parsing_site.max_bot import PHOTO_MISSING_NOTE, MaxAlertEngine, MaxDispatch
 from parsing_site.settings_store import SettingsStore, resolve_max_token
 from parsing_site.table_history_db import TableHistoryDatabase
-from parsing_site.tracking import capture_snapshot, snapshot_to_dict
+from parsing_site.tracking import (
+    build_tracking_snapshot,
+    capture_snapshot,
+    snapshot_to_dict,
+)
 
 
 class ParseWorker:
@@ -37,6 +41,7 @@ class ParseWorker:
         self._status = "stopped"
         self._error = ""
         self._polls = 0
+        self._revision = 0
         self._max_poll: dict[str, Any] | None = None
         self._max_dispatch = MaxDispatch(db.add_log, store.current, db)
 
@@ -55,6 +60,7 @@ class ParseWorker:
                 "polls": self._polls,
                 "snapshot": self._latest,
                 "max_poll": self._max_poll,
+                "revision": self._revision,
             }
 
     def start(self) -> None:
@@ -110,6 +116,7 @@ class ParseWorker:
         payload["table_snapshot_id"] = table_snapshot_id
         with self._lock:
             self._latest = payload
+            self._revision += 1
             self._error = ""
             self._status = "stopped"
         self._db.add_log(
@@ -159,7 +166,7 @@ class ParseWorker:
                     first_poll = True
                     while not self._stop.is_set():
                         started = monotonic()
-                        settings = self._store.current()
+                        settings = self._store.current().effective()
                         if (
                             settings.site,
                             settings.cdp_url,
@@ -173,7 +180,10 @@ class ParseWorker:
                             break
                         cfg = settings.to_app_config(load_config())
                         interval = max(0.4, settings.interval_seconds)
-                        archive = CaptureArchive(settings)
+                        archive = CaptureArchive(settings, self._store.current)
+                        prepare_preferences = getattr(session, "prepare_capture_preferences", None)
+                        if callable(prepare_preferences):
+                            prepare_preferences(self._store.current)
                         debug_archive = ScanDebugArchive() if settings.scan_debug_html_enabled else None
                         session.prepare_numbered_capture(
                             (settings.screenshot_width, settings.screenshot_height)
@@ -184,19 +194,44 @@ class ParseWorker:
                         prepare_debug = getattr(session, "prepare_scan_debug", None)
                         if callable(prepare_debug):
                             prepare_debug(debug_archive.record if debug_archive else None)
+                        last_progress = 0.0
+
+                        def publish_progress(raw: dict[str, Any], *,
+                                             site: str = settings.site,
+                                             tracking: Any = cfg.tracking) -> None:
+                            nonlocal last_progress
+                            now = monotonic()
+                            if self._stop.is_set() or now - last_progress < 1:
+                                return
+                            last_progress = now
+                            progress = build_tracking_snapshot(
+                                url=site, title="Обход карты", raw=raw,
+                                tracking=tracking,
+                            )
+                            payload = snapshot_to_dict(progress)
+                            payload["in_progress"] = True
+                            with self._lock:
+                                self._latest = payload
+                                self._revision += 1
+
+                        prepare_progress = getattr(session, "prepare_progress", None)
+                        if callable(prepare_progress):
+                            prepare_progress(publish_progress)
                         snapshot = capture_snapshot(session, cfg.tracking)
+                        settings = self._store.current().effective()
                         current_day = datetime.now().astimezone().date().isoformat()
                         if current_day != previous_day:
                             previous = {}
                             previous_day = current_day
-                            self._db.prune_dynamic_history()
-                            self._table_history.prune_dynamic_history()
+                            self._db.prune_dynamic_history(settings.history_keep_days)
+                            self._table_history.prune_dynamic_history(settings.history_keep_days)
                         poll_id = self._db.save_snapshot(snapshot, previous)
                         self._table_history.save_snapshot(snapshot)
                         with self._lock:
                             self._polls += 1
                             self._latest = snapshot_to_dict(snapshot)
                             self._latest["poll_id"] = poll_id
+                            self._revision += 1
                             self._max_poll = None
                             self._status = "running"
                             self._error = ""
@@ -216,6 +251,9 @@ class ParseWorker:
                         for delivery in sorted(deliveries, key=lambda item: priority.get(
                             row_status.get((item.dynamic_index, item.nearest_static_index)), 3,
                         )):
+                            current = self._store.current().effective()
+                            if not current.max_enabled or not current.screenshot_enabled:
+                                break
                             static = delivery.nearest_static
                             dynamic = dynamics.get(delivery.dynamic_index)
                             if (delivery.screenshot is not None or static is None

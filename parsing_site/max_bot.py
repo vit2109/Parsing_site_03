@@ -356,7 +356,7 @@ class MaxDispatch:
         while True:
             delivery = self._queue.get()
             try:
-                settings = self._current_settings()
+                settings = self._current_settings().effective()
                 if not delivery.test and (not settings.max_enabled or not any(
                     recipient.user_id == delivery.user_id
                     for recipient in settings.max_recipients
