@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 from time import monotonic, sleep
 from typing import TYPE_CHECKING
 
@@ -206,7 +207,25 @@ def _web(extra: list[str]) -> int:
     print(f"Интерфейс: http://127.0.0.1:{port}")
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, reload=False))
     app.state.uvicorn_server = server
-    server.run()
+    from parsing_site.config import instance_data_dir
+
+    startup_logger = logging.getLogger("uvicorn.error")
+    startup_handler = None
+    try:
+        startup_handler = RotatingFileHandler(
+            instance_data_dir() / "startup.log", maxBytes=1_000_000, backupCount=2, encoding="utf-8",
+        )
+        startup_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        startup_logger.addHandler(startup_handler)
+    except OSError as exc:
+        startup_logger.warning("Не удалось создать журнал запуска: %s", exc)
+    try:
+        startup_logger.info("Запуск PID %s; каталог данных: %s", os.getpid(), instance_data_dir())
+        server.run()
+    finally:
+        if startup_handler is not None:
+            startup_logger.removeHandler(startup_handler)
+            startup_handler.close()
     return 0
 
 

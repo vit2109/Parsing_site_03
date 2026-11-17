@@ -12,6 +12,7 @@ from parsing_site.capture_archive import CaptureArchive, ScanDebugArchive
 from parsing_site.config import load_config
 from parsing_site.db import Database
 from parsing_site.max_bot import PHOTO_MISSING_NOTE, MaxAlertEngine, MaxDispatch
+from parsing_site.scan_diagnostics import scan_pass, scan_progress, timed_call
 from parsing_site.settings_store import SettingsStore, resolve_max_token
 from parsing_site.table_history_db import TableHistoryDatabase
 from parsing_site.tracking import (
@@ -135,6 +136,7 @@ class ParseWorker:
 
     def _run(self) -> None:
         """Подключается к Chrome, опрашивает вкладку и переподключается после ошибок."""
+        poll_attempt = 0
         while not self._stop.is_set():
             # Новое подключение может указывать на другой сайт или другой порядок
             # DOM-маркеров. Не считаем перемещение относительно прежней сессии.
@@ -165,6 +167,7 @@ class ParseWorker:
                     )
                     first_poll = True
                     while not self._stop.is_set():
+                        poll_attempt += 1
                         started = monotonic()
                         settings = self._store.current().effective()
                         if (
@@ -217,16 +220,24 @@ class ParseWorker:
                         prepare_progress = getattr(session, "prepare_progress", None)
                         if callable(prepare_progress):
                             prepare_progress(publish_progress)
-                        snapshot = capture_snapshot(session, cfg.tracking)
-                        settings = self._store.current().effective()
-                        current_day = datetime.now().astimezone().date().isoformat()
-                        if current_day != previous_day:
-                            previous = {}
-                            previous_day = current_day
-                            self._db.prune_dynamic_history(settings.history_keep_days)
-                            self._table_history.prune_dynamic_history(settings.history_keep_days)
-                        poll_id = self._db.save_snapshot(snapshot, previous)
-                        self._table_history.save_snapshot(snapshot)
+                        with scan_pass(
+                            poll_attempt if cfg.tracking.scan_mode == "followed_grid" else None,
+                        ):
+                            scan_progress("mode=followed_grid")
+                            snapshot = timed_call(
+                                "capture_snapshot", capture_snapshot, session, cfg.tracking,
+                            )
+                            settings = self._store.current().effective()
+                            current_day = datetime.now().astimezone().date().isoformat()
+                            if current_day != previous_day:
+                                previous = {}
+                                previous_day = current_day
+                            poll_id = timed_call(
+                                "sqlite.tracking", self._db.save_snapshot, snapshot, previous,
+                            )
+                            timed_call(
+                                "sqlite.table_history", self._table_history.save_snapshot, snapshot,
+                            )
                         with self._lock:
                             self._polls += 1
                             self._latest = snapshot_to_dict(snapshot)

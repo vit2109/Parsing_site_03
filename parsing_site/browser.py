@@ -20,6 +20,7 @@ from parsing_site.coordinates import (
     project_3857,
     unproject_3857,
 )
+from parsing_site.scan_diagnostics import timed_call
 from parsing_site.tracking import (
     _pan_mouse_to,
     extract_scene_from_page,
@@ -206,7 +207,7 @@ class BrowserSession:
         return PageSnapshot(
             url=page.url,
             title=page.title(),
-            html=page.content(),
+            html=timed_call("page.content", page.content),
         )
 
     def capture_html(self) -> str:
@@ -240,7 +241,7 @@ class BrowserSession:
                 general.first.click(timeout=self._config.wait_timeout_ms)
                 page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
         elif has_tracked_tab:
-            tracked_tab.first.click(timeout=self._config.wait_timeout_ms)
+            timed_call("followed_tab.click", tracked_tab.first.click, timeout=self._config.wait_timeout_ms)
             # После нажатия сайт обновляет слой маркеров асинхронно.
             page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
         snapshot = PageSnapshot(
@@ -258,7 +259,7 @@ class BrowserSession:
             self._capture_scan_debug(page, overview, "followed_overview")
             if len(overview.get("dynamics") or []) < expected_count:
                 # Повторяем только если сайт ещё не создал все маркеры после первого клика.
-                tracked_tab.first.click(timeout=self._config.wait_timeout_ms)
+                timed_call("followed_tab.click", tracked_tab.first.click, timeout=self._config.wait_timeout_ms)
                 page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
         if followed and expected_count == 0:
             raw = self._capture_empty_followed_scene(page, tracking)
@@ -292,7 +293,7 @@ class BrowserSession:
             finally:
                 if followed and has_tracked_tab:
                     for attempt in range(2):
-                        tracked_tab.first.click(timeout=self._config.wait_timeout_ms)
+                        timed_call("followed_tab.click", tracked_tab.first.click, timeout=self._config.wait_timeout_ms)
                         page.wait_for_timeout(round(
                             (tracking.scan_followed_click_interval_seconds
                              if attempt == 0 else tracking.scan_wait_seconds) * 1000
@@ -323,7 +324,7 @@ class BrowserSession:
         target = tracking.scan_empty_zoom
         zoom = raw.get("map_zoom")
         if zoom is not None and abs(float(zoom) - target) > 0.01:
-            changed = page.evaluate("""target => {
+            changed = timed_call("page.evaluate", page.evaluate, """target => {
               const map = window.__parsingSiteMap;
               if (!map || typeof map.setZoom !== 'function') return false;
               map.setZoom(target, {animate: false});
@@ -363,7 +364,7 @@ class BrowserSession:
             return
         try:
             map_raw = scene.get("map") or {}
-            self._scan_debug_capture(page.content(), {
+            self._scan_debug_capture(timed_call("page.content", page.content), {
                 "phase": phase, "zoom": scene.get("map_zoom"),
                 "center": map_raw.get("center"), "url": page.url,
                 "dynamic_count": len(scene.get("dynamics") or []),
@@ -377,14 +378,14 @@ class BrowserSession:
         if self._scan_debug_capture is None:
             return
         try:
-            view = page.evaluate("""() => {
+            view = timed_call("page.evaluate", page.evaluate, """() => {
               const map = window.__parsingSiteMap;
               if (!map) return null;
               const center = map.getCenter();
               return {zoom: map.getZoom(), center: {lat: center.lat, lng: center.lng}};
             }""")
             if isinstance(view, dict):
-                self._scan_debug_capture(page.content(), {
+                self._scan_debug_capture(timed_call("page.content", page.content), {
                     "phase": phase, **view, "url": page.url,
                 })
         except Exception as exc:  # noqa: BLE001 — отладка не прерывает опрос.
@@ -412,7 +413,7 @@ class BrowserSession:
         if self._numbered_size is None and not self._numbered_html_enabled:
             return False
         try:
-            labels = page.evaluate(_VISIBLE_NUMBERS_SCRIPT, selector)
+            labels = timed_call("page.evaluate", page.evaluate, _VISIBLE_NUMBERS_SCRIPT, selector)
             if not labels:
                 return False
             if required_number is not None and required_number not in labels:
@@ -427,7 +428,7 @@ class BrowserSession:
         if isinstance(labels, list):
             capture.numbers = tuple(sorted({int(number) for number in labels if int(number) > 0}))
         try:
-            raw_view = page.evaluate(_CAPTURE_VIEW_SCRIPT, selector)
+            raw_view = timed_call("page.evaluate", page.evaluate, _CAPTURE_VIEW_SCRIPT, selector)
             capture.view = map_view_from_raw(raw_view) if isinstance(raw_view, dict) else None
         except Exception:  # noqa: BLE001 — снимок допустим и без геометрии.
             capture.view = None
@@ -442,7 +443,7 @@ class BrowserSession:
                 return False
         if self._numbered_html_enabled and not self._numbered_html_captured:
             try:
-                capture.html = page.content()
+                capture.html = timed_call("page.content", page.content)
                 self._numbered_html_captured = True
             except Exception as exc:  # noqa: BLE001 — один архив не блокирует другой.
                 self.numbered_html_error = str(exc)
@@ -467,7 +468,7 @@ class BrowserSession:
             return False
         try:
             page = self._find_page()
-            original = page.evaluate("""() => {
+            original = timed_call("page.evaluate", page.evaluate, """() => {
               const map = window.__parsingSiteMap;
               if (!map || typeof map.fitBounds !== 'function') return null;
               const center = map.getCenter();
@@ -479,7 +480,7 @@ class BrowserSession:
         if not isinstance(original, dict):
             return self._capture_pair_with_mouse(page, number, dynamic, static, tracking)
         try:
-            page.evaluate("""points => {
+            timed_call("page.evaluate", page.evaluate, """points => {
               window.__parsingSiteMap.fitBounds(
                 [points.dynamic, points.static],
                 {padding: [64, 64], animate: false, maxZoom: points.maxZoom}
@@ -492,7 +493,7 @@ class BrowserSession:
                 page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
                 if _ == 0:
                     self._capture_scan_debug_live(page, "max_pair")
-                zoom = page.evaluate("() => window.__parsingSiteMap.getZoom()")
+                zoom = timed_call("page.evaluate", page.evaluate, "() => window.__parsingSiteMap.getZoom()")
                 if self._capture_visible_view(
                     page, tracking.map_container_selector, float(zoom),
                     required_number=number, required_point=static,
@@ -502,7 +503,7 @@ class BrowserSession:
             self.numbered_capture_error = str(exc)
         finally:
             try:
-                page.evaluate("""view => window.__parsingSiteMap.setView(
+                timed_call("page.evaluate", page.evaluate, """view => window.__parsingSiteMap.setView(
                   [view.lat, view.lng], view.zoom, {animate: false}
                 )""", original)
                 page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
@@ -654,7 +655,8 @@ class BrowserSession:
             return
         original = None
         try:
-            original = page.evaluate(
+            original = timed_call(
+                "page.evaluate", page.evaluate,
                 """() => {
                   const map = window.__parsingSiteMap;
                   if (!map || typeof map.setView !== 'function') return null;
@@ -679,7 +681,8 @@ class BrowserSession:
                     numbers = {int(number) for number in view.get("numbers", [])}
                     if numbers and numbers <= captured_numbers:
                         continue
-                    page.evaluate(
+                    timed_call(
+                "page.evaluate", page.evaluate,
                         """view => window.__parsingSiteMap.setView(
                           [view.lat, view.lng], view.zoom, {animate: false}
                         )""",
@@ -687,7 +690,8 @@ class BrowserSession:
                     )
                     page.wait_for_timeout(100)
                     self._capture_scan_debug_live(page, "archive_transit")
-                    page.evaluate(
+                    timed_call(
+                "page.evaluate", page.evaluate,
                         """view => window.__parsingSiteMap.setView(
                           [view.lat, view.lng], view.zoom, {animate: false}
                         )""",
@@ -712,7 +716,8 @@ class BrowserSession:
         finally:
             if original is not None:
                 try:
-                    page.evaluate(
+                    timed_call(
+                "page.evaluate", page.evaluate,
                         """view => window.__parsingSiteMap.setView(
                           [view.lat, view.lng], view.zoom, {animate: false}
                         )""",
@@ -720,7 +725,8 @@ class BrowserSession:
                          "zoom": transit_zoom},
                     )
                     page.wait_for_timeout(100)
-                    page.evaluate(
+                    timed_call(
+                "page.evaluate", page.evaluate,
                         """view => window.__parsingSiteMap.setView(
                           [view.lat, view.lng], view.zoom, {animate: false}
                         )""",
@@ -733,9 +739,13 @@ class BrowserSession:
     def capture_map_image(self, selector: str, max_width: int, max_height: int) -> bytes:
         """Снимок контейнера карты в JPEG, вписанный в заданный размер."""
         page = self._find_page()
-        png = page.locator(selector).first.screenshot(type="png", animations="disabled")
+        png = timed_call(
+            "locator.screenshot", page.locator(selector).first.screenshot,
+            type="png", animations="disabled",
+        )
         encoded = base64.b64encode(png).decode("ascii")
-        result = page.evaluate(
+        result = timed_call(
+                "page.evaluate", page.evaluate,
             """async ({encoded, maxWidth, maxHeight}) => {
               const bytes = Uint8Array.from(atob(encoded), c => c.charCodeAt(0));
               const image = await createImageBitmap(new Blob([bytes], {type: 'image/png'}));

@@ -40,6 +40,7 @@ hiddenimports = [
     "parsing_site.webapp",
     "parsing_site.launch_chrome",
     "parsing_site.launcher_registry",
+    "parsing_site.maintenance",
     "parsing_site.worker",
     "uvicorn",
     "uvicorn.logging",

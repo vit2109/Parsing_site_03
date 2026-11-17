@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import secrets
 from contextlib import asynccontextmanager
@@ -23,6 +24,7 @@ from parsing_site.history_capture import capture_history_maps
 from parsing_site.history_export import build_history_workbook
 from parsing_site.history_report import build_history_report
 from parsing_site.html_probe import analyze_html_file
+from parsing_site.maintenance import HistoryMaintenance
 from parsing_site.settings_store import (
     SETTINGS_EXPORT_FORMAT,
     SETTINGS_EXPORT_NAME,
@@ -38,17 +40,16 @@ db = Database()
 table_history_db = TableHistoryDatabase()
 store = SettingsStore(db)
 worker = ParseWorker(db, store, table_history_db)
+logger = logging.getLogger("uvicorn.error")
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Инициализирует данные при старте и освобождает ресурсы при остановке ASGI."""
-    db.mark_interrupted_max_deliveries()
+    logger.info("Запуск: загрузка настроек")
     settings = store.ensure_defaults(load_config())
-    db.prune_dynamic_history(settings.history_keep_days)
-    table_history_db.prune_dynamic_history(settings.history_keep_days)
-    db.ensure_fake_history()
-    db.add_log("INFO", "web", "Интерфейс запущен")
+    logger.info("Запуск: настройки загружены; обслуживание истории выполнится в фоне")
+    maintenance = HistoryMaintenance(db.path, table_history_db.path, store.current)
     server = getattr(_app.state, "uvicorn_server", None)
     registration = None
     registration_task = None
@@ -69,8 +70,11 @@ async def lifespan(_app: FastAPI):
 
         registration_task = asyncio.create_task(publish_registration())
     try:
+        maintenance.start()
+        logger.info("Запуск: приложение готово к открытию HTTP-порта")
         yield
     finally:
+        await asyncio.to_thread(maintenance.stop)
         if registration_task is not None:
             registration_task.cancel()
             await asyncio.gather(registration_task, return_exceptions=True)
@@ -394,6 +398,8 @@ def api_history_statics(
     source: str = Query(default="real", pattern="^(real|fake)$"),
 ) -> list[dict[str, Any]]:
     """Возвращает доступные статичные точки и объём их истории."""
+    if source == "fake":
+        db.ensure_fake_history()
     historical = {
         (int(item["static_index"]), str(item["static_name"])): item
         for item in db.list_history_statics(source)
@@ -456,6 +462,8 @@ def api_history(
             status_code=400, detail="Начало периода позже его окончания."
         )
     static_index, dynamic = _history_search_scope(static_index, dynamic)
+    if source == "fake":
+        db.ensure_fake_history()
     rows = db.list_distance_history(
         static_index=static_index,
         date_from=start.isoformat(timespec="seconds"),

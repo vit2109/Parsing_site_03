@@ -33,6 +33,7 @@ from parsing_site.coordinates import (
     unproject_3857,
 )
 from parsing_site.phone_loader import get_phone_for_static
+from parsing_site.scan_diagnostics import scan_progress, timed_call
 from parsing_site.scan_routes import group_static_points
 
 BLUE_ZONE_KM = 350.0
@@ -1047,7 +1048,8 @@ def extract_scene_from_page(
     grouped_route = group_static_points(
         tracking.static_objects, tracking.scan_group_radius_km,
     ) if tracking.scan_mode == "grouped_static" else []
-    return page.evaluate(
+    return timed_call(
+        "page.evaluate.scene", page.evaluate,
         _EXTRACT_SCRIPT,
         {
             "dynamic": tracking.dynamic_selector,
@@ -1314,9 +1316,9 @@ def extract_scene_with_mouse_scan(
         if previous_zoom is None or abs(previous_zoom - target_overview) < 0.01:
             break
         delta = 120 if previous_zoom > target_overview else -120
-        page.mouse.move(center_x, center_y)
-        page.mouse.wheel(0, delta)
-        page.wait_for_timeout(scan_wait_ms)
+        timed_call("page.mouse.move", page.mouse.move, center_x, center_y)
+        timed_call("page.mouse.wheel", page.mouse.wheel, 0, delta)
+        timed_call("page.wait_for_timeout", page.wait_for_timeout, scan_wait_ms)
         candidate = extract_scene_from_page(page, tracking, scan_numbers=False)
         emit_debug(candidate, "zoom_out" if delta > 0 else "zoom_in")
         current_zoom = _maybe_float(candidate.get("map_zoom"))
@@ -1360,12 +1362,13 @@ def extract_scene_with_mouse_scan(
             if point is not None and not (0 <= point[0] <= base_view.width
                                           and 0 <= point[1] <= base_view.height):
                 offscreen.append(item)
-        for group in _scan_target_groups(
+        for square, group in enumerate(_scan_target_groups(
             offscreen, base_view.width, base_view.height, scan_zoom_ceiling,
             grouped_centers,
-        ):
+        ), start=1):
             if overview_views >= scan_view_limit or monotonic() >= scan_deadline:
                 break
+            scan_progress("phase=offscreen square=%s targets=%s", square, len(group))
             target_lat, target_lng = _scan_group_center(
                 group, base_view.width, base_view.height, scan_zoom_ceiling,
                 grouped_centers,
@@ -1395,9 +1398,9 @@ def extract_scene_with_mouse_scan(
                 previous_zoom = _maybe_float(current.get("map_zoom"))
                 if previous_zoom is None or previous_zoom >= scan_zoom_ceiling:
                     break
-                page.mouse.move(anchor_x, anchor_y)
-                page.mouse.wheel(0, -120)
-                page.wait_for_timeout(scan_wait_ms)
+                timed_call("page.mouse.move", page.mouse.move, anchor_x, anchor_y)
+                timed_call("page.mouse.wheel", page.mouse.wheel, 0, -120)
+                timed_call("page.wait_for_timeout", page.wait_for_timeout, scan_wait_ms)
                 current = extract_scene_from_page(page, tracking, scan_numbers=False)
                 emit_debug(current, "zoom_in")
                 record_numbered(current)
@@ -1411,9 +1414,9 @@ def extract_scene_with_mouse_scan(
                 report_progress()
             overview_views += 1
             for _ in range(ticks):
-                page.mouse.move(anchor_x, anchor_y)
-                page.mouse.wheel(0, 120)
-                page.wait_for_timeout(scan_wait_ms)
+                timed_call("page.mouse.move", page.mouse.move, anchor_x, anchor_y)
+                timed_call("page.mouse.wheel", page.mouse.wheel, 0, 120)
+                timed_call("page.wait_for_timeout", page.wait_for_timeout, scan_wait_ms)
                 current = extract_scene_from_page(page, tracking, scan_numbers=False)
                 emit_debug(current, "zoom_out")
             overview = current
@@ -1423,9 +1426,9 @@ def extract_scene_with_mouse_scan(
                     on_view=debug_pan,
                 )
     for delta in reversed(overview_moves):
-        page.mouse.move(center_x, center_y)
-        page.mouse.wheel(0, -delta)
-        page.wait_for_timeout(scan_wait_ms)
+        timed_call("page.mouse.move", page.mouse.move, center_x, center_y)
+        timed_call("page.mouse.wheel", page.mouse.wheel, 0, -delta)
+        timed_call("page.wait_for_timeout", page.wait_for_timeout, scan_wait_ms)
         overview = extract_scene_from_page(page, tracking, scan_numbers=False)
         emit_debug(overview, "zoom_out" if delta < 0 else "zoom_in")
     restored_zoom = _maybe_float(overview.get("map_zoom"))
@@ -1461,9 +1464,9 @@ def extract_scene_with_mouse_scan(
     wheel_worked = False
 
     def scene_after_wheel(x: float, y: float, delta: int) -> dict[str, Any]:
-        page.mouse.move(x, y)
-        page.mouse.wheel(0, delta)
-        page.wait_for_timeout(scan_wait_ms)
+        timed_call("page.mouse.move", page.mouse.move, x, y)
+        timed_call("page.mouse.wheel", page.mouse.wheel, 0, delta)
+        timed_call("page.wait_for_timeout", page.wait_for_timeout, scan_wait_ms)
         scene = extract_scene_from_page(page, tracking, scan_numbers=False)
         emit_debug(scene, "zoom_in" if delta < 0 else "zoom_out")
         if delta < 0:
@@ -1473,19 +1476,20 @@ def extract_scene_with_mouse_scan(
             for _ in range(3):
                 if any(item["index"] > 0 for item in scene.get("dynamics") or []):
                     break
-                page.wait_for_timeout(scan_wait_ms)
+                timed_call("page.wait_for_timeout", page.wait_for_timeout, scan_wait_ms)
                 scene = extract_scene_from_page(page, tracking, scan_numbers=False)
                 record_numbered(scene)
         return scene
 
-    for group in _scan_target_groups(
+    for square, group in enumerate(_scan_target_groups(
         targets, base_view.width, base_view.height, scan_zoom_ceiling,
         grouped_centers,
-    ):
+    ), start=1):
         if views + overview_views >= scan_view_limit or monotonic() >= scan_deadline:
             break
         if all(item["index"] > 0 for item in group):
             continue
+        scan_progress("phase=visible square=%s targets=%s", square, len(group))
         target_lat, target_lng = _scan_group_center(
             group, base_view.width, base_view.height, scan_zoom_ceiling,
             grouped_centers,
@@ -1580,6 +1584,12 @@ def extract_scene_with_mouse_scan(
     _apply_number_cache(raw, number_cache)
     raw["unnumbered_dynamics"] = sum(item["index"] < 0 for item in raw["dynamics"])
     _remember_numbers(raw, number_cache)
+    scan_progress(
+        "result=%s views=%s numbered=%s total=%s budget_exhausted=%s",
+        scan["status"], scan["views"],
+        len(raw["dynamics"]) - raw["unnumbered_dynamics"],
+        len(raw["dynamics"]), scan["budget_exhausted"],
+    )
     return raw
 
 
@@ -1639,13 +1649,13 @@ def _pan_mouse_to(
             break
         start_x = float(map_raw.get("left") or 0) + view.width / 2
         start_y = float(map_raw.get("top") or 0) + view.height / 2
-        page.mouse.move(start_x, start_y)
-        page.mouse.down()
+        timed_call("page.mouse.move", page.mouse.move, start_x, start_y)
+        timed_call("page.mouse.down", page.mouse.down)
         try:
-            page.mouse.move(start_x + dx, start_y + dy, steps=5)
+            timed_call("page.mouse.move", page.mouse.move, start_x + dx, start_y + dy, steps=5)
         finally:
-            page.mouse.up()
-        page.wait_for_timeout(round(tracking.scan_wait_seconds * 1000))
+            timed_call("page.mouse.up", page.mouse.up)
+        timed_call("page.wait_for_timeout", page.wait_for_timeout, round(tracking.scan_wait_seconds * 1000))
         candidate = extract_scene_from_page(page, tracking, scan_numbers=False)
         if on_view is not None:
             on_view(candidate)
